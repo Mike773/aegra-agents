@@ -1,8 +1,8 @@
 {
   "graphs": {
-    "knowledge_agent": "./langgraph_executor/aegra_agents/knowledge_agent/graph.py:graph",
-    "json_analyzer": "./langgraph_executor/aegra_agents/json_analyzer/graph.py:graph",
-    "analytic_orchestrator": "./langgraph_executor/aegra_agents/analytic_orchestrator/graph.py:graph"
+    "knowledge_agent": "./graphs/knowledge_agent.py:graph",
+    "json_analyzer": "./graphs/json_analyzer.py:graph",
+    "analytic_orchestrator": "./graphs/analytic_orchestrator.py:graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",
