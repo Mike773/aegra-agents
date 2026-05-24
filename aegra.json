@@ -1,8 +1,8 @@
 {
   "graphs": {
-    "knowledge_agent": "./graphs/knowledge_agent.py:graph",
-    "json_analyzer": "./graphs/json_analyzer.py:graph",
-    "analytic_orchestrator": "./graphs/analytic_orchestrator.py:graph"
+    "knowledge_agent": "./link.py:knowledge_agent_graph",
+    "json_analyzer": "./link.py:json_analyzer_graph",
+    "analytic_orchestrator": "./link.py:analytic_orchestrator_graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",

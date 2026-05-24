@@ -22,6 +22,7 @@ API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
 ```
 .
 ├── aegra.json                                              # регистрация графов и http-приложения
+├── link.py                                                 # единая entry-точка: 3 переменные на 3 графа
 └── langgraph_executor/
     ├── agent/services/clients/gigachat.py                  # заглушка GigaChatClient (заменить на реальный)
     └── aegra_agents/
@@ -30,6 +31,23 @@ API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
         ├── json_analyzer/{state,prompts,nodes,graph}.py
         └── analytic_orchestrator/{state,prompts,nodes,graph}.py
 ```
+
+## Почему `link.py`, а не путь до `graph.py` напрямую
+
+Aegra (`aegra_api._load_graph_from_file`) ищет указанный путь по диску
+относительно CWD сервиса (обычно `/app/`). Если пакет с агентами
+**установлен** (pip) или **зашит в PyInstaller-бандл** — файлов `.py`
+по пути `./langgraph_executor/aegra_agents/...` на диске не будет, и
+загрузчик упадёт с `Graph file not found`.
+
+`link.py` решает обе проблемы:
+
+- сам **лежит** на диске в `/app/link.py` — aegra его находит;
+- внутри делает обычные `from … import graph as …` — это работает и
+  для pip-installed пакета, и для PyInstaller-бандла (его frozen-loader
+  регистрирует все зашитые модули в `sys.path`);
+- импорты в `link.py` служат **якорями** для анализа импортов
+  PyInstaller — иначе подпакет `aegra_agents` может не попасть в `_internal/`.
 
 ## Единый контракт каждого графа
 
