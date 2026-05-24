@@ -1,0 +1,12 @@
+{
+  "graphs": {
+    "knowledge_agent": "langgraph_executor.aegra_agents.knowledge_agent.graph:graph",
+    "json_analyzer": "langgraph_executor.aegra_agents.json_analyzer.graph:graph",
+    "analytic_orchestrator": "langgraph_executor.aegra_agents.analytic_orchestrator.graph:graph"
+  },
+  "http": {
+    "app": "langgraph_executor.plugins.app:app",
+    "enable_custom_route_auth": false
+  },
+  "plugins": {}
+}

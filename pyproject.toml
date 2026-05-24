@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegra-agents"
+version = "0.1.0"
+description = "Шаблоны LangGraph-агентов (knowledge / json / analytic_orchestrator) для self-hosted aegra с GigaChat"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.50",
+    "langchain-core>=0.3.0",
+    "langchain-gigachat>=0.3.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["langgraph_executor*"]
