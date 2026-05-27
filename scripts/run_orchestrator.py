@@ -32,9 +32,19 @@ def _print_event(event: dict) -> None:
             who = getattr(m, "type", m.__class__.__name__)
             text = getattr(m, "content", "") or ""
             print(f"  [{node}] {who}: {text}")
-        for key in ("intent", "metrics_error", "direction_key", "easyrag_error"):
+        for key in (
+            "intent",
+            "metrics_error",
+            "direction_key",
+            "easyrag_error",
+            "analytics_question",
+            "analytics_error",
+        ):
             if payload.get(key) is not None:
                 print(f"  [{node}] {key}={payload[key]!r}")
+        if payload.get("analytics_answer") is not None:
+            answer = payload["analytics_answer"]
+            print(f"  [{node}] analytics_answer: {len(answer)} симв.")
         snippets = payload.get("easyrag_snippets")
         if snippets is not None:
             print(f"  [{node}] easyrag_snippets: {len(snippets)} шт.")
@@ -69,6 +79,7 @@ async def main() -> int:
     state = graph.get_state(config)
     user_lines = iter([
         "Что в метриках выделяется сильнее всего?",
+        "А как у нас вообще считается этот показатель?",
         "Спасибо, на этом всё.",
     ])
     while state.next:

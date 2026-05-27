@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, TypedDict
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
-Intent = Literal["chat", "done"]
+Intent = Literal["analytics", "wiki", "chat", "done"]
 
 
 class OrchestratorState(TypedDict, total=False):
@@ -26,3 +26,10 @@ class OrchestratorState(TypedDict, total=False):
     easyrag_query: str | None
     easyrag_snippets: list[dict]
     easyrag_error: str | None
+
+    # Результат вызова json_analyzer-подграфа под последний аналитический вопрос.
+    # Sticky: не сбрасывается между циклами, пока следующий analytics-цикл не
+    # перезапишет — респондер использует самый свежий ответ.
+    analytics_question: str | None
+    analytics_answer: str | None
+    analytics_error: str | None

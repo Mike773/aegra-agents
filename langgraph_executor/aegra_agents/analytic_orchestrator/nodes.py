@@ -95,6 +95,9 @@ def make_ask_user_node():
     return ask_user
 
 
+_ROUTE_LABELS = {"analytics", "wiki", "chat", "done"}
+
+
 def make_route_node(llm: GigaChat):
     def route(state: OrchestratorState) -> dict:
         last_text = _last_user_text(state)
@@ -106,7 +109,7 @@ def make_route_node(llm: GigaChat):
             HumanMessage(content=last_text),
         ])
         label = (ai.content or "").strip().lower()
-        if label not in {"chat", "done"}:
+        if label not in _ROUTE_LABELS:
             label = "chat"
         return {"intent": label}
 
@@ -134,6 +137,62 @@ def make_respond_node(llm: GigaChat):
         return {"messages": [ai]}
 
     return respond
+
+
+def make_call_json_analyzer_node(json_analyzer_graph: Any):
+    """Обёртка, дёргающая json_analyzer-подграф под последний вопрос.
+
+    Подграф пересобирает sqlite-кэш по ``raw_json`` и pgvector-эмбеддинги по
+    ``direction_key`` на каждом вызове. Ошибки изолируются: респондер
+    отработает по сырому JSON метрик (фоллбэк в ``_metrics_system_block``).
+    """
+
+    async def call_json_analyzer(state: OrchestratorState, config: RunnableConfig) -> dict:
+        last_text = _last_user_text(state)
+        direction_key = (state.get("direction_key") or "").strip()
+        metrics = state.get("metrics")
+
+        if not last_text:
+            return {
+                "analytics_question": None,
+                "analytics_answer": None,
+                "analytics_error": "Нет реплики пользователя для аналитического запроса.",
+            }
+        if metrics is None:
+            return {
+                "analytics_question": last_text,
+                "analytics_answer": None,
+                "analytics_error": (
+                    state.get("metrics_error")
+                    or "Метрики не загружены — нечем кормить json_analyzer."
+                ),
+            }
+        if not direction_key:
+            return {
+                "analytics_question": last_text,
+                "analytics_answer": None,
+                "analytics_error": "Пустой direction_key — json_analyzer не сможет изолировать pgvector-кэш.",
+            }
+
+        try:
+            result = await json_analyzer_graph.ainvoke({
+                "raw_json": metrics,
+                "question": last_text,
+                "direction_key": direction_key,
+            })
+            return {
+                "analytics_question": last_text,
+                "analytics_answer": result.get("answer") or None,
+                "analytics_error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
+            return {
+                "analytics_question": last_text,
+                "analytics_answer": None,
+                "analytics_error": f"{type(exc).__name__}: {exc}"[:300],
+            }
+
+    return call_json_analyzer
 
 
 def make_call_easyrag_node(easyrag_graph: Any):
@@ -185,7 +244,15 @@ def need_load(state: OrchestratorState) -> str:
 
 
 def after_route(state: OrchestratorState) -> str:
-    return "__end__" if state.get("intent") == "done" else "call_easyrag"
+    intent = state.get("intent")
+    if intent == "done":
+        return "__end__"
+    if intent == "analytics":
+        return "call_json_analyzer"
+    if intent == "wiki":
+        return "call_easyrag"
+    # chat и любой неожиданный intent — прямо к респондеру без подграфов.
+    return "respond"
 
 
 def _last_user_text(state: OrchestratorState) -> str:
@@ -204,6 +271,11 @@ def _metrics_payload(metrics: Any) -> str:
 
 
 def _metrics_system_block(state: OrchestratorState) -> str | None:
+    # Sticky-приоритет: если json_analyzer когда-либо в этом thread'е дал
+    # ответ без ошибки — респондер видит именно его, а не сырой JSON. Это
+    # экономит токены и снимает обрезание под _METRICS_PREVIEW_LIMIT.
+    if state.get("analytics_answer") and not state.get("analytics_error"):
+        return f"Ответ аналитика метрик:\n{state['analytics_answer']}"
     if state.get("metrics_error"):
         return f"Контекст: {state['metrics_error']}"
     metrics = state.get("metrics")
