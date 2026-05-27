@@ -1,17 +1,90 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_gigachat import GigaChat
-from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
-from .prompts import ASK_USER_PROMPT, RESPONDER_PROMPT, ROUTER_PROMPT
+from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
+from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
+from .prompts import (
+    ASK_USER_PROMPT,
+    INITIAL_ANALYSIS_PROMPT,
+    LOAD_ERROR_PROMPT,
+    RESPONDER_PROMPT,
+    ROUTER_PROMPT,
+)
 from .state import OrchestratorState
 
-_VALID_INTENTS = {"knowledge", "json", "chat", "done"}
+_DEFAULT_DATASET = "metrics_for_agent_analyst"
+_METRICS_PREVIEW_LIMIT = 8000
+_DEFAULT_EASYRAG_TOP_K = 5
+_EASYRAG_SNIPPET_PREVIEW = 400
+
+
+def make_load_data_node():
+    def load_data(state: OrchestratorState, config: RunnableConfig) -> dict:
+        cfg = (config or {}).get("configurable") or {}
+        boss = (cfg.get("boss_tabnum") or "").strip()
+        employee = (cfg.get("employee_tabnum") or "").strip()
+        position = cfg.get("position")
+        dataset_name = cfg.get("dataset_name") or _DEFAULT_DATASET
+
+        if not boss or not employee:
+            return {
+                "loaded": True,
+                "metrics": None,
+                "metrics_error": (
+                    "В configurable нет boss_tabnum/employee_tabnum: "
+                    f"boss_tabnum={boss!r}, employee_tabnum={employee!r}."
+                ),
+            }
+
+        orgstructure = IsuEmployeeOrgstructureInfo(
+            manager_id=boss,
+            position=position,
+            employee_id=employee,
+        )
+        direction_key = orgstructure.direction_key()
+        try:
+            component = GetBatchAgentDatasetByFiltersComponent(
+                dataset_name=dataset_name,
+                filters=orgstructure.combined_json(),
+            )
+            metrics = component.build_json_output()
+            error: str | None = None
+        except Exception as exc:  # noqa: BLE001 — внешний клиент, сужать нечем
+            metrics = None
+            error = f"Ошибка при загрузке датасета {dataset_name!r}: {exc}"
+
+        return {
+            "boss_tabnum": boss,
+            "employee_tabnum": employee,
+            "position": position,
+            "direction_key": direction_key,
+            "metrics": metrics,
+            "metrics_error": error,
+            "loaded": True,
+        }
+
+    return load_data
+
+
+def make_initial_analysis_node(llm: GigaChat):
+    def initial_analysis(state: OrchestratorState) -> dict:
+        if state.get("metrics_error") or state.get("metrics") is None:
+            return {"messages": [AIMessage(content=LOAD_ERROR_PROMPT)]}
+
+        ai = llm.invoke([
+            SystemMessage(content=INITIAL_ANALYSIS_PROMPT),
+            HumanMessage(content=_metrics_payload(state.get("metrics"))),
+        ])
+        return {"messages": [ai]}
+
+    return initial_analysis
 
 
 def make_ask_user_node():
@@ -23,92 +96,96 @@ def make_ask_user_node():
 
 
 def make_route_node(llm: GigaChat):
-    def route(state: OrchestratorState, config: RunnableConfig) -> dict:
-        cfg = (config or {}).get("configurable", {})
-        enabled = set(cfg.get("enabled_subagents") or ["knowledge", "json"])
-
+    def route(state: OrchestratorState) -> dict:
         last_text = _last_user_text(state)
+        if not last_text:
+            return {"intent": "chat"}
+
         ai = llm.invoke([
             SystemMessage(content=ROUTER_PROMPT),
             HumanMessage(content=last_text),
         ])
         label = (ai.content or "").strip().lower()
-
-        if label not in _VALID_INTENTS:
+        if label not in {"chat", "done"}:
             label = "chat"
-        if label in {"knowledge", "json"} and label not in enabled:
-            label = "chat"
-
         return {"intent": label}
 
     return route
 
 
-def make_knowledge_node(knowledge_graph: CompiledStateGraph):
-    def knowledge(state: OrchestratorState, config: RunnableConfig) -> dict:
-        sub_input = {
-            "messages": state.get("messages") or [],
-            "query": _last_user_text(state),
-        }
-        result = knowledge_graph.invoke(sub_input, config=config)
-        merged = dict(state.get("sub_results") or {})
-        merged["knowledge"] = result.get("answer", "")
-        return {"sub_results": merged}
-
-    return knowledge
-
-
-def make_json_node(json_graph: CompiledStateGraph):
-    def json_node(state: OrchestratorState, config: RunnableConfig) -> dict:
-        sub_input = {
-            "messages": state.get("messages") or [],
-            "raw_json": _last_user_text(state),
-        }
-        result = json_graph.invoke(sub_input, config=config)
-        merged = dict(state.get("sub_results") or {})
-        merged["json"] = result.get("summary", "")
-        return {"sub_results": merged}
-
-    return json_node
-
-
-def make_finalize_node(llm: GigaChat):
-    def finalize(state: OrchestratorState, config: RunnableConfig) -> dict:
-        cfg = (config or {}).get("configurable", {})
+def make_respond_node(llm: GigaChat):
+    def respond(state: OrchestratorState, config: RunnableConfig) -> dict:
+        cfg = (config or {}).get("configurable") or {}
         system_prompt = cfg.get("system_prompt_override") or RESPONDER_PROMPT
 
-        sub = state.get("sub_results") or {}
-        ctx_parts: list[str] = []
-        if "knowledge" in sub:
-            ctx_parts.append(f"Результат поиска по знаниям:\n{sub['knowledge']}")
-        if "json" in sub:
-            ctx_parts.append(f"Результат разбора JSON:\n{sub['json']}")
+        parts: list[str] = [system_prompt]
+        metrics_block = _metrics_system_block(state)
+        if metrics_block:
+            parts.append(metrics_block)
+        easyrag_block = _easyrag_system_block(state)
+        if easyrag_block:
+            parts.append(easyrag_block)
+        system_text = "\n\n".join(parts)
 
-        user_text = _last_user_text(state)
-        body = user_text + ("\n\n" + "\n\n".join(ctx_parts) if ctx_parts else "")
+        messages: list[Any] = [SystemMessage(content=system_text)]
+        messages.extend(state.get("messages") or [])
 
-        ai = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=body.strip()),
-        ])
-        return {"messages": [ai], "sub_results": {}}
+        ai = llm.invoke(messages)
+        return {"messages": [ai]}
 
-    return finalize
-
-
-def route_intent(state: OrchestratorState) -> str:
-    intent = state.get("intent") or "chat"
-    if intent == "knowledge":
-        return "knowledge"
-    if intent == "json":
-        return "json"
-    return "finalize"
+    return respond
 
 
-def after_finalize(state: OrchestratorState) -> str:
-    if state.get("intent") == "done":
-        return "__end__"
-    return "ask_user"
+def make_call_easyrag_node(easyrag_graph: Any):
+    """Обёртка, дёргающая easyrag-подграф под последний вопрос пользователя.
+
+    Подграф возвращает релевантные секции wiki по ``direction_key`` сотрудника
+    и пишет gap, если ничего не найдено. Ошибки сети/БД не валят оркестратор —
+    респондер просто отработает без wiki-контекста.
+    """
+
+    async def call_easyrag(state: OrchestratorState, config: RunnableConfig) -> dict:
+        cfg = (config or {}).get("configurable") or {}
+        if cfg.get("easyrag_enabled") is False:
+            return {"easyrag_snippets": [], "easyrag_error": None}
+
+        direction_key = (state.get("direction_key") or "").strip()
+        last_text = _last_user_text(state)
+        if not direction_key or not last_text:
+            return {
+                "easyrag_snippets": [],
+                "easyrag_query": last_text or None,
+                "easyrag_error": None,
+            }
+
+        top_k = int(cfg.get("easyrag_top_k") or _DEFAULT_EASYRAG_TOP_K)
+        try:
+            result = await easyrag_graph.ainvoke({
+                "query": last_text,
+                "direction_key": direction_key,
+                "top_k": top_k,
+            })
+            return {
+                "easyrag_query": last_text,
+                "easyrag_snippets": result.get("snippets") or [],
+                "easyrag_error": None,
+            }
+        except Exception as exc:  # noqa: BLE001 — внешний подграф (сеть/БД), сужать нечем
+            return {
+                "easyrag_query": last_text,
+                "easyrag_snippets": [],
+                "easyrag_error": f"{type(exc).__name__}: {exc}"[:300],
+            }
+
+    return call_easyrag
+
+
+def need_load(state: OrchestratorState) -> str:
+    return "ask_user" if state.get("loaded") else "load_data"
+
+
+def after_route(state: OrchestratorState) -> str:
+    return "__end__" if state.get("intent") == "done" else "call_easyrag"
 
 
 def _last_user_text(state: OrchestratorState) -> str:
@@ -116,3 +193,41 @@ def _last_user_text(state: OrchestratorState) -> str:
         if isinstance(m, HumanMessage):
             return m.content or ""
     return ""
+
+
+def _metrics_payload(metrics: Any) -> str:
+    try:
+        payload = json.dumps(metrics, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        payload = repr(metrics)
+    return f"JSON с метриками сотрудника:\n{payload[:_METRICS_PREVIEW_LIMIT]}"
+
+
+def _metrics_system_block(state: OrchestratorState) -> str | None:
+    if state.get("metrics_error"):
+        return f"Контекст: {state['metrics_error']}"
+    metrics = state.get("metrics")
+    if metrics is None:
+        return None
+    return _metrics_payload(metrics)
+
+
+def _easyrag_system_block(state: OrchestratorState) -> str | None:
+    snippets = state.get("easyrag_snippets") or []
+    err = state.get("easyrag_error")
+    if not snippets:
+        if err:
+            return f"Контекст из wiki недоступен: {err}"
+        return None
+
+    lines = ["Релевантные фрагменты wiki (по направлению сотрудника):"]
+    for s in snippets[:5]:
+        page = s.get("page_title") or s.get("slug") or "-"
+        title = s.get("section_title") or s.get("anchor") or "-"
+        sim = s.get("similarity")
+        sim_str = f" sim={sim:.2f}" if isinstance(sim, (int, float)) else ""
+        body = (s.get("body_md") or "").strip().replace("\n", " ")
+        if len(body) > _EASYRAG_SNIPPET_PREVIEW:
+            body = body[:_EASYRAG_SNIPPET_PREVIEW] + "…"
+        lines.append(f"- [{page} / {title}{sim_str}]: {body}")
+    return "\n".join(lines)

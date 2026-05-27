@@ -8,6 +8,9 @@
 from langgraph_executor.aegra_agents.analytic_orchestrator.graph import (
     graph as analytic_orchestrator_graph,
 )
+from langgraph_executor.aegra_agents.easyrag.graph import (
+    graph as easyrag_graph,
+)
 from langgraph_executor.aegra_agents.json_analyzer.graph import (
     graph as json_analyzer_graph,
 )
@@ -17,6 +20,7 @@ from langgraph_executor.aegra_agents.knowledge_agent.graph import (
 
 __all__ = [
     "analytic_orchestrator_graph",
+    "easyrag_graph",
     "json_analyzer_graph",
     "knowledge_agent_graph",
 ]
