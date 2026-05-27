@@ -105,11 +105,10 @@ def make_gather_node(llm: GigaChat):
         store.load(rows)
         compute_analytics(store)
 
-        # Размерность эмбеддингов фиксируется в схеме pgvector-таблицы; узнаём
-        # её на лету, чтобы pg_cache корректно создал/пересоздал таблицу под
-        # активную модель (без жёсткой зависимости от EMBEDDING_DIM в env).
-        embedding_dim = len(embedder.embed_query("проба размерности"))
-        pg = PgCache(dim=embedding_dim)
+        # Размерность вектора берётся из существующей колонки таблицы
+        # (создана миграцией migrations/json_analyzer/0001_initial.sql).
+        # Рассинхрон между моделью и таблицей словится sync_embeddings.
+        pg = PgCache()
         try:
             sync_embeddings(
                 store,
