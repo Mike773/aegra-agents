@@ -9,13 +9,17 @@ from langchain_gigachat import GigaChat
 from langgraph.types import interrupt
 
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
+from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
     ASK_USER_PROMPT,
+    EXTRACT_ASSIGNMENTS_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
     LOAD_ERROR_PROMPT,
+    PROPOSE_NO_CANDIDATES_PROMPT,
     RESPONDER_PROMPT,
     ROUTER_PROMPT,
+    SELECT_ASSIGNMENTS_PROMPT,
 )
 from .state import OrchestratorState
 
@@ -23,6 +27,7 @@ _DEFAULT_DATASET = "metrics_for_agent_analyst"
 _METRICS_PREVIEW_LIMIT = 8000
 _DEFAULT_EASYRAG_TOP_K = 5
 _EASYRAG_SNIPPET_PREVIEW = 400
+_MAX_CANDIDATES = 5
 
 
 def make_load_data_node():
@@ -95,7 +100,7 @@ def make_ask_user_node():
     return ask_user
 
 
-_ROUTE_LABELS = {"analytics", "wiki", "chat", "done"}
+_ROUTE_LABELS = {"analytics", "wiki", "chat", "done", "assignments"}
 
 
 def make_route_node(llm: GigaChat):
@@ -103,6 +108,12 @@ def make_route_node(llm: GigaChat):
         last_text = _last_user_text(state)
         if not last_text:
             return {"intent": "chat"}
+
+        # Пока висит pending-список, ЛЮБАЯ реплика интерпретируется как выбор
+        # по нему — это и есть «отдельная ветвь диалога». Выход из неё —
+        # «никакие/отмена», что в commit_assignments отрисуется как cancel.
+        if state.get("pending_assignments"):
+            return {"intent": "assignments_select"}
 
         ai = llm.invoke([
             SystemMessage(content=ROUTER_PROMPT),
@@ -239,6 +250,168 @@ def make_call_easyrag_node(easyrag_graph: Any):
     return call_easyrag
 
 
+def make_extract_assignments_node(llm: GigaChat):
+    """Извлекает кандидатов-поручений из метрик и последнего AI-анализа.
+
+    Запускается автоматически после ``initial_analysis`` и повторно — когда
+    роутер ловит явный intent ``assignments``. Пишет результат и в
+    ``candidate_assignments`` (история), и в ``pending_assignments`` (то,
+    что сейчас на выборе). Пустой список — нормальный исход.
+    """
+
+    def extract(state: OrchestratorState) -> dict:
+        metrics = state.get("metrics")
+        if metrics is None or state.get("metrics_error"):
+            return {"candidate_assignments": [], "pending_assignments": []}
+
+        last_ai = _last_ai_text(state)
+        context = _metrics_payload(metrics)
+        if last_ai:
+            context = f"{context}\n\nПредыдущий анализ:\n{last_ai}"
+
+        try:
+            ai = llm.invoke([
+                SystemMessage(content=EXTRACT_ASSIGNMENTS_PROMPT),
+                HumanMessage(content=context),
+            ])
+            candidates = _parse_assignments_json(ai.content)
+        except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
+            candidates = []
+
+        return {
+            "candidate_assignments": candidates,
+            "pending_assignments": candidates,
+        }
+
+    return extract
+
+
+def make_propose_assignments_node():
+    """Показывает пользователю нумерованный список кандидатов и просит выбор.
+
+    Если кандидатов нет — пишет короткое сообщение и сбрасывает pending,
+    чтобы роутер вернулся к обычному классифицированию следующей реплики.
+    """
+
+    def propose(state: OrchestratorState) -> dict:
+        pending = state.get("pending_assignments") or []
+        if not pending:
+            return {
+                "messages": [AIMessage(content=PROPOSE_NO_CANDIDATES_PROMPT)],
+                "pending_assignments": [],
+            }
+
+        lines = ["Выделил кандидатов на поручения сотруднику:"]
+        for i, p in enumerate(pending, 1):
+            lines.append(f"{i}. {p.get('title', '').strip() or '(без названия)'}")
+            problem = (p.get("problem") or "").strip()
+            if problem:
+                lines.append(f"   Проблема: {problem}")
+            action = (p.get("action") or "").strip()
+            if action:
+                lines.append(f"   Действие: {action}")
+        lines.append("")
+        lines.append(
+            "Какие зафиксировать? Напишите номера через запятую "
+            "(например, «1, 3»), «все» или «никакие»."
+        )
+        return {"messages": [AIMessage(content="\n".join(lines))]}
+
+    return propose
+
+
+def make_select_assignments_node(llm: GigaChat):
+    """Парсит ответ пользователя в список индексов кандидатов.
+
+    Непонятный ответ → пустой выбор → ``commit_assignments`` отработает как
+    cancel и сбросит pending, чтобы диалог не залипал.
+    """
+
+    def select(state: OrchestratorState) -> dict:
+        pending = state.get("pending_assignments") or []
+        user_text = _last_user_text(state)
+        if not pending or not user_text:
+            return {"selected_assignments": []}
+
+        listing = "\n".join(
+            f"{i}. {p.get('title', '').strip() or '(без названия)'}"
+            for i, p in enumerate(pending, 1)
+        )
+        try:
+            ai = llm.invoke([
+                SystemMessage(content=SELECT_ASSIGNMENTS_PROMPT),
+                HumanMessage(
+                    content=f"Кандидаты (N={len(pending)}):\n{listing}\n\n"
+                    f"Ответ пользователя: {user_text}"
+                ),
+            ])
+            indices = _parse_indices_json(ai.content, max_n=len(pending))
+        except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
+            indices = []
+
+        selected = [pending[i - 1] for i in indices]
+        return {"selected_assignments": selected}
+
+    return select
+
+
+def make_commit_assignments_node():
+    """Отправляет выбранные поручения в mock-сервис и закрывает ветку выбора.
+
+    Всегда чистит ``pending_assignments``/``selected_assignments`` — независимо
+    от исхода: пустой выбор = cancel, ошибка отправки = сообщение и сброс,
+    успех = подтверждение и обновлённый ``last_committed_assignments``.
+    """
+
+    def commit(state: OrchestratorState) -> dict:
+        selected = state.get("selected_assignments") or []
+        boss = (state.get("boss_tabnum") or "").strip()
+        employee = (state.get("employee_tabnum") or "").strip()
+
+        if not selected:
+            return {
+                "messages": [AIMessage(
+                    content="Хорошо, поручения сейчас не фиксирую. "
+                    "Если передумаете — скажите «оформи поручения»."
+                )],
+                "pending_assignments": [],
+                "selected_assignments": [],
+            }
+
+        try:
+            component = SendAssignmentsComponent(
+                boss_tabnum=boss,
+                employee_tabnum=employee,
+                assignments=selected,
+            )
+            component.submit()
+            committed = selected
+            err: str | None = None
+        except Exception as exc:  # noqa: BLE001 — внешний клиент, сужать нечем
+            committed = []
+            err = f"{type(exc).__name__}: {exc}"[:300]
+
+        if err:
+            text = f"Не удалось отправить поручения: {err}"
+        else:
+            lines = [
+                f"Зафиксировал {len(committed)} поручение(й) "
+                f"для сотрудника {employee} (от руководителя {boss}):"
+            ]
+            for s in committed:
+                lines.append(f"- {s.get('title', '').strip() or '(без названия)'}")
+            text = "\n".join(lines)
+
+        return {
+            "messages": [AIMessage(content=text)],
+            "pending_assignments": [],
+            "selected_assignments": [],
+            "last_committed_assignments": committed,
+        }
+
+    return commit
+
+
 def need_load(state: OrchestratorState) -> str:
     return "ask_user" if state.get("loaded") else "load_data"
 
@@ -251,6 +424,10 @@ def after_route(state: OrchestratorState) -> str:
         return "call_json_analyzer"
     if intent == "wiki":
         return "call_easyrag"
+    if intent == "assignments":
+        return "extract_assignments"
+    if intent == "assignments_select":
+        return "select_assignments"
     # chat и любой неожиданный intent — прямо к респондеру без подграфов.
     return "respond"
 
@@ -259,6 +436,21 @@ def _last_user_text(state: OrchestratorState) -> str:
     for m in reversed(state.get("messages") or []):
         if isinstance(m, HumanMessage):
             return m.content or ""
+    return ""
+
+
+def _last_ai_text(state: OrchestratorState) -> str:
+    for m in reversed(state.get("messages") or []):
+        if isinstance(m, AIMessage):
+            content = m.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
     return ""
 
 
@@ -303,3 +495,66 @@ def _easyrag_system_block(state: OrchestratorState) -> str | None:
             body = body[:_EASYRAG_SNIPPET_PREVIEW] + "…"
         lines.append(f"- [{page} / {title}{sim_str}]: {body}")
     return "\n".join(lines)
+
+
+def _strip_code_fence(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned.startswith("```"):
+        return cleaned
+    lines = cleaned.splitlines()
+    # отбрасываем первую строку с ``` (возможно ```json)
+    lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _parse_assignments_json(text: Any) -> list[dict]:
+    raw = text if isinstance(text, str) else str(text or "")
+    cleaned = _strip_code_fence(raw)
+    if not cleaned:
+        return []
+    try:
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[dict] = []
+    for item in data[:_MAX_CANDIDATES]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        result.append({
+            "title": title,
+            "problem": str(item.get("problem") or "").strip(),
+            "action": str(item.get("action") or "").strip(),
+        })
+    return result
+
+
+def _parse_indices_json(text: Any, max_n: int) -> list[int]:
+    raw = text if isinstance(text, str) else str(text or "")
+    cleaned = _strip_code_fence(raw)
+    if not cleaned:
+        return []
+    try:
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    indices = data.get("indices") or []
+    if not isinstance(indices, list):
+        return []
+    result: list[int] = []
+    for x in indices:
+        try:
+            i = int(x)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= i <= max_n and i not in result:
+            result.append(i)
+    return result
