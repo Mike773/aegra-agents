@@ -34,8 +34,6 @@ ROUTER_PROMPT = (
     "Только один ярлык, никаких комментариев."
 )
 
-ASK_USER_PROMPT = "Что хотите обсудить по метрикам сотрудника?"
-
 LOAD_ERROR_PROMPT = (
     "Не удалось загрузить метрики сотрудника. "
     "Проверьте, что в configurable переданы boss_tabnum и employee_tabnum."

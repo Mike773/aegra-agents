@@ -6,13 +6,11 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_gigachat import GigaChat
-from langgraph.types import interrupt
 
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
-    ASK_USER_PROMPT,
     ASSIGNMENTS_ANALYSIS_QUESTION,
     EXTRACT_ASSIGNMENTS_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
@@ -91,14 +89,6 @@ def make_initial_analysis_node(llm: GigaChat):
         return {"messages": [ai]}
 
     return initial_analysis
-
-
-def make_ask_user_node():
-    def ask_user(state: OrchestratorState) -> dict:
-        user_text = interrupt({"prompt": ASK_USER_PROMPT})
-        return {"messages": [HumanMessage(content=str(user_text))]}
-
-    return ask_user
 
 
 _ROUTE_LABELS = {"analytics", "wiki", "chat", "done", "assignments"}
@@ -448,13 +438,11 @@ def make_commit_assignments_node():
 
 
 def need_load(state: OrchestratorState) -> str:
-    return "ask_user" if state.get("loaded") else "load_data"
+    return "route" if state.get("loaded") else "load_data"
 
 
 def after_route(state: OrchestratorState) -> str:
     intent = state.get("intent")
-    if intent == "done":
-        return "__end__"
     if intent == "analytics":
         return "call_json_analyzer"
     if intent == "wiki":
@@ -463,7 +451,9 @@ def after_route(state: OrchestratorState) -> str:
         return "extract_assignments"
     if intent == "assignments_select":
         return "select_assignments"
-    # chat и любой неожиданный intent — прямо к респондеру без подграфов.
+    # chat, done и любой неожиданный intent — прямо к респондеру без подграфов.
+    # done тоже идёт сюда: респондер коротко прощается (RESPONDER_PROMPT), но
+    # диалог не закрывается — пользователь может продолжить следующим вызовом.
     return "respond"
 
 
