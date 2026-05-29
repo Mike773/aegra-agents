@@ -29,7 +29,10 @@ def build_graph(llm: GigaChat):
 
     g.add_node("load_data", make_load_data_node())
     g.add_node("initial_analysis", make_initial_analysis_node(llm))
-    g.add_node("extract_assignments", make_extract_assignments_node(llm))
+    g.add_node(
+        "extract_assignments",
+        make_extract_assignments_node(llm, json_analyzer_graph),
+    )
     g.add_node("propose_assignments", make_propose_assignments_node())
     g.add_node("ask_user", make_ask_user_node())
     g.add_node("route", make_route_node(llm))

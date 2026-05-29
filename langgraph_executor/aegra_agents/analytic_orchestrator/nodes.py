@@ -13,6 +13,7 @@ from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
     ASK_USER_PROMPT,
+    ASSIGNMENTS_ANALYSIS_QUESTION,
     EXTRACT_ASSIGNMENTS_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
     LOAD_ERROR_PROMPT,
@@ -250,24 +251,34 @@ def make_call_easyrag_node(easyrag_graph: Any):
     return call_easyrag
 
 
-def make_extract_assignments_node(llm: GigaChat):
-    """Извлекает кандидатов-поручений из метрик и последнего AI-анализа.
+def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
+    """Извлекает кандидатов-поручения из анализа проблемных зон сотрудника.
 
     Запускается автоматически после ``initial_analysis`` и повторно — когда
-    роутер ловит явный intent ``assignments``. Пишет результат и в
-    ``candidate_assignments`` (история), и в ``pending_assignments`` (то,
-    что сейчас на выборе). Пустой список — нормальный исход.
+    роутер ловит явный intent ``assignments``. Источник анализа — подграф
+    ``json_analyzer``, который видит ПОЛНЫЙ датасет через инструменты (SQLite +
+    pgvector), а не обрезанный под ``_METRICS_PREVIEW_LIMIT`` JSON. Анализ затем
+    структурируется вторым LLM-вызовом в JSON-поручения.
+
+    Фоллбэк: если json_analyzer недоступен (нет ``direction_key``, упал или
+    вернул пусто) — деградируем на прежний путь по обрезанному JSON, чтобы не
+    терять функциональность. Пустой список кандидатов — нормальный исход.
     """
 
-    def extract(state: OrchestratorState) -> dict:
+    async def extract(state: OrchestratorState) -> dict:
         metrics = state.get("metrics")
         if metrics is None or state.get("metrics_error"):
             return {"candidate_assignments": [], "pending_assignments": []}
 
-        last_ai = _last_ai_text(state)
-        context = _metrics_payload(metrics)
-        if last_ai:
-            context = f"{context}\n\nПредыдущий анализ:\n{last_ai}"
+        analysis = await _problem_analysis(state, metrics, json_analyzer_graph)
+        if analysis:
+            context = f"Анализ проблемных зон сотрудника:\n{analysis}"
+        else:
+            # Фоллбэк на сырой (обрезанный) JSON + предыдущий анализ.
+            context = _metrics_payload(metrics)
+            last_ai = _last_ai_text(state)
+            if last_ai:
+                context = f"{context}\n\nПредыдущий анализ:\n{last_ai}"
 
         try:
             ai = llm.invoke([
@@ -284,6 +295,30 @@ def make_extract_assignments_node(llm: GigaChat):
         }
 
     return extract
+
+
+async def _problem_analysis(
+    state: OrchestratorState, metrics: Any, json_analyzer_graph: Any
+) -> str:
+    """Прогоняет json_analyzer фиксированным вопросом про проблемные зоны.
+
+    Возвращает текст анализа или пустую строку, если подграф не отработал
+    (нет ``direction_key``, исключение или пустой ответ) — вызывающий код
+    деградирует на сырой JSON.
+    """
+    direction_key = (state.get("direction_key") or "").strip()
+    if not direction_key:
+        return ""
+    try:
+        result = await json_analyzer_graph.ainvoke({
+            "raw_json": metrics,
+            "question": ASSIGNMENTS_ANALYSIS_QUESTION,
+            "direction_key": direction_key,
+        })
+    except Exception:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
+        return ""
+    answer = result.get("answer") if isinstance(result, dict) else None
+    return (answer or "").strip()
 
 
 def make_propose_assignments_node():
