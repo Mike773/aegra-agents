@@ -1,9 +1,10 @@
 """Локальный прогон analytic_orchestrator без aegra-сервера.
 
-Подкладываем MemorySaver-чекпоинтер (на проде это делает aegra), идём по графу
-до первого `interrupt`, передаём «реплику руководителя» через `Command(resume=...)`
-и повторяем, пока модель не пометит intent как `done`. Граф ходит через
-`astream`, потому что `call_easyrag` — async (как и сам aegra-runtime).
+Подкладываем MemorySaver-чекпоинтер (на проде это делает aegra) и гоняем граф
+в turn-based режиме: каждый ход — отдельный вызов с входом {"messages": [...]},
+состояние между ходами держит чекпоинтер по thread_id. Первый ход — сообщение-
+инструкция (триггер анализа), дальше — обычные реплики руководителя. Граф ходит
+через `astream`, потому что `call_easyrag` — async (как и сам aegra-runtime).
 """
 from __future__ import annotations
 
@@ -11,8 +12,8 @@ import asyncio
 import os
 import sys
 
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 from langgraph_executor.aegra_agents.analytic_orchestrator.graph import build_graph
 from langgraph_executor.aegra_agents.shared.clients import create_gigachat_client
@@ -20,11 +21,6 @@ from langgraph_executor.aegra_agents.shared.clients import create_gigachat_clien
 
 def _print_event(event: dict) -> None:
     for node, payload in event.items():
-        if node == "__interrupt__":
-            for itr in payload or ():
-                value = getattr(itr, "value", itr)
-                print(f"  [interrupt] {value}")
-            continue
         if not isinstance(payload, dict):
             print(f"  [{node}] {payload!r}")
             continue
@@ -70,32 +66,28 @@ async def main() -> int:
         }
     }
 
-    print("=== старт оркестратора ===")
+    print("=== старт оркестратора (сообщение-инструкция) ===")
     async for ev in graph.astream(
-        {"messages": []}, config=config, stream_mode="updates"
+        {"messages": [HumanMessage(content="Проанализируй метрики сотрудника.")]},
+        config=config,
+        stream_mode="updates",
     ):
         _print_event(ev)
 
-    state = graph.get_state(config)
-    user_lines = iter([
+    for user_text in (
         "Что в метриках выделяется сильнее всего?",
         "А как у нас вообще считается этот показатель?",
         "Спасибо, на этом всё.",
-    ])
-    while state.next:
-        try:
-            user_text = next(user_lines)
-        except StopIteration:
-            print("\n>>> сценарий закончился, а граф ещё ждёт ввод. Прерываю.")
-            return 1
+    ):
         print(f"\n=== пользователь говорит: {user_text!r} ===")
         async for ev in graph.astream(
-            Command(resume=user_text), config=config, stream_mode="updates"
+            {"messages": [HumanMessage(content=user_text)]},
+            config=config,
+            stream_mode="updates",
         ):
             _print_event(ev)
-        state = graph.get_state(config)
 
-    print("\n=== оркестратор завершил работу ===")
+    print("\n=== диалог завершён ===")
     return 0
 
 
