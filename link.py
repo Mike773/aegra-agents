@@ -14,13 +14,9 @@ from langgraph_executor.aegra_agents.easyrag.graph import (
 from langgraph_executor.aegra_agents.json_analyzer.graph import (
     graph as json_analyzer_graph,
 )
-from langgraph_executor.aegra_agents.knowledge_agent.graph import (
-    graph as knowledge_agent_graph,
-)
 
 __all__ = [
     "analytic_orchestrator_graph",
     "easyrag_graph",
     "json_analyzer_graph",
-    "knowledge_agent_graph",
 ]

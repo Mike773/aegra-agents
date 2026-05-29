@@ -1,6 +1,5 @@
 {
   "graphs": {
-    "knowledge_agent": "./link.py:knowledge_agent_graph",
     "json_analyzer": "./link.py:json_analyzer_graph",
     "easyrag": "./link.py:easyrag_graph",
     "analytic_orchestrator": "./link.py:analytic_orchestrator_graph"

@@ -8,13 +8,13 @@ LLM и эмбеддинги — через `langchain-gigachat`.
 
 | Граф | Назначение |
 |---|---|
-| `knowledge_agent` | Ответ по корпоративной базе знаний (retrieve + generate). Источник — пока заглушка под pgvector / FTS. |
+| `easyrag` | Ответ по корпоративной базе знаний (retrieve + generate). Источник — пока заглушка под pgvector / FTS. |
 | `json_analyzer` | Разбор переданного JSON-документа (parse + LLM-анализ). |
 | `analytic_orchestrator` | Диалоговый HITL-граф: `interrupt` → роутер → вызов нужного подграфа → финальный ответ → новая итерация. |
 
 Все три графа зарегистрированы в `aegra.json` и доступны через стандартный
 API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
-`analytic_orchestrator` внутри использует `knowledge_agent` и `json_analyzer`
+`analytic_orchestrator` внутри использует `easyrag` и `json_analyzer`
 как подграфы (через явный `subgraph.invoke(...)` в обёрточном узле).
 
 ## Раскладка
@@ -27,7 +27,7 @@ API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
     ├── agent/services/clients/gigachat.py                  # заглушка GigaChatClient (заменить на реальный)
     └── aegra_agents/
         ├── shared/clients.py                               # тонкая обёртка над GigaChatClient
-        ├── knowledge_agent/{state,prompts,nodes,graph}.py
+        ├── easyrag/{state,prompts,nodes,graph}.py
         ├── json_analyzer/{state,prompts,nodes,graph}.py
         └── analytic_orchestrator/{state,prompts,nodes,graph}.py
 ```
@@ -75,9 +75,9 @@ def my_node(state, config: RunnableConfig):
 
 | Граф | Ключи |
 |---|---|
-| `knowledge_agent` | `knowledge_collection`, `top_k`, `system_prompt_override` |
+| `easyrag` | `knowledge_collection`, `top_k`, `system_prompt_override` |
 | `json_analyzer` | `schema_hint`, `max_depth`, `system_prompt_override` |
-| `analytic_orchestrator` | `enabled_subagents` (по умолчанию `["knowledge","json"]`), `language`, `system_prompt_override` |
+| `analytic_orchestrator` | `easyrag_enabled` (по умолчанию `true`), `easyrag_top_k` (по умолчанию `5`), `dataset_name`, `boss_tabnum`, `employee_tabnum`, `position`, `system_prompt_override` |
 
 ## GigaChat-клиент
 
@@ -108,7 +108,7 @@ GIGACHAT_VERIFY_SSL=false
 После установки зависимостей (`pip install -e .` или `pip install langgraph langchain-gigachat`):
 
 ```bash
-python -c "from langgraph_executor.aegra_agents.knowledge_agent.graph import graph; \
+python -c "from langgraph_executor.aegra_agents.easyrag.graph import graph; \
            print(graph.get_graph().draw_ascii())"
 python -c "from langgraph_executor.aegra_agents.json_analyzer.graph import graph; \
            print(graph.get_graph().draw_ascii())"
@@ -135,7 +135,7 @@ thread = await client.threads.create()
 async for ev in client.runs.stream(
     thread["thread_id"], "analytic_orchestrator",
     input={"messages": []},
-    config={"configurable": {"enabled_subagents": ["knowledge", "json"]}},
+    config={"configurable": {"easyrag_enabled": True, "easyrag_top_k": 5}},
 ):
     print(ev)
 
@@ -149,7 +149,7 @@ async for ev in client.runs.stream(
 
 ## TODO
 
-- Реальный retrieval в `knowledge_agent.retrieve` (pgvector / FTS) через `create_embedding`.
+- Реальный retrieval в `easyrag.retrieve` (pgvector / FTS) через `create_embedding`.
 - Реальный анализ JSON и структурированный output в `json_analyzer.analyze`.
 - Декларация `config_schema` через pydantic-модели вместо чтения словарём.
 - Тесты.
