@@ -138,4 +138,112 @@ class QueryGap(Base):
     )
 
 
-__all__ = ["Base", "WikiPage", "WikiSection", "WikiLink", "QueryGap", "EMBED_DIM", "SCHEMA"]
+# --- Источники (ingest) ---
+#
+# Порт из easyRag/db/models.py. Отличия под aegra:
+# - схема ``wiki_rag`` (как у wiki-таблиц выше);
+# - ``direction_key`` на адресуемых таблицах (source_doc/source_chunk/entity_candidate);
+# - ``source_doc.content`` хранит сырой текст документа (в easyRag текст приходил
+#   в ingest_text(text=...), здесь документы уже лежат в БД);
+# - ``source_doc.processed_at`` — признак идемпотентности (NULL = не обработан).
+
+
+class SourceDoc(Base):
+    __tablename__ = "source_doc"
+    __table_args__ = ({"schema": SCHEMA},)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    direction_key: Mapped[str] = mapped_column(Text, nullable=False)
+    uri: Mapped[str] = mapped_column(Text, nullable=False)
+    mime: Mapped[str | None] = mapped_column(String(64))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    # JSON-сериализованный DocumentBrief (см. wiki_ingest.extractor).
+    domain_brief: Mapped[str | None] = mapped_column(Text)
+    # NULL — документ ещё не прогнан через ingest-пайплайн (триггер обработки).
+    processed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    ingested_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SourceChunk(Base):
+    __tablename__ = "source_chunk"
+    __table_args__ = (
+        UniqueConstraint("doc_id", "ord", name="uq_source_chunk_doc_ord"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    doc_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.source_doc.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    direction_key: Mapped[str] = mapped_column(Text, nullable=False)
+    ord: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    char_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_end: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM))
+
+
+class EntityCandidate(Base):
+    __tablename__ = "entity_candidate"
+    __table_args__ = ({"schema": SCHEMA},)
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    doc_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.source_doc.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.source_chunk.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    direction_key: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    descriptor: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    statements: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    resolved_page_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.wiki_page.id", ondelete="SET NULL"),
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM))
+
+
+class SectionProvenance(Base):
+    __tablename__ = "section_provenance"
+    __table_args__ = ({"schema": SCHEMA},)
+
+    section_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.wiki_section.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_chunk_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.source_chunk.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    contributed_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+__all__ = [
+    "Base",
+    "WikiPage",
+    "WikiSection",
+    "WikiLink",
+    "QueryGap",
+    "SourceDoc",
+    "SourceChunk",
+    "EntityCandidate",
+    "SectionProvenance",
+    "EMBED_DIM",
+    "SCHEMA",
+]

@@ -33,6 +33,9 @@ class OrchestratorState(TypedDict, total=False):
     easyrag_query: str | None
     easyrag_snippets: list[dict]
     easyrag_error: str | None
+    # Релевантные запросу страницы-заглушки (type='stub', пустые) — заполняется,
+    # только когда обычная выборка пуста: сущность заведена, но не наполнена.
+    easyrag_stub_pages: list[dict]
 
     # Результат вызова json_analyzer-подграфа под последний аналитический вопрос.
     # Sticky: не сбрасывается между циклами, пока следующий analytics-цикл не

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_gigachat import GigaChat
+from sqlalchemy import select
 
+from ..easyrag.db import session_scope
+from ..easyrag.models import WikiPage
+from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
@@ -27,6 +32,10 @@ _METRICS_PREVIEW_LIMIT = 8000
 _DEFAULT_EASYRAG_TOP_K = 5
 _EASYRAG_SNIPPET_PREVIEW = 400
 _MAX_CANDIDATES = 5
+# Порог нечёткого совпадения слова запроса с заголовком заглушки.
+# Ловит склонённые формы: «бабушку» ↔ «бабушка».
+_STUB_MATCH_RATIO = 0.72
+_STUB_LOOKUP_LIMIT = 5
 
 
 def make_load_data_node():
@@ -208,13 +217,14 @@ def make_call_easyrag_node(easyrag_graph: Any):
     async def call_easyrag(state: OrchestratorState, config: RunnableConfig) -> dict:
         cfg = (config or {}).get("configurable") or {}
         if cfg.get("easyrag_enabled") is False:
-            return {"easyrag_snippets": [], "easyrag_error": None}
+            return {"easyrag_snippets": [], "easyrag_stub_pages": [], "easyrag_error": None}
 
         direction_key = (state.get("direction_key") or "").strip()
         last_text = _last_user_text(state)
         if not direction_key or not last_text:
             return {
                 "easyrag_snippets": [],
+                "easyrag_stub_pages": [],
                 "easyrag_query": last_text or None,
                 "easyrag_error": None,
             }
@@ -226,19 +236,77 @@ def make_call_easyrag_node(easyrag_graph: Any):
                 "direction_key": direction_key,
                 "top_k": top_k,
             })
+            snippets = result.get("snippets") or []
+            # Контента нет — но, возможно, сущность уже заведена как пустая
+            # заглушка. Найдём релевантные заглушки, чтобы респондер сказал об этом.
+            stub_pages = (
+                [] if snippets
+                else await _find_relevant_stub_pages(direction_key, last_text)
+            )
             return {
                 "easyrag_query": last_text,
-                "easyrag_snippets": result.get("snippets") or [],
+                "easyrag_snippets": snippets,
+                "easyrag_stub_pages": stub_pages,
                 "easyrag_error": None,
             }
         except Exception as exc:  # noqa: BLE001 — внешний подграф (сеть/БД), сужать нечем
             return {
                 "easyrag_query": last_text,
                 "easyrag_snippets": [],
+                "easyrag_stub_pages": [],
                 "easyrag_error": f"{type(exc).__name__}: {exc}"[:300],
             }
 
     return call_easyrag
+
+
+async def _find_relevant_stub_pages(direction_key: str, query: str) -> list[dict]:
+    """Найти пустые страницы-заглушки направления, релевантные запросу.
+
+    Заглушки (``type='stub'``) не имеют секций/эмбеддингов, поэтому vector-поиск
+    easyrag их не находит. Сопоставляем имя заглушки со словами запроса лексически
+    (substring + нечёткое сходство для склонённых форм). Возвращает ``[{slug, title}]``.
+    """
+    if not direction_key or not query.strip():
+        return []
+    async with session_scope() as session:
+        rows = (
+            await session.execute(
+                select(WikiPage.slug, WikiPage.title, WikiPage.aliases).where(
+                    WikiPage.direction_key == direction_key,
+                    WikiPage.type == "stub",
+                )
+            )
+        ).all()
+    if not rows:
+        return []
+    q_words = {w for w in re.findall(r"\w+", query.casefold()) if len(w) >= 3}
+    if not q_words:
+        return []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for slug, title, aliases in rows:
+        names = [title or ""] + [a for a in (aliases or []) if a]
+        if slug not in seen and _name_matches_query(names, q_words):
+            seen.add(slug)
+            out.append({"slug": slug, "title": (title or slug)})
+        if len(out) >= _STUB_LOOKUP_LIMIT:
+            break
+    return out
+
+
+def _name_matches_query(names: list[str], q_words: set[str]) -> bool:
+    for name in names:
+        nlow = (name or "").strip().casefold()
+        if len(nlow) < 3:
+            continue
+        for w in q_words:
+            if w == nlow or w in nlow or nlow in w:
+                return True
+            if similarity_ratio(w, nlow) >= _STUB_MATCH_RATIO:
+                return True
+    return False
 
 
 def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
@@ -507,6 +575,16 @@ def _easyrag_system_block(state: OrchestratorState) -> str | None:
     if not snippets:
         if err:
             return f"Контекст из wiki недоступен: {err}"
+        stubs = state.get("easyrag_stub_pages") or []
+        if stubs:
+            names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stubs)
+            return (
+                "В базе знаний по этой теме есть ПУСТАЯ страница-заглушка "
+                f"(сущность заведена, но ещё не описана): {names}. Содержания по "
+                "ней пока нет. Сообщи пользователю, что тема в wiki уже известна, "
+                "но информация по ней пока не внесена и появится после загрузки "
+                "новых источников. НЕ придумывай содержание сам."
+            )
         return None
 
     lines = ["Релевантные фрагменты wiki (по направлению сотрудника):"]
