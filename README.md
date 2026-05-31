@@ -11,6 +11,8 @@ LLM и эмбеддинги — через `langchain-gigachat`.
 | `easyrag` | Ответ по корпоративной базе знаний (retrieve + generate). Источник — пока заглушка под pgvector / FTS. |
 | `json_analyzer` | Разбор переданного JSON-документа (parse + LLM-анализ). |
 | `analytic_orchestrator` | Диалоговый HITL-граф: `interrupt` → роутер → вызов нужного подграфа → финальный ответ → новая итерация. |
+| `wiki_ingest` | Прогон необработанных документов направления (`source_doc.processed_at IS NULL`) через ingest-пайплайн → `wiki_page`/`wiki_section`. |
+| `doc_manager` | Управление документами направления через чат: загрузка (текст в сообщении → pending `source_doc`), список, удаление. |
 
 Все три графа зарегистрированы в `aegra.json` и доступны через стандартный
 API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
@@ -78,6 +80,8 @@ def my_node(state, config: RunnableConfig):
 | `easyrag` | `knowledge_collection`, `top_k`, `system_prompt_override` |
 | `json_analyzer` | `schema_hint`, `max_depth`, `system_prompt_override` |
 | `analytic_orchestrator` | `easyrag_enabled` (по умолчанию `true`), `easyrag_top_k` (по умолчанию `5`), `dataset_name`, `boss_tabnum`, `employee_tabnum`, `position`, `system_prompt_override` |
+| `wiki_ingest` | `direction_key` (можно также полем state) |
+| `doc_manager` | `direction_key` (можно также полем state) |
 
 ## GigaChat-клиент
 
