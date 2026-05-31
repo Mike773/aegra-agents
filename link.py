@@ -17,6 +17,9 @@ from langgraph_executor.aegra_agents.easyrag.graph import (
 from langgraph_executor.aegra_agents.json_analyzer.graph import (
     graph as json_analyzer_graph,
 )
+from langgraph_executor.aegra_agents.kb_chat.graph import (
+    graph as kb_chat_graph,
+)
 from langgraph_executor.aegra_agents.wiki_ingest.graph import (
     graph as wiki_ingest_graph,
 )
@@ -26,5 +29,6 @@ __all__ = [
     "doc_manager_graph",
     "easyrag_graph",
     "json_analyzer_graph",
+    "kb_chat_graph",
     "wiki_ingest_graph",
 ]

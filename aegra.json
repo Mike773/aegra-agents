@@ -4,7 +4,8 @@
     "easyrag": "./link.py:easyrag_graph",
     "analytic_orchestrator": "./link.py:analytic_orchestrator_graph",
     "wiki_ingest": "./link.py:wiki_ingest_graph",
-    "doc_manager": "./link.py:doc_manager_graph"
+    "doc_manager": "./link.py:doc_manager_graph",
+    "kb_chat": "./link.py:kb_chat_graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",
