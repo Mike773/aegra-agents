@@ -22,6 +22,7 @@ from .prompts import (
     LOAD_ERROR_PROMPT,
     PROPOSE_NO_CANDIDATES_PROMPT,
     RESPONDER_PROMPT,
+    RESPONDER_RULES,
     ROUTER_PROMPT,
     SELECT_ASSIGNMENTS_PROMPT,
 )
@@ -233,12 +234,17 @@ def make_route_node(llm: GigaChat):
 def make_respond_node(llm: GigaChat):
     def respond(state: OrchestratorState, config: RunnableConfig) -> dict:
         cfg = (config or {}).get("configurable") or {}
-        system_prompt = cfg.get("system_prompt_override") or RESPONDER_PROMPT
-
-        parts: list[str] = [system_prompt]
-        # Брифинг первого хода задаёт формат/методологию — держим его на всех
+        # Брифинг первого хода задаёт роль/формат/методологию — держим его на всех
         # последующих ходах, чтобы ответы пользователю шли в едином формате.
         briefing = (state.get("briefing") or "").strip()
+        # Когда брифинг есть, роль определяет он — берём только операционные
+        # правила респондера, чтобы не дублировать роль. Явный override имеет
+        # приоритет над обоими.
+        system_prompt = cfg.get("system_prompt_override") or (
+            RESPONDER_RULES if briefing else RESPONDER_PROMPT
+        )
+
+        parts: list[str] = [system_prompt]
         if briefing:
             parts.append(
                 "Исходное задание (соблюдай его роль, методологию и ФОРМАТ ответа):\n"
@@ -253,7 +259,7 @@ def make_respond_node(llm: GigaChat):
         system_text = "\n\n".join(parts)
 
         messages: list[Any] = [SystemMessage(content=system_text)]
-        messages.extend(state.get("messages") or [])
+        messages.extend(_history_for_llm(state.get("messages") or []))
 
         ai = llm.invoke(messages)
         text = ai.content if isinstance(ai.content, str) else str(ai.content)
@@ -770,6 +776,11 @@ _KIND_LABELS = {
 }
 
 
+# Заголовок раздела трассы — общий для рендера и для вырезания из истории,
+# чтобы они не разъезжались.
+_TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
+
+
 def render_trace(trace: list[TraceStep]) -> str:
     """Детерминированный markdown-раздел «Как я пришёл к выводу» из трассы.
 
@@ -778,11 +789,41 @@ def render_trace(trace: list[TraceStep]) -> str:
     steps = [s for s in (trace or []) if (s.get("summary") or "").strip()]
     if not steps:
         return ""
-    lines = ["---", "### Как я пришёл к выводу", ""]
+    lines = ["---", _TRACE_SECTION_TITLE, ""]
     for i, step in enumerate(steps, 1):
         label = _KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "Шаг")
         lines.append(f"{i}. **{label}.** {step['summary'].strip()}")
     return "\n".join(lines)
+
+
+def _strip_trace_section(content: Any) -> Any:
+    """Убирает дописанный раздел трассы из текста AIMessage.
+
+    `_with_description` клеит раздел прямо в content (его видит пользователь),
+    и эта реплика оседает в истории. Если подавать её в LLM как есть, модель
+    имитирует раздел и генерирует свою (галлюцинированную) копию. Поэтому при
+    подаче истории в LLM раздел вырезаем — вместе с предшествующим «---».
+    """
+    if not isinstance(content, str):
+        return content
+    idx = content.find(_TRACE_SECTION_TITLE)
+    if idx == -1:
+        return content
+    prefix = content[:idx].rstrip()
+    if prefix.endswith("---"):
+        prefix = prefix[:-3].rstrip()
+    return prefix
+
+
+def _history_for_llm(messages: list[Any]) -> list[Any]:
+    """История для LLM-вызова респондера с вырезанной трассой из AI-реплик."""
+    out: list[Any] = []
+    for m in messages or []:
+        if isinstance(m, AIMessage):
+            out.append(AIMessage(content=_strip_trace_section(m.content)))
+        else:
+            out.append(m)
+    return out
 
 
 def _with_description(
