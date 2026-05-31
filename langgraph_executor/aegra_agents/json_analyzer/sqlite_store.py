@@ -19,13 +19,16 @@ _ANALYTICS_FIELDS: tuple[str, ...] = (
     "benchmark_status",
     "wow_change_abs",
     "wow_change_pct",
+    "wow_status",
     "trend",
+    "trend_status",
     "peer_mean",
     "peer_std",
     "peer_count",
     "peer_rank",
     "peer_percentile",
     "zscore",
+    "peer_status",
     "is_anomaly",
 )
 
@@ -82,13 +85,16 @@ class SqliteStore:
                 benchmark_status TEXT,
                 wow_change_abs   REAL,
                 wow_change_pct   REAL,
+                wow_status       TEXT,
                 trend            TEXT,
+                trend_status     TEXT,
                 peer_mean        REAL,
                 peer_std         REAL,
                 peer_count       INTEGER,
                 peer_rank        INTEGER,
                 peer_percentile  REAL,
                 zscore           REAL,
+                peer_status      TEXT,
                 is_anomaly       INTEGER
             );
 
@@ -627,7 +633,8 @@ class SqliteStore:
             "m.metric_name, m.metric_type, m.measure_type, m.date, m.element, "
             "m.fact, m.plan, m.benchmark, m.influent_percent, "
             "a.plan_status, a.plan_dev_pct, a.benchmark_status, "
-            "a.benchmark_dev_pct, a.trend, a.wow_change_pct "
+            "a.benchmark_dev_pct, a.trend, a.trend_status, "
+            "a.wow_change_pct, a.wow_status "
             "FROM metrics m JOIN tree t ON m.metric_uid = t.metric_uid "
             "LEFT JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"
@@ -698,10 +705,14 @@ class SqliteStore:
             where += " AND a.plan_status = 'лучше_плана'"
         elif kind == "trend":
             where += " AND a.trend IN ('рост', 'падение')"
+        elif kind == "declining":
+            where += " AND a.trend_status = 'ухудшение'"
+        elif kind == "improving":
+            where += " AND a.trend_status = 'улучшение'"
         else:
             return {
                 "error": "kind должен быть 'anomaly', 'below_plan', "
-                "'above_plan' или 'trend'",
+                "'above_plan', 'trend', 'declining' или 'improving'",
                 "rows": [],
             }
         if date:
@@ -718,5 +729,7 @@ class SqliteStore:
             "below_plan": "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC",
             "above_plan": "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC",
             "trend": "(a.wow_change_pct IS NULL), a.wow_change_pct ASC",
+            "declining": "(a.wow_change_pct IS NULL), ABS(a.wow_change_pct) DESC",
+            "improving": "(a.wow_change_pct IS NULL), ABS(a.wow_change_pct) DESC",
         }[kind]
         return self._select_metrics(where, params, order=order, limit=limit)
