@@ -13,6 +13,7 @@ LLM и эмбеддинги — через `langchain-gigachat`.
 | `analytic_orchestrator` | Диалоговый HITL-граф: `interrupt` → роутер → вызов нужного подграфа → финальный ответ → новая итерация. |
 | `wiki_ingest` | Прогон необработанных документов направления (`source_doc.processed_at IS NULL`) через ingest-пайплайн → `wiki_page`/`wiki_section`. |
 | `doc_manager` | Управление документами направления через чат: загрузка (текст в сообщении → pending `source_doc`), список, удаление. |
+| `kb_chat` | Диалоговая «болталка» с базой знаний: на содержательный вопрос подтягивает фрагменты через `easyrag` и отвечает по ним; small-talk — мимо базы. История диалога — в чекпойнтере по `thread_id`. |
 
 Все три графа зарегистрированы в `aegra.json` и доступны через стандартный
 API aegra (`/assistants`, `/threads`, `/runs/stream`) независимо.
@@ -82,6 +83,7 @@ def my_node(state, config: RunnableConfig):
 | `analytic_orchestrator` | `easyrag_enabled` (по умолчанию `true`), `easyrag_top_k` (по умолчанию `5`), `dataset_name`, `boss_tabnum`, `employee_tabnum`, `position`, `system_prompt_override` |
 | `wiki_ingest` | `direction_key` (можно также полем state) |
 | `doc_manager` | `direction_key` (можно также полем state) |
+| `kb_chat` | `direction_key` (можно также полем state), `top_k` (по умолчанию `5`), `system_prompt_override` |
 
 ## GigaChat-клиент
 
