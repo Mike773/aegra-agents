@@ -92,6 +92,17 @@ class SqliteStore:
                 is_anomaly       INTEGER
             );
 
+            CREATE TABLE metric_relations (
+                source     TEXT,
+                target     TEXT,
+                relation   TEXT,
+                strength   TEXT,
+                rationale  TEXT
+            );
+
+            CREATE INDEX idx_rel_source ON metric_relations(source);
+            CREATE INDEX idx_rel_target ON metric_relations(target);
+
             CREATE INDEX idx_metrics_name   ON metrics(metric_name);
             CREATE INDEX idx_metrics_date   ON metrics(date);
             CREATE INDEX idx_metrics_elem   ON metrics(element);
@@ -161,6 +172,49 @@ class SqliteStore:
         info = {"has_aggregate": has_agg, "elements": elements}
         self._element_info_cache[name] = info
         return info
+
+    def _has_aggregate_row(
+        self, name: str, person: str | int | None = None, date: str | None = None
+    ) -> bool:
+        """Есть ли у метрики агрегатная строка (element IS NULL) В РАМКАХ scope.
+
+        Наличие агрегата проверяется с учётом фильтра по человеку/дате, а НЕ
+        глобально по имени метрики. У сотрудника метрика может быть представлена
+        только разрезами (element), тогда как у руководителя по той же метрике
+        есть агрегат — глобальный флаг дал бы ложное True и скрыл данные
+        сотрудника (запрос ушёл бы в element IS NULL и вернул 0 строк).
+        """
+        where = "m.metric_name = ? AND m.element IS NULL"
+        params: list[Any] = [name]
+        pc, pp = self._person_clause(person)
+        where += pc
+        params += pp
+        if date:
+            where += " AND m.date = ?"
+            params.append(date)
+        return (
+            self.conn.execute(
+                f"SELECT 1 FROM metrics m WHERE {where} LIMIT 1", params
+            ).fetchone()
+            is not None
+        )
+
+    def _elements_for(self, name: str, person: str | int | None = None) -> list[str]:
+        """Значения element метрики в рамках фильтра по человеку (для пометки
+        'разрезы_вместо_агрегата')."""
+        where = "m.metric_name = ? AND m.element IS NOT NULL"
+        params: list[Any] = [name]
+        pc, pp = self._person_clause(person)
+        where += pc
+        params += pp
+        return [
+            r["element"]
+            for r in self.conn.execute(
+                f"SELECT DISTINCT m.element FROM metrics m WHERE {where} "
+                "ORDER BY m.element",
+                params,
+            )
+        ]
 
     def row_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) c FROM metrics").fetchone()["c"]
@@ -245,6 +299,77 @@ class SqliteStore:
             )
         ]
 
+    # --- Граф смысловых связей метрик (Блок D ТЗ) ---------------------------
+
+    def relation_catalog(self) -> list[dict[str, Any]]:
+        """Каталог метрик для LLM-вывода связей: имя, описание, тип, единица,
+        имя родительской метрики и есть ли вручную заданный influent_percent.
+        По одной записи на distinct-метрику (граф — на уровне имён)."""
+        rows = self.conn.execute(
+            "SELECT m.metric_name, m.metric_description, m.metric_type, "
+            "m.measure_type, p.metric_name AS parent_name, "
+            "MAX(m.influent_percent IS NOT NULL) AS has_influent "
+            "FROM metrics m LEFT JOIN metrics p ON m.parent_uid = p.metric_uid "
+            "WHERE m.metric_name IS NOT NULL "
+            "GROUP BY m.metric_name ORDER BY m.metric_name"
+        )
+        return [
+            {
+                "metric_name": r["metric_name"],
+                "metric_description": r["metric_description"],
+                "metric_type": r["metric_type"],
+                "measure_type": r["measure_type"],
+                "parent": r["parent_name"],
+                "has_influent": bool(r["has_influent"]),
+            }
+            for r in rows
+        ]
+
+    def load_relations(self, edges: list[dict[str, Any]]) -> int:
+        """Загружает рёбра графа связей в таблицу metric_relations (идемпотентно)."""
+        self.conn.execute("DELETE FROM metric_relations")
+        self.conn.executemany(
+            "INSERT INTO metric_relations (source, target, relation, strength, "
+            "rationale) VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    e.get("source"),
+                    e.get("target"),
+                    e.get("relation"),
+                    e.get("strength"),
+                    e.get("rationale"),
+                )
+                for e in (edges or [])
+                if e.get("source") and e.get("target")
+            ],
+        )
+        self.conn.commit()
+        return len(edges or [])
+
+    def related_metrics(self, name: str) -> list[dict[str, Any]]:
+        """Рёбра графа, где метрика участвует как source или target.
+        Сильные связи первыми ('высокая' → 'средняя' → 'низкая')."""
+        rows = self.conn.execute(
+            "SELECT source, target, relation, strength, rationale "
+            "FROM metric_relations WHERE source = ? OR target = ? "
+            "ORDER BY CASE strength WHEN 'высокая' THEN 0 WHEN 'средняя' THEN 1 "
+            "ELSE 2 END, target",
+            (name, name),
+        )
+        return [dict(r) for r in rows]
+
+    def _relation_between(self, a: str, b: str) -> dict[str, Any] | None:
+        """LLM-выведенная связь между двумя метриками (любое направление)."""
+        row = self.conn.execute(
+            "SELECT source, target, relation, strength, rationale "
+            "FROM metric_relations "
+            "WHERE (source = ? AND target = ?) OR (source = ? AND target = ?) "
+            "ORDER BY CASE strength WHEN 'высокая' THEN 0 WHEN 'средняя' THEN 1 "
+            "ELSE 2 END LIMIT 1",
+            (a, b, b, a),
+        ).fetchone()
+        return dict(row) if row else None
+
     def list_people(
         self,
         role: str | None = None,
@@ -316,11 +441,10 @@ class SqliteStore:
         )
         fallback_elements: list[str] | None = None
         if element_unspecified:
-            info = self._metric_element_info(name)
-            if info["has_aggregate"]:
+            if self._has_aggregate_row(name, person=person, date=date):
                 where += " AND m.element IS NULL"
             else:
-                fallback_elements = info["elements"]
+                fallback_elements = self._elements_for(name, person=person)
         else:
             where += " AND m.element = ?"
             params.append(element)
@@ -363,11 +487,10 @@ class SqliteStore:
         )
         fallback_elements: list[str] | None = None
         if element_unspecified:
-            info = self._metric_element_info(name)
-            if info["has_aggregate"]:
+            if self._has_aggregate_row(name, person=person):
                 where += " AND m.element IS NULL"
             else:
-                fallback_elements = info["elements"]
+                fallback_elements = self._elements_for(name, person=person)
         else:
             where += " AND m.element = ?"
             params.append(element)
@@ -396,8 +519,18 @@ class SqliteStore:
         where = "m.metric_name = ? AND m.date = ? AND m.person_is_me = 0"
         params: list[Any] = [name, date]
         if element is None or (isinstance(element, str) and element.strip() == ""):
-            info = self._metric_element_info(name)
-            if not info["has_aggregate"]:
+            # Наличие агрегата для рейтинга проверяем по ранжируемой популяции
+            # (сотрудники, person_is_me = 0) на эту дату, а не глобально по имени:
+            # у руководителя может быть агрегат, а у сотрудников — только разрезы.
+            has_agg = (
+                self.conn.execute(
+                    "SELECT 1 FROM metrics WHERE metric_name = ? AND date = ? "
+                    "AND person_is_me = 0 AND element IS NULL LIMIT 1",
+                    (name, date),
+                ).fetchone()
+                is not None
+            )
+            if not has_agg:
                 return {
                     "error": (
                         f"У метрики '{name}' нет агрегатной строки — рейтинг "
@@ -407,7 +540,7 @@ class SqliteStore:
                     "rows": [],
                     "count": 0,
                     "metric_type": self.metric_type_of(name),
-                    "elements": info["elements"],
+                    "elements": self._elements_for(name),
                 }
             where += " AND m.element IS NULL"
         else:
@@ -471,12 +604,11 @@ class SqliteStore:
             root_where = "depth = 1"
             root_params: list[Any] = []
         else:
-            info = self._metric_element_info(name)
-            if info["has_aggregate"]:
+            if self._has_aggregate_row(name, person=person):
                 root_where = "metric_name = ? AND element IS NULL"
             else:
                 root_where = "metric_name = ?"
-                fallback_elements = info["elements"]
+                fallback_elements = self._elements_for(name, person=person)
             root_params = [name]
         pc, pp = self._person_clause(person)
         root_where += pc.replace("m.", "")
@@ -501,8 +633,10 @@ class SqliteStore:
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"
         )
         rows = self._rows(self.conn.execute(sql, [*root_params, limit + 1]))
+        shown = rows[:limit]
+        self._annotate_tree_relations(shown)
         result: dict[str, Any] = {
-            "rows": rows[:limit],
+            "rows": shown,
             "count": min(len(rows), limit),
             "truncated": len(rows) > limit,
         }
@@ -512,6 +646,39 @@ class SqliteStore:
                 "разрезов element: " + ", ".join(fallback_elements)
             )
         return result
+
+    def _annotate_tree_relations(self, rows: list[dict[str, Any]]) -> None:
+        """Запасной сигнал влияния для узлов БЕЗ influent_percent (Блок D ТЗ).
+
+        Бизнес часто не проставляет influent_percent. Для таких узлов
+        подмешиваем LLM-выведенную связь ребёнок↔родитель из metric_relations:
+        influent_percent_missing=True и inferred_relation (или None, если в
+        графе связи нет — значит граф спрошен, но пусто). Это ЭВРИСТИКА из
+        текста, не точный вес."""
+        uid_to_name = {
+            r.get("metric_uid"): r.get("metric_name")
+            for r in rows
+            if r.get("metric_uid") is not None
+        }
+        for r in rows:
+            if r.get("influent_percent") is not None:
+                continue
+            parent_uid = r.get("parent_uid")
+            if parent_uid is None:
+                continue
+            child_name = r.get("metric_name")
+            parent_name = uid_to_name.get(parent_uid)
+            if parent_name is None:
+                row = self.conn.execute(
+                    "SELECT metric_name FROM metrics WHERE metric_uid = ? LIMIT 1",
+                    (parent_uid,),
+                ).fetchone()
+                parent_name = row["metric_name"] if row else None
+            r["influent_percent_missing"] = True
+            r["inferred_relation"] = (
+                self._relation_between(child_name, parent_name)
+                if child_name and parent_name else None
+            )
 
     def find_flags(
         self,
