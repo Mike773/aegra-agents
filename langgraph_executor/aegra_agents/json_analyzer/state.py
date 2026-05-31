@@ -16,6 +16,9 @@ class JsonAnalyzerState(TypedDict, total=False):
     # Промежуточные результаты узла gather.
     parsed_rows: list[dict[str, Any]]
     gathered_facts: str
+    # Структурированные шаги tool-loop (Блок A.4 ТЗ): список
+    # {"tool", "args", "result_summary"} — оркестратор маппит их в TraceStep.
+    tool_steps: list[dict[str, Any]]
     completed: bool
     # Итог.
     answer: str

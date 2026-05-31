@@ -108,6 +108,42 @@ def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
     return "\n\n".join(blocks), len(blocks)
 
 
+_STEP_SUMMARY_CAP = 280
+
+
+def extract_tool_steps(messages: list[Any]) -> list[dict[str, Any]]:
+    """Структурированные шаги tool-loop для сквозной трассы (Блок A.4 ТЗ).
+
+    Тот же источник, что у extract_tool_transcript (ToolMessage + tool_calls),
+    но на выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
+    результата (полные выдачи в трассу не тянем — экономим контекст).
+    """
+    results: dict[str, str] = {}
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            results[msg.tool_call_id] = _text(msg)
+
+    steps: list[dict[str, Any]] = []
+    for msg in messages:
+        for call in getattr(msg, "tool_calls", None) or []:
+            raw = results.get(call.get("id"), "")
+            summary = " ".join((raw or "").split())
+            if len(summary) > _STEP_SUMMARY_CAP:
+                summary = summary[:_STEP_SUMMARY_CAP] + "…"
+            steps.append(
+                {
+                    "tool": call.get("name"),
+                    "args": {
+                        k: v
+                        for k, v in (call.get("args") or {}).items()
+                        if v not in (None, "")
+                    },
+                    "result_summary": summary,
+                }
+            )
+    return steps
+
+
 def synthesize_answer(model: Any, question: str, messages: list[Any]) -> str:
     """Стадия 2: финальный ответ из собранных данных вызовом модели без инструментов."""
     transcript, tool_calls = extract_tool_transcript(messages)

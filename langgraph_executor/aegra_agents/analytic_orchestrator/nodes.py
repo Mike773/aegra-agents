@@ -25,7 +25,7 @@ from .prompts import (
     ROUTER_PROMPT,
     SELECT_ASSIGNMENTS_PROMPT,
 )
-from .state import OrchestratorState
+from .state import OrchestratorState, TraceStep
 
 _DEFAULT_DATASET = "metrics_for_agent_analyst"
 _METRICS_PREVIEW_LIMIT = 8000
@@ -36,6 +36,8 @@ _MAX_CANDIDATES = 5
 # Ловит склонённые формы: «бабушку» ↔ «бабушка».
 _STUB_MATCH_RATIO = 0.72
 _STUB_LOOKUP_LIMIT = 5
+# Сколько шагов tool_call максимум разворачивать в трассу из json_analyzer.
+_TRACE_TOOL_STEPS_CAP = 12
 
 
 def make_load_data_node():
@@ -46,10 +48,18 @@ def make_load_data_node():
         position = cfg.get("position")
         dataset_name = cfg.get("dataset_name") or _DEFAULT_DATASET
 
+        # Первое входящее сообщение — заранее подготовленный вопрос-брифинг
+        # (роль, методология, желаемый формат ответа). Сохраняем его, чтобы
+        # initial_analysis выполнил задание по нему, а респондер держал формат
+        # на последующих ходах. Сброс трассы — это первый узел первого хода.
+        briefing = _last_user_text(state).strip() or None
+
         if not boss or not employee:
             return {
                 "loaded": True,
                 "metrics": None,
+                "briefing": briefing,
+                "reasoning_trace": [],
                 "metrics_error": (
                     "В configurable нет boss_tabnum/employee_tabnum: "
                     f"boss_tabnum={boss!r}, employee_tabnum={employee!r}."
@@ -80,22 +90,92 @@ def make_load_data_node():
             "direction_key": direction_key,
             "metrics": metrics,
             "metrics_error": error,
+            "briefing": briefing,
+            "reasoning_trace": [],
             "loaded": True,
         }
 
     return load_data
 
 
-def make_initial_analysis_node(llm: GigaChat):
-    def initial_analysis(state: OrchestratorState) -> dict:
+def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
+    """Первичный анализ по ПОДГОТОВЛЕННОМУ вопросу-брифингу (первое сообщение).
+
+    Первое сообщение пользователя — заранее заданная инструкция: роль,
+    методология, желаемый формат ответа. Анализ грубому JSON не доверяем —
+    прогоняем брифинг через json_analyzer (видит полный датасет инструментами),
+    а затем формируем ответ строго по инструкции/формату из брифинга. Если
+    брифинга нет — деградируем на дефолтный INITIAL_ANALYSIS_PROMPT.
+    """
+
+    async def initial_analysis(state: OrchestratorState, config: RunnableConfig) -> dict:
         if state.get("metrics_error") or state.get("metrics") is None:
-            return {"messages": [AIMessage(content=LOAD_ERROR_PROMPT)]}
+            step: TraceStep = {
+                "stage": "initial",
+                "kind": "error",
+                "summary": state.get("metrics_error") or "Метрики не загружены.",
+            }
+            return {
+                "messages": [AIMessage(content=LOAD_ERROR_PROMPT)],
+                "reasoning_trace": _append_trace(state, [step]),
+            }
+
+        metrics = state.get("metrics")
+        briefing = (state.get("briefing") or "").strip()
+        direction_key = (state.get("direction_key") or "").strip()
+        # Вопрос для глубокого сбора: сам брифинг, иначе фиксированный обзор.
+        question = briefing or "Сделай первичный обзор ключевых метрик сотрудника."
+
+        analysis, tool_steps, err = await _run_analyzer(
+            json_analyzer_graph, metrics, question, direction_key
+        )
+
+        trace_steps: list[TraceStep] = [{
+            "stage": "initial",
+            "kind": "intent",
+            "summary": (
+                "Первый ход: выполняю подготовленное задание (брифинг)."
+                if briefing else "Первый ход: первичный обзор метрик."
+            ),
+            "detail": {"has_briefing": bool(briefing)},
+        }]
+        if err:
+            trace_steps.append({"stage": "initial", "kind": "error", "summary": err})
+        trace_steps.extend(_analyzer_trace_steps(tool_steps))
+
+        # Системный контекст: инструкция/формат из брифинга (или дефолт) + данные.
+        parts: list[str] = [briefing or INITIAL_ANALYSIS_PROMPT]
+        if analysis:
+            parts.append("Данные, собранные аналитиком метрик из полного датасета:\n" + analysis)
+        else:
+            parts.append(_metrics_payload(metrics))
+            if err:
+                parts.append(f"(Глубокий анализ недоступен: {err} — опирайся на JSON выше.)")
 
         ai = llm.invoke([
-            SystemMessage(content=INITIAL_ANALYSIS_PROMPT),
-            HumanMessage(content=_metrics_payload(state.get("metrics"))),
+            SystemMessage(content="\n\n".join(parts)),
+            HumanMessage(content="Выполни задание по данным выше и верни ответ в требуемом формате."),
         ])
-        return {"messages": [ai]}
+        text = ai.content if isinstance(ai.content, str) else str(ai.content)
+
+        trace_steps.append({
+            "stage": "initial",
+            "kind": "decision",
+            "summary": "Сформировал первичный анализ по брифингу и собранным данным.",
+        })
+        new_trace = _append_trace(state, trace_steps)
+
+        out_state = {
+            "messages": [AIMessage(content=_with_description(
+                text, {"reasoning_trace": new_trace}, config
+            ))],
+            "reasoning_trace": new_trace,
+            # Sticky: результат глубокого анализа доступен респондеру дальше.
+            "analytics_question": question,
+            "analytics_answer": analysis,
+            "analytics_error": err,
+        }
+        return out_state
 
     return initial_analysis
 
@@ -105,15 +185,31 @@ _ROUTE_LABELS = {"analytics", "wiki", "chat", "done", "assignments"}
 
 def make_route_node(llm: GigaChat):
     def route(state: OrchestratorState) -> dict:
+        # route — первый узел каждого последующего хода: здесь СБРАСЫВАЕМ трассу
+        # (она строго per-turn) и кладём первый шаг — классификацию запроса.
         last_text = _last_user_text(state)
         if not last_text:
-            return {"intent": "chat"}
+            return {
+                "intent": "chat",
+                "reasoning_trace": [{
+                    "stage": "route", "kind": "intent",
+                    "summary": "Пустая реплика — обычный чат.",
+                    "detail": {"intent": "chat"},
+                }],
+            }
 
         # Пока висит pending-список, ЛЮБАЯ реплика интерпретируется как выбор
         # по нему — это и есть «отдельная ветвь диалога». Выход из неё —
         # «никакие/отмена», что в commit_assignments отрисуется как cancel.
         if state.get("pending_assignments"):
-            return {"intent": "assignments_select"}
+            return {
+                "intent": "assignments_select",
+                "reasoning_trace": [{
+                    "stage": "route", "kind": "intent",
+                    "summary": "Идёт выбор поручений — реплику трактую как выбор.",
+                    "detail": {"intent": "assignments_select"},
+                }],
+            }
 
         ai = llm.invoke([
             SystemMessage(content=ROUTER_PROMPT),
@@ -122,7 +218,14 @@ def make_route_node(llm: GigaChat):
         label = (ai.content or "").strip().lower()
         if label not in _ROUTE_LABELS:
             label = "chat"
-        return {"intent": label}
+        return {
+            "intent": label,
+            "reasoning_trace": [{
+                "stage": "route", "kind": "intent",
+                "summary": f"Определил тип запроса как «{label}».",
+                "detail": {"intent": label, "query": last_text[:200]},
+            }],
+        }
 
     return route
 
@@ -133,6 +236,14 @@ def make_respond_node(llm: GigaChat):
         system_prompt = cfg.get("system_prompt_override") or RESPONDER_PROMPT
 
         parts: list[str] = [system_prompt]
+        # Брифинг первого хода задаёт формат/методологию — держим его на всех
+        # последующих ходах, чтобы ответы пользователю шли в едином формате.
+        briefing = (state.get("briefing") or "").strip()
+        if briefing:
+            parts.append(
+                "Исходное задание (соблюдай его роль, методологию и ФОРМАТ ответа):\n"
+                + briefing
+            )
         metrics_block = _metrics_system_block(state)
         if metrics_block:
             parts.append(metrics_block)
@@ -145,7 +256,29 @@ def make_respond_node(llm: GigaChat):
         messages.extend(state.get("messages") or [])
 
         ai = llm.invoke(messages)
-        return {"messages": [ai]}
+        text = ai.content if isinstance(ai.content, str) else str(ai.content)
+
+        used = []
+        if metrics_block:
+            used.append("метрики")
+        if easyrag_block:
+            used.append("wiki")
+        decision: TraceStep = {
+            "stage": "respond",
+            "kind": "decision",
+            "summary": (
+                "Сформировал ответ на основе: " + ", ".join(used)
+                if used else "Сформировал ответ без внешних источников."
+            ),
+            "detail": {"sources": used, "briefing": bool(briefing)},
+        }
+        new_trace = _append_trace(state, [decision])
+        return {
+            "messages": [AIMessage(content=_with_description(
+                text, {"reasoning_trace": new_trace}, config
+            ))],
+            "reasoning_trace": new_trace,
+        }
 
     return respond
 
@@ -164,44 +297,37 @@ def make_call_json_analyzer_node(json_analyzer_graph: Any):
         metrics = state.get("metrics")
 
         if not last_text:
+            err = "Нет реплики пользователя для аналитического запроса."
             return {
                 "analytics_question": None,
                 "analytics_answer": None,
-                "analytics_error": "Нет реплики пользователя для аналитического запроса.",
-            }
-        if metrics is None:
-            return {
-                "analytics_question": last_text,
-                "analytics_answer": None,
-                "analytics_error": (
-                    state.get("metrics_error")
-                    or "Метрики не загружены — нечем кормить json_analyzer."
+                "analytics_error": err,
+                "reasoning_trace": _append_trace(
+                    state, [{"stage": "json_analyzer", "kind": "error", "summary": err}]
                 ),
             }
-        if not direction_key:
-            return {
-                "analytics_question": last_text,
-                "analytics_answer": None,
-                "analytics_error": "Пустой direction_key — json_analyzer не сможет изолировать pgvector-кэш.",
-            }
 
-        try:
-            result = await json_analyzer_graph.ainvoke({
-                "raw_json": metrics,
-                "question": last_text,
-                "direction_key": direction_key,
+        answer, tool_steps, err = await _run_analyzer(
+            json_analyzer_graph, metrics, last_text, direction_key
+        )
+        if err and metrics is None:
+            err = state.get("metrics_error") or err
+
+        steps = _analyzer_trace_steps(tool_steps)
+        if err:
+            steps.append({"stage": "json_analyzer", "kind": "error", "summary": err})
+        elif answer:
+            steps.append({
+                "stage": "json_analyzer", "kind": "decision",
+                "summary": "Аналитик метрик собрал данные и сформировал ответ.",
             })
-            return {
-                "analytics_question": last_text,
-                "analytics_answer": result.get("answer") or None,
-                "analytics_error": None,
-            }
-        except Exception as exc:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
-            return {
-                "analytics_question": last_text,
-                "analytics_answer": None,
-                "analytics_error": f"{type(exc).__name__}: {exc}"[:300],
-            }
+
+        return {
+            "analytics_question": last_text,
+            "analytics_answer": answer,
+            "analytics_error": err,
+            "reasoning_trace": _append_trace(state, steps),
+        }
 
     return call_json_analyzer
 
@@ -248,16 +374,54 @@ def make_call_easyrag_node(easyrag_graph: Any):
                 "easyrag_snippets": snippets,
                 "easyrag_stub_pages": stub_pages,
                 "easyrag_error": None,
+                "reasoning_trace": _append_trace(
+                    state, _easyrag_trace_steps(snippets, stub_pages, None)
+                ),
             }
         except Exception as exc:  # noqa: BLE001 — внешний подграф (сеть/БД), сужать нечем
+            err = f"{type(exc).__name__}: {exc}"[:300]
             return {
                 "easyrag_query": last_text,
                 "easyrag_snippets": [],
                 "easyrag_stub_pages": [],
-                "easyrag_error": f"{type(exc).__name__}: {exc}"[:300],
+                "easyrag_error": err,
+                "reasoning_trace": _append_trace(
+                    state, _easyrag_trace_steps([], [], err)
+                ),
             }
 
     return call_easyrag
+
+
+def _easyrag_trace_steps(
+    snippets: list[dict], stub_pages: list[dict], err: str | None
+) -> list[TraceStep]:
+    """Шаги kb_hit по найденным секциям wiki (или пусто/заглушка/ошибка)."""
+    if err:
+        return [{"stage": "easyrag", "kind": "error",
+                 "summary": f"Контекст из wiki недоступен: {err}"}]
+    if not snippets:
+        if stub_pages:
+            names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stub_pages)
+            return [{"stage": "easyrag", "kind": "kb_hit",
+                     "summary": f"В wiki есть пустые заглушки по теме: {names} (без содержания)."}]
+        return [{"stage": "easyrag", "kind": "kb_hit",
+                 "summary": "В базе знаний релевантного контента не нашлось."}]
+    steps: list[TraceStep] = []
+    for s in snippets[:5]:
+        page = s.get("page_title") or s.get("slug") or "-"
+        title = s.get("section_title") or s.get("anchor") or "-"
+        sim = s.get("similarity")
+        sim_str = f", релевантность {sim:.2f}" if isinstance(sim, (int, float)) else ""
+        body = (s.get("body_md") or "").strip().replace("\n", " ")
+        if len(body) > 160:
+            body = body[:160] + "…"
+        steps.append({
+            "stage": "easyrag", "kind": "kb_hit",
+            "summary": f"Нашёл в wiki «{page} / {title}»{sim_str}: {body}",
+            "detail": {"page": page, "section": title, "similarity": sim},
+        })
+    return steps
 
 
 async def _find_relevant_stub_pages(direction_key: str, query: str) -> list[dict]:
@@ -326,9 +490,19 @@ def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
     async def extract(state: OrchestratorState) -> dict:
         metrics = state.get("metrics")
         if metrics is None or state.get("metrics_error"):
-            return {"candidate_assignments": [], "pending_assignments": []}
+            return {
+                "candidate_assignments": [],
+                "pending_assignments": [],
+                "reasoning_trace": _append_trace(state, [{
+                    "stage": "assignments", "kind": "error",
+                    "summary": "Метрики не загружены — поручения не извлекаю.",
+                }]),
+            }
 
-        analysis = await _problem_analysis(state, metrics, json_analyzer_graph)
+        direction_key = (state.get("direction_key") or "").strip()
+        analysis, tool_steps, _err = await _run_analyzer(
+            json_analyzer_graph, metrics, ASSIGNMENTS_ANALYSIS_QUESTION, direction_key
+        )
         if analysis:
             context = f"Анализ проблемных зон сотрудника:\n{analysis}"
         else:
@@ -347,36 +521,19 @@ def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
         except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
             candidates = []
 
+        steps = _analyzer_trace_steps(tool_steps)
+        steps.append({
+            "stage": "assignments", "kind": "decision",
+            "summary": f"Проанализировал проблемные зоны, выделил кандидатов: {len(candidates)}.",
+            "detail": {"candidates": [c.get("title") for c in candidates]},
+        })
         return {
             "candidate_assignments": candidates,
             "pending_assignments": candidates,
+            "reasoning_trace": _append_trace(state, steps),
         }
 
     return extract
-
-
-async def _problem_analysis(
-    state: OrchestratorState, metrics: Any, json_analyzer_graph: Any
-) -> str:
-    """Прогоняет json_analyzer фиксированным вопросом про проблемные зоны.
-
-    Возвращает текст анализа или пустую строку, если подграф не отработал
-    (нет ``direction_key``, исключение или пустой ответ) — вызывающий код
-    деградирует на сырой JSON.
-    """
-    direction_key = (state.get("direction_key") or "").strip()
-    if not direction_key:
-        return ""
-    try:
-        result = await json_analyzer_graph.ainvoke({
-            "raw_json": metrics,
-            "question": ASSIGNMENTS_ANALYSIS_QUESTION,
-            "direction_key": direction_key,
-        })
-    except Exception:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
-        return ""
-    answer = result.get("answer") if isinstance(result, dict) else None
-    return (answer or "").strip()
 
 
 def make_propose_assignments_node():
@@ -443,7 +600,14 @@ def make_select_assignments_node(llm: GigaChat):
             indices = []
 
         selected = [pending[i - 1] for i in indices]
-        return {"selected_assignments": selected}
+        return {
+            "selected_assignments": selected,
+            "reasoning_trace": _append_trace(state, [{
+                "stage": "assignments", "kind": "decision",
+                "summary": f"Распознал выбор пользователя: позиции {indices or '—'}.",
+                "detail": {"indices": indices},
+            }]),
+        }
 
     return select
 
@@ -456,19 +620,24 @@ def make_commit_assignments_node():
     успех = подтверждение и обновлённый ``last_committed_assignments``.
     """
 
-    def commit(state: OrchestratorState) -> dict:
+    def commit(state: OrchestratorState, config: RunnableConfig) -> dict:
         selected = state.get("selected_assignments") or []
         boss = (state.get("boss_tabnum") or "").strip()
         employee = (state.get("employee_tabnum") or "").strip()
 
         if not selected:
+            new_trace = _append_trace(state, [{
+                "stage": "assignments", "kind": "decision",
+                "summary": "Выбор пуст — поручения не фиксирую (отмена).",
+            }])
+            text = ("Хорошо, поручения сейчас не фиксирую. "
+                    "Если передумаете — скажите «оформи поручения».")
             return {
-                "messages": [AIMessage(
-                    content="Хорошо, поручения сейчас не фиксирую. "
-                    "Если передумаете — скажите «оформи поручения»."
-                )],
+                "messages": [AIMessage(content=_with_description(
+                    text, {"reasoning_trace": new_trace}, config))],
                 "pending_assignments": [],
                 "selected_assignments": [],
+                "reasoning_trace": new_trace,
             }
 
         try:
@@ -486,6 +655,8 @@ def make_commit_assignments_node():
 
         if err:
             text = f"Не удалось отправить поручения: {err}"
+            step: TraceStep = {"stage": "assignments", "kind": "error",
+                               "summary": f"Ошибка отправки поручений: {err}"}
         else:
             lines = [
                 f"Зафиксировал {len(committed)} поручение(й) "
@@ -494,12 +665,18 @@ def make_commit_assignments_node():
             for s in committed:
                 lines.append(f"- {s.get('title', '').strip() or '(без названия)'}")
             text = "\n".join(lines)
+            step = {"stage": "assignments", "kind": "decision",
+                    "summary": f"Отправил {len(committed)} поручение(й) в сервис.",
+                    "detail": {"committed": [s.get("title") for s in committed]}}
 
+        new_trace = _append_trace(state, [step])
         return {
-            "messages": [AIMessage(content=text)],
+            "messages": [AIMessage(content=_with_description(
+                text, {"reasoning_trace": new_trace}, config))],
             "pending_assignments": [],
             "selected_assignments": [],
             "last_committed_assignments": committed,
+            "reasoning_trace": new_trace,
         }
 
     return commit
@@ -553,6 +730,111 @@ def _metrics_payload(metrics: Any) -> str:
     except (TypeError, ValueError):
         payload = repr(metrics)
     return f"JSON с метриками сотрудника:\n{payload[:_METRICS_PREVIEW_LIMIT]}"
+
+
+# --- Блок A/B: сквозная трасса рассуждения и режим describe_answer -----------
+
+def _trace(state: OrchestratorState) -> list[TraceStep]:
+    return list(state.get("reasoning_trace") or [])
+
+
+def _append_trace(state: OrchestratorState, steps: list[TraceStep]) -> list[TraceStep]:
+    """Per-turn накопление: читаем текущую трассу и возвращаем её + новые шаги.
+
+    Плоское поле TypedDict перезаписывается каждым возвратом узла, поэтому
+    накапливаем явной конкатенацией (reducer не используем — он копил бы трассу
+    и между ходами, а она строго per-turn).
+    """
+    return _trace(state) + steps
+
+
+def _describe_enabled(config: RunnableConfig | None) -> bool:
+    """Флаг describe_answer из configurable (bool или строка 'true'/'1'/'yes'/'да')."""
+    cfg = (config or {}).get("configurable") or {}
+    val = cfg.get("describe_answer")
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in {"true", "1", "yes", "да"}
+    return bool(val)
+
+
+_KIND_LABELS = {
+    "intent": "Классификация запроса",
+    "kb_hit": "База знаний (wiki)",
+    "tool_call": "Метрики",
+    "derived_metric": "Производный показатель",
+    "hypothesis": "Гипотеза",
+    "decision": "Вывод",
+    "error": "Сбой",
+}
+
+
+def render_trace(trace: list[TraceStep]) -> str:
+    """Детерминированный markdown-раздел «Как я пришёл к выводу» из трассы.
+
+    Без LLM — строго по накопленным шагам, поэтому без галлюцинаций (Блок B.3.a).
+    """
+    steps = [s for s in (trace or []) if (s.get("summary") or "").strip()]
+    if not steps:
+        return ""
+    lines = ["---", "### Как я пришёл к выводу", ""]
+    for i, step in enumerate(steps, 1):
+        label = _KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "Шаг")
+        lines.append(f"{i}. **{label}.** {step['summary'].strip()}")
+    return "\n".join(lines)
+
+
+def _with_description(
+    text: str, state: OrchestratorState, config: RunnableConfig | None
+) -> str:
+    """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true."""
+    if not _describe_enabled(config):
+        return text
+    section = render_trace(state.get("reasoning_trace") or [])
+    return f"{text}\n\n{section}" if section else text
+
+
+async def _run_analyzer(
+    json_analyzer_graph: Any, metrics: Any, question: str, direction_key: str
+) -> tuple[str | None, list[dict], str | None]:
+    """Единая обёртка над json_analyzer-подграфом.
+
+    Возвращает (answer, tool_steps, error). Ошибки изолируются: при сбое/нехватке
+    входов answer=None, error заполнен, конвейер продолжает работу по фоллбэку.
+    """
+    if metrics is None:
+        return None, [], "Метрики не загружены — нечем кормить json_analyzer."
+    if not (question or "").strip():
+        return None, [], "Пустой вопрос для аналитического запроса."
+    if not direction_key:
+        return None, [], "Пустой direction_key — json_analyzer не изолирует кэш."
+    try:
+        result = await json_analyzer_graph.ainvoke({
+            "raw_json": metrics,
+            "question": question,
+            "direction_key": direction_key,
+        })
+    except Exception as exc:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
+        return None, [], f"{type(exc).__name__}: {exc}"[:300]
+    answer = result.get("answer") if isinstance(result, dict) else None
+    tool_steps = result.get("tool_steps") if isinstance(result, dict) else None
+    return (answer or None), (tool_steps or []), None
+
+
+def _analyzer_trace_steps(tool_steps: list[dict]) -> list[TraceStep]:
+    """Мапит tool_steps подграфа в TraceStep (stage='json_analyzer')."""
+    steps: list[TraceStep] = []
+    for ts in (tool_steps or [])[:_TRACE_TOOL_STEPS_CAP]:
+        args = ", ".join(f"{k}={v}" for k, v in (ts.get("args") or {}).items())
+        summary = ts.get("result_summary") or ""
+        steps.append({
+            "stage": "json_analyzer",
+            "kind": "tool_call",
+            "summary": f"{ts.get('tool')}({args}) → {summary}".strip(),
+            "detail": ts,
+        })
+    return steps
 
 
 def _metrics_system_block(state: OrchestratorState) -> str | None:

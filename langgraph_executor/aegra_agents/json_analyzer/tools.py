@@ -2,7 +2,8 @@
 
 Агент НИКОГДА не пишет SQL — он только вызывает эти инструменты с параметрами.
 Каждый инструмент внутри выполняет параметрический запрос к in-memory SQLite
-(метрики + производная аналитика) либо семантический поиск в pgvector-кэше.
+(метрики + производная аналитика) либо семантический поиск по in-memory индексу
+эмбеддингов (EmbeddingIndex).
 
 Выдача намеренно компактная: пустые поля убираются, числа округляются —
 контекст чат-модели ограничен.
@@ -15,8 +16,8 @@ from typing import Any, Callable
 from langchain_core.tools import StructuredTool
 
 from . import analytics
-from .pg_cache import PgCache
 from .sqlite_store import SqliteStore
+from .store_cache import EmbeddingIndex
 
 _ROW_KEYS = (
     "person_fio",
@@ -86,14 +87,14 @@ def _pack(result: dict[str, Any], curated: bool = True) -> str:
 
 def build_tools(
     store: SqliteStore,
-    pg: PgCache,
-    direction_key: str,
+    index: EmbeddingIndex,
     embed_query: Callable[[str], list[float]],
 ) -> list[StructuredTool]:
-    """Собирает инструменты, замкнутые на конкретные хранилища и направление.
+    """Собирает инструменты, замкнутые на конкретные хранилища.
 
-    Все вызовы pgvector-кэша автоматически фильтруются по direction_key —
-    данные других направлений невидимы инструменту resolve_entity.
+    Семантический поиск (resolve_entity) идёт по in-memory индексу эмбеддингов,
+    уже загруженному только для текущего направления — данные других
+    направлений в него не попадают.
     """
 
     def _unknown_metric(metric: str) -> str | None:
@@ -159,12 +160,7 @@ def build_tools(
         return _dump(
             {
                 "kind": kind,
-                "matches": pg.search(
-                    vector,
-                    direction_key=direction_key,
-                    kinds=search_kinds,
-                    top_k=5,
-                ),
+                "matches": index.search(vector, kinds=search_kinds, top_k=5),
             }
         )
 
@@ -333,6 +329,29 @@ def build_tools(
         метрикам на последней неделе, топ аномалий, счётчики трендов."""
         return _dump(analytics.build_summary(store))
 
+    def related_metrics(metric: str) -> str:
+        """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий и описаний,
+        НЕ из значений). Для метрики metric возвращает рёбра, где она участвует:
+        relation — тип связи ('опережающая→запаздывающая' / 'компонент' /
+        'смежная' / 'влияет_на'), strength — сила ('низкая'/'средняя'/'высокая'),
+        rationale — краткое обоснование. Используй, чтобы понять, на какие метрики
+        данная влияет или от каких зависит — ОСОБЕННО когда у дочерней метрики не
+        задан influent_percent (его вес влияния на родителя). Это ЭВРИСТИКА из
+        текста, а не точный вес: не подавай связи как факт, помечай как
+        предположительные."""
+        metric = _blank_to_none(metric)
+        if metric is None:
+            return _dump({"error": "related_metrics требует точное название метрики"})
+        unknown = _unknown_metric(metric)
+        if unknown:
+            return unknown
+        edges = store.related_metrics(metric)
+        return _dump({
+            "metric": metric,
+            "relations": [_strip(e) for e in edges],
+            "count": len(edges),
+        })
+
     specs = [
         (schema_overview, "schema_overview"),
         (resolve_entity, "resolve_entity"),
@@ -345,6 +364,7 @@ def build_tools(
         (list_people, "list_people"),
         (find_flags, "find_flags"),
         (analytics_summary, "analytics_summary"),
+        (related_metrics, "related_metrics"),
     ]
 
     return [

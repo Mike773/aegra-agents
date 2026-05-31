@@ -15,6 +15,24 @@ Intent = Literal[
 ]
 
 
+class TraceStep(TypedDict, total=False):
+    """Один шаг рассуждения для сквозного лога (Блок A ТЗ).
+
+    stage — узел конвейера: 'route' | 'easyrag' | 'json_analyzer' |
+            'assignments' | 'respond' | 'initial';
+    kind  — тип шага: 'intent' | 'kb_hit' | 'tool_call' | 'derived_metric' |
+            'hypothesis' | 'decision' | 'error';
+    summary — человекочитаемая строка одной фразой;
+    detail  — машиночитаемые детали (имя инструмента, аргументы, similarity,
+              имена метрик, числа и т.п.).
+    """
+
+    stage: str
+    kind: str
+    summary: str
+    detail: dict
+
+
 class OrchestratorState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
 
@@ -22,6 +40,19 @@ class OrchestratorState(TypedDict, total=False):
     employee_tabnum: str
     position: str | None
     direction_key: str | None
+
+    # Первое сообщение — заранее подготовленный вопрос-брифинг, возможно
+    # содержащий желаемый формат ответа. Сохраняется на первом ходе и затем
+    # подмешивается в системный контекст респондера на всех последующих ходах,
+    # чтобы формат держался по всему диалогу. Пользовательские реплики приходят
+    # отдельными ходами и брифинг не перезаписывают.
+    briefing: str | None
+
+    # Сквозной лог шагов рассуждения текущего хода (Блок A ТЗ). Жизненный цикл —
+    # строго per-turn: первый узел хода (load_data/route) перезаписывает список,
+    # downstream-узлы дополняют его явной конкатенацией (не reducer — иначе
+    # трасса копилась бы между ходами).
+    reasoning_trace: list[TraceStep]
 
     metrics: Any
     metrics_error: str | None

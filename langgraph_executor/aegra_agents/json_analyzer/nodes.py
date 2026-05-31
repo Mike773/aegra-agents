@@ -1,26 +1,78 @@
 """Узлы графа json_analyzer: gather (загрузка + сбор tool-вызовами) и synthesize.
 
-Узлы синхронные: внутри блокирующие операции (sqlite3, psycopg, llm.invoke) —
-LangGraph сам выполняет их в thread, если граф invoked через ainvoke.
+gather — async: доступ к LangGraph Store (кэш эмбеддингов) асинхронный, а
+блокирующий код (sqlite3, llm.invoke, tool-loop) уведён в asyncio.to_thread,
+чтобы не держать event loop. synthesize остаётся sync (в БД не ходит).
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_gigachat import GigaChat
+from langgraph.config import get_store
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 
 from ..shared.clients import create_gigachat_embeddings
-from .agent_base import extract_tool_transcript, synthesize_answer
+from .agent_base import (
+    extract_tool_steps,
+    extract_tool_transcript,
+    synthesize_answer,
+)
 from .agent_classic import ClassicStrategy
 from .analytics import compute_analytics
 from .loader import load_dataset_obj
-from .pg_cache import PgCache, sync_embeddings
 from .prompts import SYNTHESIS_PROMPT
+from .relations_cache import sync_relations
 from .sqlite_store import SqliteStore
+from .store_cache import EmbeddingIndex, sync_embeddings
 from .tools import build_tools
+
+# Фолбэк-Store для standalone-прогонов (smoke/тесты), когда рантайм не прокинул
+# Store через get_store(). Под aegra используется её Postgres-Store.
+_FALLBACK_STORE: InMemoryStore | None = None
+
+
+def _resolve_store() -> BaseStore:
+    global _FALLBACK_STORE
+    try:
+        store = get_store()
+    except Exception:
+        store = None
+    # get_store() ВНЕ aegra-рантайма (standalone-вызов подграфа) возвращает None,
+    # а не бросает исключение — поэтому фоллбэк нужен и на None, иначе дальше
+    # упадёт `None.asearch`. Под aegra store не None и используется он.
+    if store is not None:
+        return store
+    if _FALLBACK_STORE is None:
+        _FALLBACK_STORE = InMemoryStore()
+    return _FALLBACK_STORE
+
+
+def _prepare_store(rows: list[dict[str, Any]]) -> SqliteStore:
+    """Блокирующая подготовка: in-memory SQLite + производная аналитика."""
+    store = SqliteStore()
+    store.load(rows)
+    compute_analytics(store)
+    return store
+
+
+def _run_agent(
+    store: SqliteStore,
+    index: EmbeddingIndex,
+    llm: GigaChat,
+    question: str,
+    embed_query: Callable[[str], list[float]],
+) -> tuple[list[Any], bool]:
+    """Блокирующий прогон стадии 1: tool-loop по SQLite + in-memory индексу."""
+    tools = build_tools(store, index, embed_query=embed_query)
+    strategy = ClassicStrategy()
+    agent = strategy.build(llm, tools, store.schema_overview())
+    return strategy.run(agent, [HumanMessage(content=question)])
 
 
 def _last_human_text(messages: list[Any]) -> str:
@@ -73,7 +125,7 @@ def _resolve_inputs(state: dict, config: RunnableConfig) -> tuple[dict | None, s
 def make_gather_node(llm: GigaChat):
     embedder = create_gigachat_embeddings()
 
-    def gather(state: dict, config: RunnableConfig) -> dict:
+    async def gather(state: dict, config: RunnableConfig) -> dict:
         raw_obj, question, direction_key = _resolve_inputs(state, config)
         if raw_obj is None:
             return {
@@ -101,34 +153,34 @@ def make_gather_node(llm: GigaChat):
             }
 
         rows = load_dataset_obj(raw_obj)
-        store = SqliteStore()
-        store.load(rows)
-        compute_analytics(store)
+        store = await asyncio.to_thread(_prepare_store, rows)
 
-        # Размерность вектора берётся из существующей колонки таблицы
-        # (создана миграцией migrations/json_analyzer/0001_initial.sql).
-        # Рассинхрон между моделью и таблицей словится sync_embeddings.
-        pg = PgCache()
-        try:
-            sync_embeddings(
-                store,
-                pg,
-                direction_key=direction_key,
-                embed_documents=embedder.embed_documents,
-            )
-            tools = build_tools(
-                store,
-                pg,
-                direction_key=direction_key,
-                embed_query=embedder.embed_query,
-            )
-            strategy = ClassicStrategy()
-            agent = strategy.build(llm, tools, store.schema_overview())
-            collected, completed = strategy.run(agent, [HumanMessage(content=question)])
-        finally:
-            pg.close()
+        # Кэш эмбеддингов — в LangGraph Store (подключение aegra). Доступ async,
+        # сам подсчёт недостающих эмбеддингов (GigaChat) — внутри в to_thread.
+        lg_store = _resolve_store()
+        index = await sync_embeddings(
+            lg_store,
+            store,
+            direction_key=direction_key,
+            embed_documents=embedder.embed_documents,
+        )
+
+        # Граф смысловых связей метрик (Блок D ТЗ) — LLM по названиям/описаниям,
+        # кэш в Store per-direction. Грузим в SQLite ДО сборки инструментов, чтобы
+        # related_metrics/metric_tree видели его. Сбой изолирован внутри.
+        relations = await sync_relations(
+            lg_store, store, direction_key=direction_key, llm=llm
+        )
+        await asyncio.to_thread(store.load_relations, relations)
+
+        # Tool-loop блокирующий (llm.invoke + sqlite) — уводим в поток; поиск
+        # внутри идёт по in-memory индексу, обращений к БД нет.
+        collected, completed = await asyncio.to_thread(
+            _run_agent, store, index, llm, question, embedder.embed_query
+        )
 
         transcript, tool_calls = extract_tool_transcript(collected)
+        tool_steps = extract_tool_steps(collected)
         if tool_calls == 0:
             # Стадия 1 не вызвала ни одного инструмента — её прямой ответ
             # (последнее сообщение) и есть итог; synthesize_node его пробросит.
@@ -142,6 +194,7 @@ def make_gather_node(llm: GigaChat):
             return {
                 "parsed_rows": rows,
                 "gathered_facts": "",
+                "tool_steps": tool_steps,
                 "question": question,
                 "completed": completed,
                 "answer": direct or "",
@@ -150,6 +203,7 @@ def make_gather_node(llm: GigaChat):
         return {
             "parsed_rows": rows,
             "gathered_facts": transcript,
+            "tool_steps": tool_steps,
             "question": question,
             "completed": completed,
         }
