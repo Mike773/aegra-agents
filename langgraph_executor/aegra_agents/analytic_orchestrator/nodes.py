@@ -19,6 +19,7 @@ from .prompts import (
     ASSIGNMENTS_ANALYSIS_QUESTION,
     EXTRACT_ASSIGNMENTS_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
+    INITIAL_OFFER_HINT,
     LOAD_ERROR_PROMPT,
     PROPOSE_NO_CANDIDATES_PROMPT,
     RESPONDER_PROMPT,
@@ -144,8 +145,9 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             trace_steps.append({"stage": "initial", "kind": "error", "summary": err})
         trace_steps.extend(_analyzer_trace_steps(tool_steps))
 
-        # Системный контекст: инструкция/формат из брифинга (или дефолт) + данные.
-        parts: list[str] = [briefing or INITIAL_ANALYSIS_PROMPT]
+        # Системный контекст: инструкция/формат из брифинга (или дефолт),
+        # подсказка «предложить поручения, а не формировать их» + данные.
+        parts: list[str] = [briefing or INITIAL_ANALYSIS_PROMPT, INITIAL_OFFER_HINT]
         if analysis:
             parts.append("Данные, собранные аналитиком метрик из полного датасета:\n" + analysis)
         else:
