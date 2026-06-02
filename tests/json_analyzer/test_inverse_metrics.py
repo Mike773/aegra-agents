@@ -16,7 +16,10 @@ sys.path.insert(
 )
 
 from langgraph_executor.aegra_agents.json_analyzer import analytics
-from langgraph_executor.aegra_agents.json_analyzer.loader import load_dataset_obj
+from langgraph_executor.aegra_agents.json_analyzer.loader import (
+    _normalize_metric_type,
+    load_dataset_obj,
+)
 from langgraph_executor.aegra_agents.json_analyzer.sqlite_store import SqliteStore
 
 
@@ -123,3 +126,41 @@ def test_summary_trend_counts_use_direction_aware_labels():
     assert set(counts) == {"улучшение", "ухудшение", "стабильно"}
     assert counts["ухудшение"] == 1   # AHT
     assert counts["улучшение"] == 1   # Конверсия
+
+
+# --- нормализация metric_type ('Обратный'/'Прямой' от источника) -------------
+
+def test_normalize_metric_type_canonicalizes_wire_forms():
+    # Разные род/регистр/пробелы от источника → каноничные формы расчёта.
+    assert _normalize_metric_type("Обратный") == "обратная"
+    assert _normalize_metric_type("ОБРАТНАЯ") == "обратная"
+    assert _normalize_metric_type(" обратные ") == "обратная"
+    assert _normalize_metric_type("Прямой") == "прямая"
+    assert _normalize_metric_type("ПРЯМАЯ") == "прямая"
+    # Неизвестное/нестроковое — без изменений (трактуется как прямая ниже).
+    assert _normalize_metric_type("нечто") == "нечто"
+    assert _normalize_metric_type(None) is None
+
+
+def test_loader_normalizes_wire_form_so_verdicts_correct():
+    # Тот же датасет, но направление приходит «с провода» как 'Обратный'/'Прямой'.
+    data = {
+        "me": {
+            "tabnum": 1, "fio": "Босс", "post": "рук", "depart": "d",
+            "metrics": [
+                _metric("aht", "AHT", "Обратный", "2026-01-05", 100.0),
+                _metric("aht", "AHT", "Обратный", "2026-01-12", 120.0),
+                _metric("conv", "Конверсия", "Прямой", "2026-01-05", 10.0, plan=12.0, benchmark=11.0),
+                _metric("conv", "Конверсия", "Прямой", "2026-01-12", 15.0, plan=12.0, benchmark=11.0),
+            ],
+        },
+        "employees": [],
+    }
+    store = _build_store(data)
+    aht = _row(store, "AHT", "Босс", "2026-01-12")
+    # Без нормализации 'Обратный' != 'обратная' → считалось бы как прямая (улучшение).
+    assert aht["trend_status"] == "ухудшение"
+    assert aht["plan_status"] == "хуже_плана"
+    conv = _row(store, "Конверсия", "Босс", "2026-01-12")
+    assert conv["trend_status"] == "улучшение"
+    assert conv["plan_status"] == "лучше_плана"
