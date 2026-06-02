@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -11,6 +12,7 @@ from sqlalchemy import select
 
 from ..easyrag.db import session_scope
 from ..easyrag.models import WikiPage
+from ..json_analyzer.loader import load_dataset_obj
 from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
@@ -26,6 +28,7 @@ from .prompts import (
     RESPONDER_RULES,
     ROUTER_PROMPT,
     SELECT_ASSIGNMENTS_PROMPT,
+    WIKI_QUERIES_PROMPT,
 )
 from .state import OrchestratorState, TraceStep
 
@@ -33,6 +36,11 @@ _DEFAULT_DATASET = "metrics_for_agent_analyst"
 _METRICS_PREVIEW_LIMIT = 8000
 _DEFAULT_EASYRAG_TOP_K = 5
 _EASYRAG_SNIPPET_PREVIEW = 400
+# Wiki-grounding: сколько запросов к wiki максимум генерит LLM и сколько метрик
+# (имя+описание) кладём в промпт генерации запросов.
+_DEFAULT_WIKI_MAX_QUERIES = 3
+_WIKI_METRIC_SPECS_CAP = 30
+_WIKI_METRIC_DESC_PREVIEW = 200
 _MAX_CANDIDATES = 5
 # Порог нечёткого совпадения слова запроса с заголовком заглушки.
 # Ловит склонённые формы: «бабушку» ↔ «бабушка».
@@ -40,6 +48,16 @@ _STUB_MATCH_RATIO = 0.72
 _STUB_LOOKUP_LIMIT = 5
 # Сколько шагов tool_call максимум разворачивать в трассу из json_analyzer.
 _TRACE_TOOL_STEPS_CAP = 12
+
+# Per-turn сброс wiki-контекста: easyrag_snippets наполняют только call_easyrag и
+# ground_wiki ВНУТРИ хода, а respond читает их безусловно. Без сброса в route
+# сниппеты прошлого хода протекли бы в последующий chat-ответ.
+_EASYRAG_RESET = {
+    "easyrag_query": None,
+    "easyrag_snippets": [],
+    "easyrag_stub_pages": [],
+    "easyrag_error": None,
+}
 
 
 def make_load_data_node():
@@ -154,6 +172,10 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             parts.append(_metrics_payload(metrics))
             if err:
                 parts.append(f"(Глубокий анализ недоступен: {err} — опирайся на JSON выше.)")
+        # Контекст из wiki (методика/нормативы), заземлённый ground_wiki_initial.
+        wiki_block = _easyrag_system_block(state)
+        if wiki_block:
+            parts.append(wiki_block)
 
         ai = llm.invoke([
             SystemMessage(content="\n\n".join(parts)),
@@ -193,6 +215,7 @@ def make_route_node(llm: GigaChat):
         last_text = _last_user_text(state)
         if not last_text:
             return {
+                **_EASYRAG_RESET,
                 "intent": "chat",
                 "reasoning_trace": [{
                     "stage": "route", "kind": "intent",
@@ -206,6 +229,7 @@ def make_route_node(llm: GigaChat):
         # «никакие/отмена», что в commit_assignments отрисуется как cancel.
         if state.get("pending_assignments"):
             return {
+                **_EASYRAG_RESET,
                 "intent": "assignments_select",
                 "reasoning_trace": [{
                     "stage": "route", "kind": "intent",
@@ -222,6 +246,7 @@ def make_route_node(llm: GigaChat):
         if label not in _ROUTE_LABELS:
             label = "chat"
         return {
+            **_EASYRAG_RESET,
             "intent": label,
             "reasoning_trace": [{
                 "stage": "route", "kind": "intent",
@@ -399,6 +424,124 @@ def make_call_easyrag_node(easyrag_graph: Any):
             }
 
     return call_easyrag
+
+
+def _format_metric_specs(specs: list[dict]) -> str:
+    return "\n".join(
+        f"- {s['name']}" + (f" — {s['description']}" if s.get("description") else "")
+        for s in specs
+    )
+
+
+def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
+    """Wiki-grounding: по вопросу/брифингу + метрикам генерит запросы к wiki и
+    подмешивает найденные сниппеты в state (для initial_analysis и respond).
+
+    Запросы генерируются ВСЕГДА при наличии метрик (без гейта «понимает ли модель»):
+    wiki хранит корпоративную специфику — методику, нормативы, определения, —
+    которой у модели по определению нет. Ошибки изолируются: при сбое узел просто
+    не добавляет wiki-контекст, конвейер продолжает работу.
+    """
+
+    async def ground_wiki(state: OrchestratorState, config: RunnableConfig) -> dict:
+        cfg = (config or {}).get("configurable") or {}
+        if cfg.get("easyrag_enabled") is False or cfg.get("wiki_grounding_enabled") is False:
+            return {}
+        if state.get("metrics") is None or state.get("metrics_error"):
+            return {}
+        direction_key = (state.get("direction_key") or "").strip()
+        if not direction_key:
+            return {}
+
+        specs = _distinct_metric_specs(state.get("metrics"))
+        if not specs:
+            return {}
+
+        # Затравка запросов: вопрос/брифинг текущего хода + список метрик. На
+        # analytics-ходу добавляем выводы аналитика (он уже отработал) — запросы
+        # становятся точнее. На первом ходу answer'а ещё нет (асимметрия by design).
+        seed = _last_user_text(state).strip()
+        parts = [
+            f"Вопрос руководителя: {seed}" if seed else "Первичный обзор метрик сотрудника.",
+            "Метрики сотрудника:\n" + _format_metric_specs(specs),
+        ]
+        analytics_answer = state.get("analytics_answer")
+        if analytics_answer and not state.get("analytics_error"):
+            parts.append("Выводы аналитика по метрикам:\n" + str(analytics_answer))
+
+        try:
+            ai = llm.invoke([
+                SystemMessage(content=WIKI_QUERIES_PROMPT),
+                HumanMessage(content="\n\n".join(parts)),
+            ])
+            queries = _parse_query_list_json(
+                ai.content,
+                max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
+            )
+        except Exception:  # noqa: BLE001 — внешний LLM, сужать нечем
+            queries = []
+
+        if not queries:
+            return {}
+
+        top_k = int(cfg.get("easyrag_top_k") or _DEFAULT_EASYRAG_TOP_K)
+        results = await asyncio.gather(
+            *[
+                easyrag_graph.ainvoke({
+                    "query": q,
+                    "direction_key": direction_key,
+                    "top_k": top_k,
+                })
+                for q in queries
+            ],
+            return_exceptions=True,
+        )
+
+        # Мёрж: дедуп по section_id (оставляем больший similarity), сорт по
+        # similarity desc, cap top_k. Ошибку показываем только если упали ВСЕ
+        # запросы и сниппетов нет — частичный сбой не должен прятать находки.
+        best: dict[str, dict] = {}
+        errors: list[str] = []
+        for res in results:
+            if isinstance(res, Exception):
+                errors.append(f"{type(res).__name__}: {res}"[:300])
+                continue
+            for s in (res.get("snippets") if isinstance(res, dict) else None) or []:
+                sid = s.get("section_id")
+                key = sid if sid is not None else id(s)
+                prev = best.get(key)
+                if prev is None or (s.get("similarity") or 0) > (prev.get("similarity") or 0):
+                    best[key] = s
+        snippets = sorted(
+            best.values(), key=lambda s: s.get("similarity") or 0, reverse=True
+        )[:top_k]
+
+        err = errors[0] if (errors and not snippets) else None
+        joined_query = " | ".join(queries)
+
+        if not snippets and not err:
+            stub_pages = await _find_relevant_stub_pages(direction_key, joined_query)
+            return {
+                "easyrag_query": joined_query,
+                "easyrag_snippets": [],
+                "easyrag_stub_pages": stub_pages,
+                "easyrag_error": None,
+                "reasoning_trace": _append_trace(
+                    state, _easyrag_trace_steps([], stub_pages, None)
+                ),
+            }
+
+        return {
+            "easyrag_query": joined_query,
+            "easyrag_snippets": snippets,
+            "easyrag_stub_pages": [],
+            "easyrag_error": err,
+            "reasoning_trace": _append_trace(
+                state, _easyrag_trace_steps(snippets, [], err)
+            ),
+        }
+
+    return ground_wiki
 
 
 def _easyrag_trace_steps(
@@ -986,3 +1129,58 @@ def _parse_indices_json(text: Any, max_n: int) -> list[int]:
         if 1 <= i <= max_n and i not in result:
             result.append(i)
     return result
+
+
+def _parse_query_list_json(text: Any, max_n: int) -> list[str]:
+    """Парсит JSON-массив строк-запросов к wiki. Дедуп (без учёта регистра),
+    cap max_n. Любой сбой/не-массив → []."""
+    raw = text if isinstance(text, str) else str(text or "")
+    cleaned = _strip_code_fence(raw)
+    if not cleaned:
+        return []
+    try:
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        q = str(item or "").strip()
+        if not q:
+            continue
+        key = q.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(q)
+        if len(result) >= max_n:
+            break
+    return result
+
+
+def _distinct_metric_specs(metrics: Any, cap: int = _WIKI_METRIC_SPECS_CAP) -> list[dict]:
+    """Уникальные метрики (имя + первое непустое описание) из сырого датасета.
+
+    Имена метрик не хардкодим — берём то, что есть в JSON (см. loader). Значения
+    fact/plan/benchmark не нужны: запросы к wiki — про определения, а не числа.
+    Любой сбой парсинга → []."""
+    try:
+        rows = load_dataset_obj(metrics)
+    except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
+        return []
+    specs: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        name = (r.get("metric_name") or "").strip()
+        if not name or name in seen:
+            continue
+        desc = (r.get("metric_description") or "").strip()
+        if len(desc) > _WIKI_METRIC_DESC_PREVIEW:
+            desc = desc[:_WIKI_METRIC_DESC_PREVIEW] + "…"
+        seen.add(name)
+        specs.append({"name": name, "description": desc})
+        if len(specs) >= cap:
+            break
+    return specs

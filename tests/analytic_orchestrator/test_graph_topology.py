@@ -54,3 +54,28 @@ def test_after_route_maps_assignments_intent():
     # Intent 'assignments' (его выставляет роутер по фразе «оформи поручения»,
     # которую и предлагает INITIAL_OFFER_HINT) маршрутизируется в extract_assignments.
     assert after_route({"intent": "assignments"}) == "extract_assignments"
+
+
+def test_ground_wiki_initial_in_first_turn_path():
+    edges = _edges()
+    # Первый ход заземляется в wiki ДО первичного анализа.
+    assert ("load_data", "ground_wiki_initial") in edges
+    assert ("ground_wiki_initial", "initial_analysis") in edges
+    # Прямого ребра load_data → initial_analysis больше нет.
+    assert ("load_data", "initial_analysis") not in edges
+
+
+def test_ground_wiki_analytics_after_json_analyzer():
+    edges = _edges()
+    # На analytics-ходу wiki-grounding идёт ПОСЛЕ аналитика (использует его выводы)
+    # и перед респондером.
+    assert ("call_json_analyzer", "ground_wiki_analytics") in edges
+    assert ("ground_wiki_analytics", "respond") in edges
+    # Прямого ребра call_json_analyzer → respond больше нет.
+    assert ("call_json_analyzer", "respond") not in edges
+
+
+def test_wiki_intent_path_unchanged():
+    edges = _edges()
+    # Явный wiki-интент остаётся отдельным single-query путём.
+    assert ("call_easyrag", "respond") in edges
