@@ -38,6 +38,24 @@ ROW_FIELDS: tuple[str, ...] = (
 )
 
 
+def _normalize_metric_type(value: Any) -> Any:
+    """Приводит направление метрики к каноничным 'прямая'/'обратная'.
+
+    Источники присылают разные формы и регистр ('Обратный', 'ОБРАТНАЯ',
+    'прямой'), а весь расчёт вердиктов и подсказки LLM сравнивают строго с
+    'обратная' (analytics.py: `metric_type != "обратная"`). Без нормализации
+    'Обратный' не матчится и обратная метрика считается как прямая. Неизвестные
+    значения отдаём как есть (трактуются как 'прямая', прежнее поведение)."""
+    if not isinstance(value, str):
+        return value
+    norm = value.strip().casefold()
+    if norm.startswith("обратн"):
+        return "обратная"
+    if norm.startswith("прям"):
+        return "прямая"
+    return value
+
+
 def _walk(
     metrics: list[dict[str, Any]],
     person: dict[str, Any],
@@ -62,7 +80,7 @@ def _walk(
                 "metric_id": node.get("id"),
                 "metric_name": node.get("metric_name"),
                 "metric_description": node.get("metric_description"),
-                "metric_type": node.get("metric_type"),
+                "metric_type": _normalize_metric_type(node.get("metric_type")),
                 "measure_type": node.get("measure_type"),
                 "date": node.get("date"),
                 "calc_period": node.get("calc_period"),

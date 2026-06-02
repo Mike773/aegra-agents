@@ -12,6 +12,7 @@ from .nodes import (
     make_call_json_analyzer_node,
     make_commit_assignments_node,
     make_extract_assignments_node,
+    make_ground_wiki_node,
     make_initial_analysis_node,
     make_load_data_node,
     make_propose_assignments_node,
@@ -37,6 +38,11 @@ def build_graph(llm: GigaChat):
     )
     g.add_node("propose_assignments", make_propose_assignments_node())
     g.add_node("route", make_route_node(llm))
+    # Один и тот же узел wiki-grounding на двух позициях графа (у узла фиксированные
+    # out-edges, поэтому два инстанса проще условных рёбер): перед первичным
+    # анализом и после json_analyzer на analytics-ходу.
+    g.add_node("ground_wiki_initial", make_ground_wiki_node(llm, easyrag_graph))
+    g.add_node("ground_wiki_analytics", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("call_json_analyzer", make_call_json_analyzer_node(json_analyzer_graph))
     g.add_node("call_easyrag", make_call_easyrag_node(easyrag_graph))
     g.add_node("select_assignments", make_select_assignments_node(llm))
@@ -58,7 +64,8 @@ def build_graph(llm: GigaChat):
     # Поручения на первом ходу НЕ формируем: если анализ нашёл проблему, он
     # лишь предлагает их оформить (текстом, в том же сообщении). Реальный разбор
     # кандидатов запускает роутер по intent 'assignments' на последующем ходу.
-    g.add_edge("load_data", "initial_analysis")
+    g.add_edge("load_data", "ground_wiki_initial")
+    g.add_edge("ground_wiki_initial", "initial_analysis")
     g.add_edge("initial_analysis", END)
     # Ветвь оформления поручений (по запросу пользователя на последующих ходах).
     g.add_edge("extract_assignments", "propose_assignments")
@@ -75,7 +82,8 @@ def build_graph(llm: GigaChat):
             "respond": "respond",
         },
     )
-    g.add_edge("call_json_analyzer", "respond")
+    g.add_edge("call_json_analyzer", "ground_wiki_analytics")
+    g.add_edge("ground_wiki_analytics", "respond")
     g.add_edge("call_easyrag", "respond")
     g.add_edge("select_assignments", "commit_assignments")
     g.add_edge("commit_assignments", END)
