@@ -136,7 +136,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
                 "summary": state.get("metrics_error") or "Метрики не загружены.",
             }
             return {
-                "messages": [AIMessage(content=LOAD_ERROR_PROMPT)],
+                "messages": [_final_message(LOAD_ERROR_PROMPT)],
                 "reasoning_trace": _append_trace(state, [step]),
             }
 
@@ -191,7 +191,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         new_trace = _append_trace(state, trace_steps)
 
         out_state = {
-            "messages": [AIMessage(content=_with_description(
+            "messages": [_final_message(_with_description(
                 text, {"reasoning_trace": new_trace}, config
             ))],
             "reasoning_trace": new_trace,
@@ -307,7 +307,7 @@ def make_respond_node(llm: GigaChat):
         }
         new_trace = _append_trace(state, [decision])
         return {
-            "messages": [AIMessage(content=_with_description(
+            "messages": [_final_message(_with_description(
                 text, {"reasoning_trace": new_trace}, config
             ))],
             "reasoning_trace": new_trace,
@@ -349,17 +349,22 @@ def make_call_json_analyzer_node(json_analyzer_graph: Any):
         steps = _analyzer_trace_steps(tool_steps)
         if err:
             steps.append({"stage": "json_analyzer", "kind": "error", "summary": err})
+            step_text = "📊 Аналитик метрик недоступен — отвечу по сырым данным."
         elif answer:
             steps.append({
                 "stage": "json_analyzer", "kind": "decision",
                 "summary": "Аналитик метрик собрал данные и сформировал ответ.",
             })
+            step_text = "📊 Проанализировал метрики аналитиком."
+        else:
+            step_text = ""
 
         return {
             "analytics_question": last_text,
             "analytics_answer": answer,
             "analytics_error": err,
             "reasoning_trace": _append_trace(state, steps),
+            **_step_update(config, step_text),
         }
 
     return call_json_analyzer
@@ -410,6 +415,7 @@ def make_call_easyrag_node(easyrag_graph: Any):
                 "reasoning_trace": _append_trace(
                     state, _easyrag_trace_steps(snippets, stub_pages, None)
                 ),
+                **_step_update(config, _wiki_step_text(snippets, stub_pages, None)),
             }
         except Exception as exc:  # noqa: BLE001 — внешний подграф (сеть/БД), сужать нечем
             err = f"{type(exc).__name__}: {exc}"[:300]
@@ -421,6 +427,7 @@ def make_call_easyrag_node(easyrag_graph: Any):
                 "reasoning_trace": _append_trace(
                     state, _easyrag_trace_steps([], [], err)
                 ),
+                **_step_update(config, _wiki_step_text([], [], err)),
             }
 
     return call_easyrag
@@ -529,6 +536,7 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
                 "reasoning_trace": _append_trace(
                     state, _easyrag_trace_steps([], stub_pages, None)
                 ),
+                **_step_update(config, _wiki_step_text([], stub_pages, None)),
             }
 
         return {
@@ -539,9 +547,30 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
             "reasoning_trace": _append_trace(
                 state, _easyrag_trace_steps(snippets, [], err)
             ),
+            **_step_update(config, _wiki_step_text(snippets, [], err)),
         }
 
     return ground_wiki
+
+
+def _wiki_step_text(
+    snippets: list[dict], stub_pages: list[dict], err: str | None
+) -> str:
+    """Однострочный текст wiki-шага для промежуточного сообщения хода."""
+    if err:
+        return "📖 Контекст из wiki недоступен."
+    if snippets:
+        pages = []
+        for s in snippets[:3]:
+            name = s.get("page_title") or s.get("section_title") or s.get("slug")
+            if name and name not in pages:
+                pages.append(name)
+        tail = f": {', '.join(pages)}" if pages else ""
+        return f"📖 Нашёл в wiki {len(snippets)} фрагмент(ов){tail}."
+    if stub_pages:
+        names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stub_pages)
+        return f"📖 В wiki есть заглушки по теме (без содержания): {names}."
+    return "📖 В wiki релевантного не нашёл."
 
 
 def _easyrag_trace_steps(
@@ -638,7 +667,7 @@ def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
     терять функциональность. Пустой список кандидатов — нормальный исход.
     """
 
-    async def extract(state: OrchestratorState) -> dict:
+    async def extract(state: OrchestratorState, config: RunnableConfig) -> dict:
         metrics = state.get("metrics")
         if metrics is None or state.get("metrics_error"):
             return {
@@ -682,6 +711,9 @@ def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
             "candidate_assignments": candidates,
             "pending_assignments": candidates,
             "reasoning_trace": _append_trace(state, steps),
+            **_step_update(
+                config, f"🔎 Выделил проблемные зоны, кандидатов: {len(candidates)}."
+            ),
         }
 
     return extract
@@ -698,7 +730,7 @@ def make_propose_assignments_node():
         pending = state.get("pending_assignments") or []
         if not pending:
             return {
-                "messages": [AIMessage(content=PROPOSE_NO_CANDIDATES_PROMPT)],
+                "messages": [_final_message(PROPOSE_NO_CANDIDATES_PROMPT)],
                 "pending_assignments": [],
             }
 
@@ -716,7 +748,7 @@ def make_propose_assignments_node():
             "Какие зафиксировать? Напишите номера через запятую "
             "(например, «1, 3»), «все» или «никакие»."
         )
-        return {"messages": [AIMessage(content="\n".join(lines))]}
+        return {"messages": [_final_message("\n".join(lines))]}
 
     return propose
 
@@ -784,7 +816,7 @@ def make_commit_assignments_node():
             text = ("Хорошо, поручения сейчас не фиксирую. "
                     "Если передумаете — скажите «оформи поручения».")
             return {
-                "messages": [AIMessage(content=_with_description(
+                "messages": [_final_message(_with_description(
                     text, {"reasoning_trace": new_trace}, config))],
                 "pending_assignments": [],
                 "selected_assignments": [],
@@ -822,7 +854,7 @@ def make_commit_assignments_node():
 
         new_trace = _append_trace(state, [step])
         return {
-            "messages": [AIMessage(content=_with_description(
+            "messages": [_final_message(_with_description(
                 text, {"reasoning_trace": new_trace}, config))],
             "pending_assignments": [],
             "selected_assignments": [],
@@ -862,7 +894,7 @@ def _last_user_text(state: OrchestratorState) -> str:
 
 def _last_ai_text(state: OrchestratorState) -> str:
     for m in reversed(state.get("messages") or []):
-        if isinstance(m, AIMessage):
+        if isinstance(m, AIMessage) and not _is_step(m):
             content = m.content
             if isinstance(content, str):
                 return content
@@ -961,9 +993,16 @@ def _strip_trace_section(content: Any) -> Any:
 
 
 def _history_for_llm(messages: list[Any]) -> list[Any]:
-    """История для LLM-вызова респондера с вырезанной трассой из AI-реплик."""
+    """История для LLM-вызова респондера с вырезанной трассой из AI-реплик.
+
+    Шаговые сообщения (_STEP_KEY) полностью отбрасываем: это служебный прогресс
+    хода («📖 Нашёл в wiki…»), а не реплики ассистента — иначе модель начнёт их
+    имитировать как свои прошлые ответы.
+    """
     out: list[Any] = []
     for m in messages or []:
+        if _is_step(m):
+            continue
         if isinstance(m, AIMessage):
             out.append(AIMessage(content=_strip_trace_section(m.content)))
         else:
@@ -979,6 +1018,51 @@ def _with_description(
         return text
     section = render_trace(state.get("reasoning_trace") or [])
     return f"{text}\n\n{section}" if section else text
+
+
+# --- Контракт сообщений хода: промежуточные шаги + итог последним -------------
+#
+# За один ход граф проходит ОДИН линейный путь, а add_messages добавляет в конец,
+# поэтому порядок сообщений = порядок отработки узлов. Рабочие (не-листовые) узлы
+# кладут короткие «шаговые» сообщения (_STEP_KEY), а терминальные листья графа —
+# итоговый ответ (_FINAL_KEY). Итог всегда оказывается последним элементом
+# messages: его показывает пользователю вызывающая система (messages[-1] либо по
+# флагу orchestrator_final). Шаговые сообщения вырезаются из истории, подаваемой
+# в LLM (_history_for_llm), чтобы модель не имитировала их как свои прошлые реплики.
+_STEP_KEY = "orchestrator_step"    # промежуточный шаг хода
+_FINAL_KEY = "orchestrator_final"  # итоговый ответ хода (его показываем юзеру)
+
+
+def _progress_enabled(config: RunnableConfig | None) -> bool:
+    """Флаг emit_progress_messages из configurable (дефолт True)."""
+    cfg = (config or {}).get("configurable") or {}
+    val = cfg.get("emit_progress_messages")
+    if val is None:
+        return True
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in {"true", "1", "yes", "да"}
+    return bool(val)
+
+
+def _step_update(config: RunnableConfig | None, text: str) -> dict:
+    """{'messages': [шаговое AIMessage]} либо {} если прогресс выключен/пусто."""
+    text = (text or "").strip()
+    if not text or not _progress_enabled(config):
+        return {}
+    return {"messages": [AIMessage(content=text, additional_kwargs={_STEP_KEY: True})]}
+
+
+def _is_step(m: Any) -> bool:
+    if isinstance(m, dict):
+        return bool((m.get("additional_kwargs") or {}).get(_STEP_KEY))
+    return bool(getattr(m, "additional_kwargs", None) and m.additional_kwargs.get(_STEP_KEY))
+
+
+def _final_message(text: str) -> AIMessage:
+    """Итоговое сообщение хода — помечаем флагом, чтобы потребитель брал его явно."""
+    return AIMessage(content=text, additional_kwargs={_FINAL_KEY: True})
 
 
 async def _run_analyzer(

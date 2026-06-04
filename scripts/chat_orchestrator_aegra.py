@@ -87,6 +87,14 @@ def _msg_content(m) -> str:
     return getattr(m, "content", "") or ""
 
 
+def _msg_is_step(m) -> bool:
+    """Промежуточное шаговое сообщение хода (additional_kwargs.orchestrator_step)."""
+    if isinstance(m, dict):
+        return bool((m.get("additional_kwargs") or {}).get("orchestrator_step"))
+    kwargs = getattr(m, "additional_kwargs", None) or {}
+    return bool(kwargs.get("orchestrator_step"))
+
+
 def _format_status(payload: dict) -> str | None:
     """Краткая строка-статус хода: intent и источники/ошибки, если есть."""
     parts: list[str] = []
@@ -115,8 +123,12 @@ def _print_update(data: dict, debug: bool) -> None:
         for m in payload.get("messages") or []:
             if _msg_type(m) != "human":
                 text = _msg_content(m)
-                if text:
-                    print(f"\nАссистент: {text}")
+                if not text:
+                    continue
+                if _msg_is_step(m):
+                    print(f"  · {text}")  # промежуточный шаг хода
+                else:
+                    print(f"\nАссистент: {text}")  # итоговый ответ
         status = _format_status(payload)
         if status:
             print(f"  ⟂ {status}")
