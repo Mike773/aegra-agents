@@ -163,9 +163,11 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             trace_steps.append({"stage": "initial", "kind": "error", "summary": err})
         trace_steps.extend(_analyzer_trace_steps(tool_steps))
 
-        # Системный контекст: инструкция/формат из брифинга (или дефолт),
-        # подсказка «предложить поручения, а не формировать их» + данные.
-        parts: list[str] = [briefing or INITIAL_ANALYSIS_PROMPT, INITIAL_OFFER_HINT]
+        # Системный контекст: сначала роль/формат из брифинга (или дефолт) и
+        # данные, и только В КОНЦЕ — подсказка про поручения. Порядок важен:
+        # INITIAL_OFFER_HINT, стоящий перед данными, перетягивал ответ на
+        # «предложу оформить поручения» в ущерб самому разбору метрик.
+        parts: list[str] = [briefing or INITIAL_ANALYSIS_PROMPT]
         if analysis:
             parts.append("Данные, собранные аналитиком метрик из полного датасета:\n" + analysis)
         else:
@@ -176,10 +178,16 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         wiki_block = _easyrag_system_block(state)
         if wiki_block:
             parts.append(wiki_block)
+        parts.append(INITIAL_OFFER_HINT)  # приписка про поручения — последней
 
         ai = llm.invoke([
             SystemMessage(content="\n\n".join(parts)),
-            HumanMessage(content="Выполни задание по данным выше и верни ответ в требуемом формате."),
+            HumanMessage(content=(
+                "Сначала дай содержательный разбор метрик по данным выше "
+                "(ключевые показатели, аномалии, тренды). Затем, ТОЛЬКО если есть "
+                "явные проблемные зоны, одной короткой строкой в самом конце "
+                "предложи оформить поручения. Верни ответ в требуемом формате."
+            )),
         ])
         text = ai.content if isinstance(ai.content, str) else str(ai.content)
 
