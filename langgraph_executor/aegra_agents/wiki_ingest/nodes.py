@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from langchain_core.runnables import RunnableConfig
 from sqlalchemy import select
 
 from ..easyrag.db import session_scope
@@ -22,8 +23,19 @@ from .state import WikiIngestState
 logger = logging.getLogger(__name__)
 
 
-async def load_pending(state: WikiIngestState) -> dict:
+def _resolve_direction_key(
+    state: WikiIngestState, config: RunnableConfig | None
+) -> str:
+    """direction_key из стейта, а при отсутствии — из config.configurable."""
     direction_key = (state.get("direction_key") or "").strip()
+    if direction_key:
+        return direction_key
+    configurable = (config or {}).get("configurable") or {}
+    return (configurable.get("direction_key") or "").strip()
+
+
+async def load_pending(state: WikiIngestState, config: RunnableConfig) -> dict:
+    direction_key = _resolve_direction_key(state, config)
     if not direction_key:
         return {
             "pending_doc_ids": [],
@@ -40,11 +52,16 @@ async def load_pending(state: WikiIngestState) -> dict:
                 .order_by(SourceDoc.ingested_at)
             )
         ).scalars().all()
-    return {"pending_doc_ids": [str(r) for r in rows]}
+    # Возвращаем разрешённый ключ в стейт, чтобы process его увидел,
+    # даже если он пришёл только через configurable.
+    return {
+        "direction_key": direction_key,
+        "pending_doc_ids": [str(r) for r in rows],
+    }
 
 
-async def process(state: WikiIngestState) -> dict:
-    direction_key = (state.get("direction_key") or "").strip()
+async def process(state: WikiIngestState, config: RunnableConfig) -> dict:
+    direction_key = _resolve_direction_key(state, config)
     pending = state.get("pending_doc_ids") or []
 
     # Клиенты строим один раз на прогон.
