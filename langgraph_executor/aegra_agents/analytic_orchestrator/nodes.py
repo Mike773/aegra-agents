@@ -48,6 +48,10 @@ _STUB_MATCH_RATIO = 0.72
 _STUB_LOOKUP_LIMIT = 5
 # Сколько шагов tool_call максимум разворачивать в трассу из json_analyzer.
 _TRACE_TOOL_STEPS_CAP = 12
+# Дообогащение вопроса к json_analyzer контекстом диалога: сколько последних пар
+# «вопрос-ответ» подмешивать и до скольки символов резать каждый прошлый ответ.
+_DIALOG_CTX_MAX_PAIRS = 4
+_DIALOG_CTX_ANSWER_CAP = 800
 
 # Per-turn сброс wiki-контекста: easyrag_snippets наполняют только call_easyrag и
 # ground_wiki ВНУТРИ хода, а respond читает их безусловно. Без сброса в route
@@ -208,6 +212,10 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             "analytics_answer": analysis,
             "analytics_error": err,
         }
+        # Опорный широкий разбор — фиксируем ОДИН раз, чтобы узкие analytics-ходы
+        # его не перезаписывали (см. _metrics_system_block). Только при успехе.
+        if analysis and not err:
+            out_state["metrics_summary"] = analysis
         return out_state
 
     return initial_analysis
@@ -348,8 +356,11 @@ def make_call_json_analyzer_node(json_analyzer_graph: Any):
                 ),
             }
 
+        # В аналитик уходит вопрос, дообогащённый контекстом диалога (чтобы
+        # разрешить «эти/западающие/те»); в state сохраняем сырой last_text.
+        enriched_q = _question_with_dialogue_context(state, last_text)
         answer, tool_steps, err = await _run_analyzer(
-            json_analyzer_graph, metrics, last_text, direction_key
+            json_analyzer_graph, metrics, enriched_q, direction_key
         )
         if err and metrics is None:
             err = state.get("metrics_error") or err
@@ -915,6 +926,69 @@ def _last_ai_text(state: OrchestratorState) -> str:
     return ""
 
 
+def _plain_text(m: Any) -> str:
+    """Текст сообщения как строка (контент бывает строкой или списком блоков)."""
+    content = getattr(m, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    return str(content or "")
+
+
+def _question_with_dialogue_context(state: OrchestratorState, current_q: str) -> str:
+    """Дообогащает вопрос к json_analyzer контекстом предыдущих взаимодействий.
+
+    json_analyzer вызывается без истории, поэтому ссылки вроде «детализируй
+    западающие», «разбери эти», «а по тем что с трендом» он разрешить не может.
+    Подмешиваем опорный разбор и последние пары «вопрос руководителя → ответ
+    аналитика» (из очищенной истории), чтобы аналитик САМ понял referent. Имена
+    метрик отдельным LLM-шагом НЕ вытаскиваем (по решению). Если контекста нет —
+    возвращаем вопрос как есть.
+    """
+    history = _history_for_llm(state.get("messages") or [])
+    # Собираем пары human→следующий ai. Последняя human-реплика (текущий вопрос)
+    # пары не образует — у неё ещё нет ответа, поэтому естественно исключается.
+    pairs: list[tuple[str, str]] = []
+    i = 0
+    while i < len(history):
+        m = history[i]
+        if isinstance(m, HumanMessage) and i + 1 < len(history) \
+                and isinstance(history[i + 1], AIMessage):
+            q = _plain_text(m).strip()
+            a = _plain_text(history[i + 1]).strip()
+            if q and a:
+                pairs.append((q, a))
+            i += 2
+            continue
+        i += 1
+    pairs = pairs[-_DIALOG_CTX_MAX_PAIRS:]
+
+    ctx_parts: list[str] = []
+    summary = (state.get("metrics_summary") or "").strip()
+    if summary:
+        ctx_parts.append("Первичный разбор метрик:\n" + summary)
+    for q, a in pairs:
+        if len(a) > _DIALOG_CTX_ANSWER_CAP:
+            a = a[:_DIALOG_CTX_ANSWER_CAP] + "…"
+        ctx_parts.append(f"Вопрос: {q}\nОтвет: {a}")
+
+    if not ctx_parts:
+        return current_q
+
+    block = "\n\n".join(ctx_parts)
+    return (
+        "Предыдущие взаимодействия (вопросы руководителя и ответы аналитика) — "
+        "опирайся на них, чтобы понять, о каких именно метриках идёт речь в "
+        "текущем вопросе (ссылки вроде «эти», «западающие», «те»):\n"
+        f"{block}\n\nТекущий вопрос: {current_q}"
+    )
+
+
 def _metrics_payload(metrics: Any) -> str:
     try:
         payload = json.dumps(metrics, ensure_ascii=False, indent=2)
@@ -1116,17 +1190,45 @@ def _analyzer_trace_steps(tool_steps: list[dict]) -> list[TraceStep]:
 
 
 def _metrics_system_block(state: OrchestratorState) -> str | None:
-    # Sticky-приоритет: если json_analyzer когда-либо в этом thread'е дал
-    # ответ без ошибки — респондер видит именно его, а не сырой JSON. Это
-    # экономит токены и снимает обрезание под _METRICS_PREVIEW_LIMIT.
-    if state.get("analytics_answer") and not state.get("analytics_error"):
-        return f"Ответ аналитика метрик:\n{state['analytics_answer']}"
+    # Контекст метрик для респондера — композиция:
+    #   (1) опорный широкий разбор (metrics_summary, стабильный, ход 1);
+    #   (2) свежий узкий ответ аналитика — но ЯВНО подписанный своим вопросом,
+    #       чтобы модель не приняла его за «все метрики». Не дублируем первичный.
+    # Узкий ответ больше НЕ выдаётся за всю картину: иначе последующие ходы видели
+    # бы ответ на чужой прошлый вопрос как актуальные метрики.
+    parts: list[str] = []
+    summary = (state.get("metrics_summary") or "").strip()
+    if summary:
+        parts.append("Опорный разбор метрик сотрудника (первичный):\n" + summary)
+
+    answer = (state.get("analytics_answer") or "").strip()
+    question = (state.get("analytics_question") or "").strip()
+    briefing = (state.get("briefing") or "").strip()
+    if (
+        answer
+        and not state.get("analytics_error")
+        and question
+        and question != briefing      # не дублируем первичный разбор
+        and answer != summary
+    ):
+        parts.append(f"Ответ аналитика на вопрос «{question}»:\n{answer}")
+
+    if parts:
+        return "\n\n".join(parts)
+
     if state.get("metrics_error"):
         return f"Контекст: {state['metrics_error']}"
-    metrics = state.get("metrics")
-    if metrics is None:
+    if state.get("metrics") is None:
         return None
-    return _metrics_payload(metrics)
+    # Разбора нет, но метрики загружены. Раньше тут шёл сырой обрезанный JSON
+    # (_metrics_payload) — отказались: обрезка под _METRICS_PREVIEW_LIMIT на
+    # большом датасете даёт неверные числа. Честно говорим, что разбор недоступен,
+    # и просим не выдумывать значения (запрос пересчитается через analytics-ход).
+    return (
+        "Метрики сотрудника загружены, но аналитический разбор сейчас недоступен. "
+        "Не приводи конкретных числовых значений по памяти; предложи уточнить "
+        "вопрос или повторить запрос — он будет пересчитан аналитиком."
+    )
 
 
 def _easyrag_system_block(state: OrchestratorState) -> str | None:
