@@ -267,22 +267,18 @@ def build_tools(
         metric: str | None = None,
         person: str | None = None,
         date: str | None = None,
-        max_levels: int = 1,
     ) -> str:
-        """ОДИН уровень иерархии метрики: метрика metric (или метрики верхнего
-        уровня) и её ПРЯМЫЕ дети-компоненты с аналитикой по каждому узлу
-        (plan_status, plan_dev_pct, benchmark_status, benchmark_dev_pct, trend,
-        trend_status, wow_change_pct, wow_status, influent_percent). У каждого
-        узла есть has_children: 1 — у него есть собственные подкомпоненты (можно
-        копать глубже), 0 — это лист (глубже некуда). Динамику оценивай по
+        """Иерархия метрик: метрика metric (или метрики верхнего уровня) со всеми
+        дочерними child_metrics И аналитикой по каждому узлу (plan_status,
+        plan_dev_pct, benchmark_status, benchmark_dev_pct, trend, trend_status,
+        wow_change_pct, wow_status, influent_percent). Динамику оценивай по
         trend_status/wow_status ('улучшение'/'ухудшение'), а не по сырому trend.
-        Чтобы спуститься на следующий уровень, вызови metric_tree ПОВТОРНО на
-        нужном ребёнке (обычно — с наибольшим отклонением и has_children=1), и
-        так уровень за уровнем до листа. По умолчанию возвращается ОДИН уровень —
-        НЕ разворачивай всё дерево сразу. Для разбора состава задавай metric и
-        person (и date — иначе строк много). Если у метрики нет агрегата (agg- в
-        составе датасета), корнями становятся все её разрезы — в результате будет
-        пометка 'разрезы_вместо_агрегата'."""
+        ОДИН вызов раскладывает метрику на компоненты со всеми
+        отклонениями — не нужно дёргать get_metric по каждому компоненту. Для
+        разбора состава метрики задавай metric и person (и date — иначе строк
+        много). Если у метрики нет агрегата (agg- в составе датасета), корнями
+        становятся все её разрезы — в результате будет пометка
+        'разрезы_вместо_агрегата'."""
         metric = _blank_to_none(metric)
         person = _blank_to_none(person)
         date = _blank_to_none(date)
@@ -291,15 +287,8 @@ def build_tools(
         ) or _unknown_person(person)
         if unknown:
             return unknown
-        # Клампим глубину: по умолчанию один уровень, максимум 3 — защита от
-        # «дай всё дерево» (ровно то, что делало metric_tree бесполезным на
-        # одной верхнеуровневой метрике). Спуск глубже — повторными вызовами.
-        max_levels = max(1, min(int(max_levels or 1), 3))
         return _pack(
-            store.metric_tree(
-                name=metric, person=person, date=date, max_levels=max_levels
-            ),
-            curated=False,
+            store.metric_tree(name=metric, person=person, date=date), curated=False
         )
 
     def list_people(
