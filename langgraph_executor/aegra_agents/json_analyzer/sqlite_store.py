@@ -39,19 +39,6 @@ _GROUP_BY_COLUMNS = {
     "post": "m.person_post",
 }
 
-# Строковые «пустышки», которые модель шлёт вместо опускания аргумента: помимо
-# пустой строки — литералы null/none/nil. Иначе фильтр уходит как WHERE col =
-# 'null' и молча даёт 0 строк. Дублирует защиту tools._blank_to_none на границе
-# SQL — на случай прямых вызовов store (тесты, диагностики, будущие вызовы).
-_UNSET_TOKENS = {"", "null", "none", "nil"}
-
-
-def _is_unset(value: Any) -> bool:
-    """True для None / пустой строки / литералов null|none|nil (любой регистр)."""
-    return value is None or (
-        isinstance(value, str) and value.strip().casefold() in _UNSET_TOKENS
-    )
-
 
 class SqliteStore:
     """Хранилище метрик и производной аналитики в оперативной памяти."""
@@ -146,7 +133,7 @@ class SqliteStore:
 
     @staticmethod
     def _person_clause(person: str | int | None) -> tuple[str, list[Any]]:
-        if _is_unset(person):
+        if person is None or str(person).strip() == "":
             return "", []
         text = str(person).strip()
         if text.isdigit():
@@ -157,7 +144,7 @@ class SqliteStore:
     def _element_clause(
         element: str | None, aggregate_default: bool = False
     ) -> tuple[str, list[Any]]:
-        if _is_unset(element):
+        if element is None or (isinstance(element, str) and element.strip() == ""):
             return (" AND m.element IS NULL", []) if aggregate_default else ("", [])
         return " AND m.element = ?", [element]
 
@@ -455,7 +442,9 @@ class SqliteStore:
         pc, pp = self._person_clause(person)
         where += pc
         params += pp
-        element_unspecified = _is_unset(element)
+        element_unspecified = element is None or (
+            isinstance(element, str) and element.strip() == ""
+        )
         fallback_elements: list[str] | None = None
         if element_unspecified:
             if self._has_aggregate_row(name, person=person, date=date):
@@ -499,7 +488,9 @@ class SqliteStore:
         pc, pp = self._person_clause(person)
         where += pc
         params += pp
-        element_unspecified = _is_unset(element)
+        element_unspecified = element is None or (
+            isinstance(element, str) and element.strip() == ""
+        )
         fallback_elements: list[str] | None = None
         if element_unspecified:
             if self._has_aggregate_row(name, person=person):
@@ -533,7 +524,7 @@ class SqliteStore:
     ) -> dict[str, Any]:
         where = "m.metric_name = ? AND m.date = ? AND m.person_is_me = 0"
         params: list[Any] = [name, date]
-        if _is_unset(element):
+        if element is None or (isinstance(element, str) and element.strip() == ""):
             # Наличие агрегата для рейтинга проверяем по ранжируемой популяции
             # (сотрудники, person_is_me = 0) на эту дату, а не глобально по имени:
             # у руководителя может быть агрегат, а у сотрудников — только разрезы.
@@ -743,7 +734,7 @@ class SqliteStore:
         if metric:
             where += " AND m.metric_name = ?"
             params.append(metric)
-        if not _is_unset(element):
+        if element is not None and not (isinstance(element, str) and element.strip() == ""):
             where += " AND m.element = ?"
             params.append(element)
         order = {
