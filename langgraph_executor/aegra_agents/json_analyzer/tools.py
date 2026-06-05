@@ -47,14 +47,20 @@ def _clean(value: Any) -> Any:
     return round(value, 2) if isinstance(value, float) else value
 
 
-def _blank_to_none(value: Any) -> Any:
-    """Пустая/пробельная строка → None.
+# JSON/Python-репрезентации «значение не задано», которые модель присылает
+# строкой вместо опускания аргумента.
+_UNSET_TOKENS = {"", "null", "none", "nil"}
 
-    Некоторые модели присылают аргумент как "" вместо опускания, если считают
-    фильтр ненужным. Без нормализации это превратится в WHERE col = '' и молча
-    даст 0 строк.
+
+def _blank_to_none(value: Any) -> Any:
+    """Пустая/пробельная строка или строковый литерал null/none/nil → None.
+
+    Некоторые модели присылают аргумент как "" или "null" вместо опускания, если
+    считают фильтр ненужным. Без нормализации это превратится в WHERE col = 'null'
+    и молча даст 0 строк. Набор токенов узкий (null/none/nil) — это не реальные
+    имена метрик/продуктов/людей в домене, так что валидные значения не заденет.
     """
-    if isinstance(value, str) and value.strip() == "":
+    if isinstance(value, str) and value.strip().casefold() in _UNSET_TOKENS:
         return None
     return value
 
