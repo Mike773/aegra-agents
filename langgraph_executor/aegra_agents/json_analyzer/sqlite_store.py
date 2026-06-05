@@ -603,6 +603,7 @@ class SqliteStore:
         name: str | None = None,
         person: str | None = None,
         date: str | None = None,
+        max_levels: int = 1,
         limit: int = 80,
     ) -> dict[str, Any]:
         fallback_elements: list[str] | None = None
@@ -622,30 +623,42 @@ class SqliteStore:
         if date:
             root_where += " AND date = ?"
             root_params.append(date)
+        # Разворачиваем дерево не целиком, а на max_levels уровней от корня (по
+        # умолчанию ОДИН: корень + прямые дети). lvl считается в рекурсивном CTE;
+        # детей узла уровня (max_levels-1) дальше НЕ раскрываем — иначе на одну
+        # верхнеуровневую метрику вываливалось бы всё поддерево. has_children
+        # помечает, есть ли у узла собственные подкомпоненты (нераскрытые на
+        # этом шаге), чтобы агент знал, где ещё можно копать, а где лист.
         sql = (
-            "WITH RECURSIVE tree(metric_uid) AS ("
-            f"  SELECT metric_uid FROM metrics WHERE {root_where}"
+            "WITH RECURSIVE tree(metric_uid, lvl) AS ("
+            f"  SELECT metric_uid, 0 FROM metrics WHERE {root_where}"
             "  UNION ALL"
-            "  SELECT m.metric_uid FROM metrics m "
+            "  SELECT m.metric_uid, t.lvl + 1 FROM metrics m "
             "  JOIN tree t ON m.parent_uid = t.metric_uid"
+            "  WHERE t.lvl < ?"
             ") "
             "SELECT m.metric_uid, m.parent_uid, m.depth, m.person_fio, "
             "m.metric_name, m.metric_type, m.measure_type, m.date, m.element, "
             "m.fact, m.plan, m.benchmark, m.influent_percent, "
             "a.plan_status, a.plan_dev_pct, a.benchmark_status, "
             "a.benchmark_dev_pct, a.trend, a.trend_status, "
-            "a.wow_change_pct, a.wow_status "
+            "a.wow_change_pct, a.wow_status, "
+            "EXISTS(SELECT 1 FROM metrics c WHERE c.parent_uid = m.metric_uid) "
+            "AS has_children "
             "FROM metrics m JOIN tree t ON m.metric_uid = t.metric_uid "
             "LEFT JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"
         )
-        rows = self._rows(self.conn.execute(sql, [*root_params, limit + 1]))
+        rows = self._rows(
+            self.conn.execute(sql, [*root_params, max_levels, limit + 1])
+        )
         shown = rows[:limit]
         self._annotate_tree_relations(shown)
         result: dict[str, Any] = {
             "rows": shown,
             "count": min(len(rows), limit),
             "truncated": len(rows) > limit,
+            "levels_shown": max_levels,
         }
         if fallback_elements is not None:
             result["разрезы_вместо_агрегата"] = (
