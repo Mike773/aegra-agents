@@ -459,6 +459,72 @@ def _format_metric_specs(specs: list[dict]) -> str:
     )
 
 
+def _generate_wiki_queries(
+    llm: GigaChat, state: OrchestratorState, specs: list[dict], *, max_n: int
+) -> list[str]:
+    """LLM-генерация поисковых запросов к wiki по вопросу/брифингу + метрикам.
+
+    Затравка: вопрос/брифинг текущего хода + список метрик. На analytics-ходу
+    добавляем выводы аналитика (он уже отработал) — запросы становятся точнее.
+    На первом ходу answer'а ещё нет (асимметрия by design). Сбой LLM → [].
+    """
+    seed = _last_user_text(state).strip()
+    parts = [
+        f"Вопрос руководителя: {seed}" if seed else "Первичный обзор метрик сотрудника.",
+        "Метрики сотрудника:\n" + _format_metric_specs(specs),
+    ]
+    analytics_answer = state.get("analytics_answer")
+    if analytics_answer and not state.get("analytics_error"):
+        parts.append("Выводы аналитика по метрикам:\n" + str(analytics_answer))
+    try:
+        ai = llm.invoke([
+            SystemMessage(content=WIKI_QUERIES_PROMPT),
+            HumanMessage(content="\n\n".join(parts)),
+        ])
+        return _parse_query_list_json(ai.content, max_n=max_n)
+    except Exception:  # noqa: BLE001 — внешний LLM, сужать нечем
+        return []
+
+
+async def _gather_wiki_snippets(
+    easyrag_graph: Any, queries: list[str], *, direction_key: str, top_k: int
+) -> tuple[list[dict], str | None]:
+    """Параллельные запросы к easyrag + мёрж сниппетов.
+
+    Дедуп по section_id (оставляем больший similarity), сорт по similarity desc,
+    cap top_k. Ошибку возвращаем только если упали ВСЕ запросы и сниппетов нет —
+    частичный сбой не должен прятать находки.
+    """
+    results = await asyncio.gather(
+        *[
+            easyrag_graph.ainvoke({
+                "query": q,
+                "direction_key": direction_key,
+                "top_k": top_k,
+            })
+            for q in queries
+        ],
+        return_exceptions=True,
+    )
+    best: dict[str, dict] = {}
+    errors: list[str] = []
+    for res in results:
+        if isinstance(res, Exception):
+            errors.append(f"{type(res).__name__}: {res}"[:300])
+            continue
+        for s in (res.get("snippets") if isinstance(res, dict) else None) or []:
+            sid = s.get("section_id")
+            key = sid if sid is not None else id(s)
+            prev = best.get(key)
+            if prev is None or (s.get("similarity") or 0) > (prev.get("similarity") or 0):
+                best[key] = s
+    snippets = sorted(
+        best.values(), key=lambda s: s.get("similarity") or 0, reverse=True
+    )[:top_k]
+    err = errors[0] if (errors and not snippets) else None
+    return snippets, err
+
+
 def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
     """Wiki-grounding: по вопросу/брифингу + метрикам генерит запросы к wiki и
     подмешивает найденные сниппеты в state (для initial_analysis и respond).
@@ -483,66 +549,17 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
         if not specs:
             return {}
 
-        # Затравка запросов: вопрос/брифинг текущего хода + список метрик. На
-        # analytics-ходу добавляем выводы аналитика (он уже отработал) — запросы
-        # становятся точнее. На первом ходу answer'а ещё нет (асимметрия by design).
-        seed = _last_user_text(state).strip()
-        parts = [
-            f"Вопрос руководителя: {seed}" if seed else "Первичный обзор метрик сотрудника.",
-            "Метрики сотрудника:\n" + _format_metric_specs(specs),
-        ]
-        analytics_answer = state.get("analytics_answer")
-        if analytics_answer and not state.get("analytics_error"):
-            parts.append("Выводы аналитика по метрикам:\n" + str(analytics_answer))
-
-        try:
-            ai = llm.invoke([
-                SystemMessage(content=WIKI_QUERIES_PROMPT),
-                HumanMessage(content="\n\n".join(parts)),
-            ])
-            queries = _parse_query_list_json(
-                ai.content,
-                max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
-            )
-        except Exception:  # noqa: BLE001 — внешний LLM, сужать нечем
-            queries = []
-
+        queries = _generate_wiki_queries(
+            llm, state, specs,
+            max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
+        )
         if not queries:
             return {}
 
         top_k = int(cfg.get("easyrag_top_k") or _DEFAULT_EASYRAG_TOP_K)
-        results = await asyncio.gather(
-            *[
-                easyrag_graph.ainvoke({
-                    "query": q,
-                    "direction_key": direction_key,
-                    "top_k": top_k,
-                })
-                for q in queries
-            ],
-            return_exceptions=True,
+        snippets, err = await _gather_wiki_snippets(
+            easyrag_graph, queries, direction_key=direction_key, top_k=top_k
         )
-
-        # Мёрж: дедуп по section_id (оставляем больший similarity), сорт по
-        # similarity desc, cap top_k. Ошибку показываем только если упали ВСЕ
-        # запросы и сниппетов нет — частичный сбой не должен прятать находки.
-        best: dict[str, dict] = {}
-        errors: list[str] = []
-        for res in results:
-            if isinstance(res, Exception):
-                errors.append(f"{type(res).__name__}: {res}"[:300])
-                continue
-            for s in (res.get("snippets") if isinstance(res, dict) else None) or []:
-                sid = s.get("section_id")
-                key = sid if sid is not None else id(s)
-                prev = best.get(key)
-                if prev is None or (s.get("similarity") or 0) > (prev.get("similarity") or 0):
-                    best[key] = s
-        snippets = sorted(
-            best.values(), key=lambda s: s.get("similarity") or 0, reverse=True
-        )[:top_k]
-
-        err = errors[0] if (errors and not snippets) else None
         joined_query = " | ".join(queries)
 
         if not snippets and not err:
