@@ -2,7 +2,7 @@
 
 Регресс на главную ошибку json_analyzer: для 'обратной' метрики рост значения —
 это УХУДШЕНИЕ, а значение выше среднего коллег — это ХУЖЕ коллег. Раньше
-направление применялось только к plan_status/peer_rank, а trend/wow_change/zscore
+направление применялось только к plan_status/peer_rank, а trend/pop_change/zscore
 отдавались «сырыми», и модель читала 'рост' обратной метрики как успех.
 """
 from __future__ import annotations
@@ -83,7 +83,7 @@ def test_inverse_rising_value_is_deterioration():
     r = _row(store, "AHT", "Босс", "2026-01-12")
     assert r["trend"] == "рост"               # значение растёт
     assert r["trend_status"] == "ухудшение"   # но для обратной это ухудшение
-    assert r["wow_status"] == "ухудшение"
+    assert r["pop_status"] == "ухудшение"
     assert r["plan_status"] == "хуже_плана"
 
 
@@ -92,7 +92,7 @@ def test_direct_rising_value_is_improvement():
     r = _row(store, "Конверсия", "Босс", "2026-01-12")
     assert r["trend"] == "рост"
     assert r["trend_status"] == "улучшение"
-    assert r["wow_status"] == "улучшение"
+    assert r["pop_status"] == "улучшение"
     assert r["plan_status"] == "лучше_плана"
 
 

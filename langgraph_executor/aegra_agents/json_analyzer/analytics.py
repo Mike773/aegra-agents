@@ -1,7 +1,7 @@
 """Детерминированный (без LLM) расчёт производных метрик.
 
 После загрузки сырых метрик считает отклонения от плана/бенчмарка, динамику
-неделя-к-неделе, тренд, peer-статистику и аномалии — и дописывает их в таблицу
+период-к-периоду, тренд, peer-статистику и аномалии — и дописывает их в таблицу
 metric_analytics того же in-memory SQLite. Универсально: направление берётся из
 metric_type ('прямая'/'обратная'), группы строятся по (metric_name, element, date).
 """
@@ -22,9 +22,9 @@ _ANALYTICS_COLUMNS: tuple[str, ...] = (
     "benchmark_dev_abs",
     "benchmark_dev_pct",
     "benchmark_status",
-    "wow_change_abs",
-    "wow_change_pct",
-    "wow_status",
+    "pop_change_abs",
+    "pop_change_pct",
+    "pop_status",
     "trend",
     "trend_status",
     "peer_mean",
@@ -108,15 +108,15 @@ def _trend_status(trend: str | None, metric_type: str | None) -> str | None:
     return better if _direction_better(trend == "рост", metric_type) else worse
 
 
-def _wow_status(wow_change_pct: float | None, metric_type: str | None) -> str | None:
-    """Вердикт изменения неделя-к-неделе с учётом направления (та же мёртвая зона
+def _pop_status(pop_change_pct: float | None, metric_type: str | None) -> str | None:
+    """Вердикт изменения период-к-периоду с учётом направления (та же мёртвая зона
     ±_TREND_TOLERANCE_PCT, что у тренда)."""
     better, stable, worse = _DYNAMIC_LABELS
-    if wow_change_pct is None:
+    if pop_change_pct is None:
         return None
-    if abs(wow_change_pct) < _TREND_TOLERANCE_PCT:
+    if abs(pop_change_pct) < _TREND_TOLERANCE_PCT:
         return stable
-    return better if _direction_better(wow_change_pct > 0, metric_type) else worse
+    return better if _direction_better(pop_change_pct > 0, metric_type) else worse
 
 
 def _peer_status(zscore: float | None, metric_type: str | None) -> str | None:
@@ -162,9 +162,9 @@ def compute_analytics(store: SqliteStore) -> int:
             "benchmark_dev_abs": bench_abs,
             "benchmark_dev_pct": bench_pct,
             "benchmark_status": bench_status,
-            "wow_change_abs": None,
-            "wow_change_pct": None,
-            "wow_status": None,
+            "pop_change_abs": None,
+            "pop_change_pct": None,
+            "pop_status": None,
             "trend": None,
             "trend_status": None,
             "peer_mean": None,
@@ -189,9 +189,9 @@ def compute_analytics(store: SqliteStore) -> int:
                 change_pct = (
                     change_abs / prev["fact"] * 100.0 if prev["fact"] != 0 else None
                 )
-                result[r["metric_uid"]]["wow_change_abs"] = change_abs
-                result[r["metric_uid"]]["wow_change_pct"] = change_pct
-                result[r["metric_uid"]]["wow_status"] = _wow_status(
+                result[r["metric_uid"]]["pop_change_abs"] = change_abs
+                result[r["metric_uid"]]["pop_change_pct"] = change_pct
+                result[r["metric_uid"]]["pop_status"] = _pop_status(
                     change_pct, r["metric_type"]
                 )
             prev = r
