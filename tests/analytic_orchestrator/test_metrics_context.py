@@ -45,18 +45,17 @@ def test_block_composes_summary_and_labeled_answer():
     assert "JSON с метриками" not in block
 
 
-def test_block_first_turn_no_duplicate_narrow():
-    # На первом ходе analytics_answer == metrics_summary, вопрос == брифинг —
-    # узкий блок не добавляем, чтобы не дублировать опорный разбор.
+def test_block_first_turn_shows_only_anchor():
+    # После хода 1 заполнен ТОЛЬКО опорный разбор: analytics_answer на первом
+    # ходе больше не пишется (узкий ответ появляется лишь на реальном
+    # analytics-ходе), поэтому дублю взяться неоткуда — дедуп не нужен.
     summary = "Первичный разбор метрик сотрудника."
     block = _metrics_system_block({
         "metrics_summary": summary,
-        "analytics_answer": summary,
-        "analytics_question": "Проанализируй метрики сотрудника.",
-        "briefing": "Проанализируй метрики сотрудника.",
         "metrics": {"x": 1},
     })
     assert "Опорный разбор метрик" in block
+    assert summary in block
     assert block.count("Ответ аналитика на вопрос") == 0
 
 

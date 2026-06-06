@@ -207,13 +207,12 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
                 text, {"reasoning_trace": new_trace}, config
             ))],
             "reasoning_trace": new_trace,
-            # Sticky: результат глубокого анализа доступен респондеру дальше.
-            "analytics_question": question,
-            "analytics_answer": analysis,
-            "analytics_error": err,
         }
-        # Опорный широкий разбор — фиксируем ОДИН раз, чтобы узкие analytics-ходы
-        # его не перезаписывали (см. _metrics_system_block). Только при успехе.
+        # Опорный широкий разбор — единственное sticky-поле первого хода, ставится
+        # ОДИН раз и не перезаписывается узкими analytics-ходами. В analytics_answer
+        # его НЕ дублируем: то поле держит только свежий УЗКИЙ ответ реального
+        # analytics-хода, поэтому metrics_summary и analytics_answer никогда не
+        # пересекаются по содержимому (и _metrics_system_block не нужен дедуп).
         if analysis and not err:
             out_state["metrics_summary"] = analysis
         return out_state
@@ -1204,10 +1203,10 @@ def _analyzer_trace_steps(tool_steps: list[dict]) -> list[TraceStep]:
 def _metrics_system_block(state: OrchestratorState) -> str | None:
     # Контекст метрик для респондера — композиция:
     #   (1) опорный широкий разбор (metrics_summary, стабильный, ход 1);
-    #   (2) свежий узкий ответ аналитика — но ЯВНО подписанный своим вопросом,
-    #       чтобы модель не приняла его за «все метрики». Не дублируем первичный.
-    # Узкий ответ больше НЕ выдаётся за всю картину: иначе последующие ходы видели
-    # бы ответ на чужой прошлый вопрос как актуальные метрики.
+    #   (2) свежий узкий ответ аналитика — ЯВНО подписанный своим вопросом, чтобы
+    #       модель не приняла его за «все метрики».
+    # Поля не пересекаются по содержимому (первичный разбор пишется только в
+    # metrics_summary, см. initial_analysis), поэтому дедуп здесь не нужен.
     parts: list[str] = []
     summary = (state.get("metrics_summary") or "").strip()
     if summary:
@@ -1215,14 +1214,7 @@ def _metrics_system_block(state: OrchestratorState) -> str | None:
 
     answer = (state.get("analytics_answer") or "").strip()
     question = (state.get("analytics_question") or "").strip()
-    briefing = (state.get("briefing") or "").strip()
-    if (
-        answer
-        and not state.get("analytics_error")
-        and question
-        and question != briefing      # не дублируем первичный разбор
-        and answer != summary
-    ):
+    if answer and question and not state.get("analytics_error"):
         parts.append(f"Ответ аналитика на вопрос «{question}»:\n{answer}")
 
     if parts:

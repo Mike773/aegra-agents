@@ -115,3 +115,18 @@ def test_initial_message_is_final_tagged():
     out = asyncio.run(node(_state(), _cfg()))
     msg = out["messages"][0]
     assert msg.additional_kwargs.get(_FINAL_KEY) is True
+
+
+def test_initial_sets_only_summary_not_narrow_answer():
+    """Ход 1 пишет разбор в metrics_summary и НЕ дублирует его в analytics_answer.
+
+    Узкое поле analytics_answer держит только свежий ответ реального analytics-хода,
+    поэтому metrics_summary и analytics_answer никогда не пересекаются по содержимому
+    (и _metrics_system_block не нужен дедуп).
+    """
+    answer = "CSAT 70% — ниже плана; тренд вниз 3 мес."
+    node = make_initial_analysis_node(FakeLLM(), FakeAnalyzer(answer))
+    out = asyncio.run(node(_state(), _cfg()))
+    assert out["metrics_summary"] == answer
+    assert not out.get("analytics_answer")
+    assert not out.get("analytics_question")
