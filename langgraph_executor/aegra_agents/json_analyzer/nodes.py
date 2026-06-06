@@ -57,6 +57,22 @@ def _prepare_store(rows: list[dict[str, Any]]) -> SqliteStore:
     return store
 
 
+def _safe_embed_query(
+    embed_query: Callable[[str], list[float]],
+) -> Callable[[str], list[float]]:
+    """Обёртка над эмбеддингом запроса: при сбое (rate-limit/сеть) возвращает
+    пустой вектор. Тогда resolve_entity деградирует до «совпадений нет», но не
+    роняет весь tool-loop — остальные инструменты (обзор, дерево, флаги) на SQLite
+    эмбеддингов не требуют."""
+    def _q(text: str) -> list[float]:
+        try:
+            return embed_query(text)
+        except Exception:  # noqa: BLE001 — внешний эмбеддер, сужать нечем
+            return []
+
+    return _q
+
+
 def _run_agent(
     store: SqliteStore,
     index: EmbeddingIndex,
@@ -65,7 +81,7 @@ def _run_agent(
     embed_query: Callable[[str], list[float]],
 ) -> tuple[list[Any], bool]:
     """Блокирующий прогон стадии 1: tool-loop по SQLite + in-memory индексу."""
-    tools = build_tools(store, index, embed_query=embed_query)
+    tools = build_tools(store, index, embed_query=_safe_embed_query(embed_query))
     strategy = ClassicStrategy()
     agent = strategy.build(llm, tools, store.schema_overview())
     return strategy.run(agent, [HumanMessage(content=question)])
@@ -153,13 +169,19 @@ def make_gather_node(llm: GigaChat):
 
         # Кэш эмбеддингов — в LangGraph Store (подключение aegra). Доступ async,
         # сам подсчёт недостающих эмбеддингов (GigaChat) — внутри в to_thread.
+        # Сбой эмбеддингов (rate-limit/сеть) НЕ фатален: эмбеддинги нужны только
+        # resolve_entity, а обзор/дерево/флаги работают на SQLite. Деградируем до
+        # пустого индекса, чтобы tool-loop отработал, а не падал целиком в фолбэк.
         lg_store = _resolve_store()
-        index = await sync_embeddings(
-            lg_store,
-            store,
-            direction_key=direction_key,
-            embed_documents=embedder.embed_documents,
-        )
+        try:
+            index = await sync_embeddings(
+                lg_store,
+                store,
+                direction_key=direction_key,
+                embed_documents=embedder.embed_documents,
+            )
+        except Exception:  # noqa: BLE001 — внешний эмбеддер (GigaChat), сужать нечем
+            index = EmbeddingIndex([])
 
         # Граф смысловых связей метрик (Блок D ТЗ) — LLM по названиям/описаниям,
         # кэш в Store per-direction. Грузим в SQLite ДО сборки инструментов, чтобы

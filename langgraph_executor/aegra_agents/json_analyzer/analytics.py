@@ -324,3 +324,374 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
         "top_anomalies_latest": anomalies,
         "trend_counts_level1": trends,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Универсальный обзор ситуации: зоны (проблемы/позитив/стабильность) + причинная
+# цепочка драйверов произвольной глубины. Детерминированный (без LLM): зоны и
+# направление берутся из ГОТОВЫХ вердиктов metric_analytics (plan_status и т.п.),
+# а причинная ВЕРТИКАЛЬ строится по бизнес-весу influent_percent: на каждом узле
+# доминирующий драйвер = ребёнок с наибольшим influent (|сигнал| — лишь тай-брейк
+# при равных весах; если влияния нет ни у кого — ранжируем по величине изменения).
+# Идея веса влияния — из json_analyzer_causal/causal.py:_algebraic_attribution, но
+# без перемножения, без пересчёта направлений и без DoWhy. Рекурсия идёт ТОЛЬКО в
+# доминирующий структурный драйвер, поэтому работает на любой глубине и числе метрик.
+# --------------------------------------------------------------------------- #
+_OVERVIEW_MAX_DEPTH = 6          # предохранитель от циклов/слишком глубоких деревьев
+_OVERVIEW_TOP_DRIVERS = 3        # сколько драйверов показывать на узел
+_OVERVIEW_TOP_SEGMENTS = 3       # сколько разрезов (продуктов) показывать на узел
+_OVERVIEW_MIN_SHARE = 15.0       # доля доминирующего драйвера, ниже — рекурсию не продолжаем
+_OVERVIEW_MAX_PROBLEM_CHAINS = 3 # для скольких проблем разворачивать полную цепочку
+_OVERVIEW_MAX_HEADLINES = 8      # сколько позитивных/стабильных метрик перечислять
+
+
+def _focus_person(store: SqliteStore, person: Any | None) -> tuple[Any, Any]:
+    """Резолв фокусного человека → (tabnum, fio).
+
+    person задан → он (ФИО-подстрока или табельный); иначе единственный сотрудник
+    (person_is_me=0); иначе руководитель; иначе любой. None,None если людей нет.
+    """
+    if person is not None and str(person).strip():
+        text = str(person).strip()
+        if text.isdigit():
+            row = store.conn.execute(
+                "SELECT person_tabnum, person_fio FROM metrics "
+                "WHERE person_tabnum = ? LIMIT 1",
+                (int(text),),
+            ).fetchone()
+        else:
+            row = store.conn.execute(
+                "SELECT person_tabnum, person_fio FROM metrics "
+                "WHERE person_fio LIKE ? LIMIT 1",
+                (f"%{text}%",),
+            ).fetchone()
+        return (row["person_tabnum"], row["person_fio"]) if row else (None, None)
+
+    emps = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT DISTINCT person_tabnum, person_fio FROM metrics "
+            "WHERE person_is_me = 0"
+        )
+    ]
+    if len(emps) == 1:
+        return emps[0]["person_tabnum"], emps[0]["person_fio"]
+    boss = store.conn.execute(
+        "SELECT person_tabnum, person_fio FROM metrics "
+        "WHERE person_is_me = 1 LIMIT 1"
+    ).fetchone()
+    if boss:
+        return boss["person_tabnum"], boss["person_fio"]
+    if emps:
+        return emps[0]["person_tabnum"], emps[0]["person_fio"]
+    return None, None
+
+
+def _overview_dates(
+    store: SqliteStore, date: str | None
+) -> tuple[str | None, str | None]:
+    """(текущая, предыдущая) даты: текущая = заданная или последняя; предыдущая —
+    ближайшая до текущей (для подписи сравнения; сам Δ уже в pop_change_pct)."""
+    dates = [
+        r["date"]
+        for r in store.conn.execute(
+            "SELECT DISTINCT date FROM metrics WHERE date IS NOT NULL ORDER BY date"
+        )
+    ]
+    if not dates:
+        return None, None
+    cur = date or dates[-1]
+    before = [d for d in dates if d < cur]
+    return cur, (before[-1] if before else None)
+
+
+def _zone_of(row: dict[str, Any]) -> str:
+    """Зона метрики по готовым вердиктам (приоритет: проблема > позитив > стабильно).
+
+    Метрика «хуже плана, но с улучшающейся динамикой» остаётся проблемой —
+    приоритет у негатива, чтобы зона не маскировала отставание от плана."""
+    plan, trend, pop = (
+        row.get("plan_status"),
+        row.get("trend_status"),
+        row.get("pop_status"),
+    )
+    if plan == "хуже_плана" or trend == "ухудшение" or pop == "ухудшение":
+        return "problem"
+    if plan == "лучше_плана" or trend == "улучшение" or pop == "улучшение":
+        return "positive"
+    return "stable"
+
+
+def _overview_signal(row: dict[str, Any]) -> float:
+    """Магнитуда «движения/отставания» узла: |изменение к прошлому периоду|, иначе
+    |отклонение от плана|, иначе 0. Используется и для ранжирования драйверов, и
+    для сортировки проблем по силе.
+
+    Нулевое значение трактуем как «сигнала нет» и проваливаемся к следующему полю:
+    при pop_change_pct=0.0 (ровно ноль) метрика всё равно ранжируется по отклонению
+    от плана, а не получает искусственный 0."""
+    for key in ("pop_change_pct", "plan_dev_pct"):
+        val = row.get(key)
+        if val is not None and val != 0:
+            return abs(val)
+    return 0.0
+
+
+def _driver_view(row: dict[str, Any], share_pct: float | None) -> dict[str, Any]:
+    """Публичная проекция узла-драйвера (без служебных полей). share_pct=None для
+    «больше всего изменилось» — там доля влияния не показывается."""
+    return {
+        "metric": row.get("metric_name"),
+        "influent_percent": row.get("influent_percent"),
+        "share_pct": share_pct,
+        "plan_status": row.get("plan_status"),
+        "plan_dev_pct": row.get("plan_dev_pct"),
+        "trend_status": row.get("trend_status"),
+        "pop_status": row.get("pop_status"),
+        "pop_change_pct": row.get("pop_change_pct"),
+        "fact": row.get("fact"),
+        "measure_type": row.get("measure_type"),
+    }
+
+
+def _rank_drivers(
+    structural: list[dict[str, Any]],
+) -> tuple[list[tuple[float, dict[str, Any]]], bool]:
+    """Ранжирует структурных детей по бизнес-весу influent_percent.
+
+    Бизнес-вес — основной сигнал «что важно» для метрики (напр. AHT = 90% от
+    Производительности): по нему строим причинную ВЕРТИКАЛЬ и спускаемся вглубь.
+    Магнитуда движения/отставания идёт лишь тай-брейком при равных весах (а
+    «больше всего изменилось» выносится отдельно в _build_node). Сиблинги БЕЗ
+    influent исключаются, когда у кого-то он есть (так отсекаются РАНГ-метрики и
+    прочие некомпонентные узлы). Если влияния нет ни у кого — ранжируем по величине
+    изменения (эвристика, heuristic_equal=True).
+
+    Возвращает [(share_pct, row), ...] по убыванию и флаг heuristic_equal.
+    share_pct = доля бизнес-веса (при наличии весов) либо доля |изменения| (без них).
+    """
+    has_infl = any(k.get("influent_percent") is not None for k in structural)
+    if has_infl:
+        pool = [k for k in structural if k.get("influent_percent") is not None]
+        wsum = sum(k["influent_percent"] for k in pool) or 1.0
+        pool = sorted(
+            pool,
+            key=lambda k: (k["influent_percent"], _overview_signal(k)),
+            reverse=True,
+        )
+        ranked = [(round(k["influent_percent"] / wsum * 100.0, 1), k) for k in pool]
+        return ranked, False
+
+    ssum = sum(_overview_signal(k) for k in structural) or 1.0
+    pool = sorted(structural, key=_overview_signal, reverse=True)
+    ranked = [(round(_overview_signal(k) / ssum * 100.0, 1), k) for k in pool]
+    return ranked, True
+
+
+def _top_segments(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """Топ-K разрезов (продуктов/тематик) узла. Разрезы группируются по имени
+    дочерней метрики (напр. «Влияние тематик на Talk&Hold»); берём группу с
+    наибольшим суммарным |сигналом| и её топ-K по |сигналу|."""
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for s in segments:
+        groups[s.get("metric_name")].append(s)
+    label, items = max(
+        groups.items(),
+        key=lambda kv: sum(_overview_signal(i) for i in kv[1]),
+    )
+    items = sorted(items, key=_overview_signal, reverse=True)[:_OVERVIEW_TOP_SEGMENTS]
+    return {
+        "label": label,
+        "top": [
+            {
+                "element": i.get("element"),
+                "fact": i.get("fact"),
+                "measure_type": i.get("measure_type"),
+                "plan_status": i.get("plan_status"),
+                "plan_dev_pct": i.get("plan_dev_pct"),
+                "pop_status": i.get("pop_status"),
+                "pop_change_pct": i.get("pop_change_pct"),
+            }
+            for i in items
+        ],
+    }
+
+
+def _node_header(row: dict[str, Any]) -> dict[str, Any]:
+    """Шапка метрики-узла (без декомпозиции) — общая для цепочек и заголовков."""
+    return {
+        "metric": row.get("metric_name"),
+        "element": row.get("element"),
+        "metric_type": row.get("metric_type"),
+        "measure_type": row.get("measure_type"),
+        "fact": row.get("fact"),
+        "plan_status": row.get("plan_status"),
+        "plan_dev_pct": row.get("plan_dev_pct"),
+        "trend_status": row.get("trend_status"),
+        "pop_status": row.get("pop_status"),
+        "pop_change_pct": row.get("pop_change_pct"),
+    }
+
+
+def _build_node(
+    children: dict[Any, list[dict[str, Any]]],
+    row: dict[str, Any],
+    depth: int,
+) -> dict[str, Any]:
+    """Рекурсивный узел причинной цепочки: шапка + ранжированные драйверы +
+    рекурсия в доминирующий + разрезы (продукты). Глубина ограничена."""
+    node = _node_header(row)
+    node.update(
+        {
+            "drivers": [],
+            "main_driver": None,
+            "by_segments": None,
+            "biggest_mover": None,
+            "note": None,
+        }
+    )
+
+    kids = children.get(row.get("metric_uid"), [])
+    structural = [k for k in kids if k.get("element") is None]
+    segments = [k for k in kids if k.get("element") is not None]
+    if segments:
+        node["by_segments"] = _top_segments(segments)
+    if not structural:
+        if not kids:
+            node["note"] = "не раскладывается (нет компонентов)"
+        return node
+
+    ranked, heuristic_equal = _rank_drivers(structural)
+    node["drivers"] = [
+        _driver_view(k, share) for share, k in ranked[:_OVERVIEW_TOP_DRIVERS]
+    ]
+
+    notes: list[str] = []
+    if heuristic_equal:
+        notes.append("влияние детей не задано — ранжировано по величине изменения (эвристика)")
+    # «Больше всего изменилось» — отдельный сигнал, когда сильнее всех двигался НЕ
+    # самый весомый компонент (вертикаль идёт по весу, а это — про динамику).
+    # Берём только из ранжированного пула (исключая некомпонентные узлы вроде РАНГ).
+    ranked_rows = [k for _, k in ranked]
+    dom_row = ranked_rows[0]
+    mover = max(ranked_rows, key=_overview_signal)
+    if mover is not dom_row and _overview_signal(mover) > 0:
+        node["biggest_mover"] = _driver_view(mover, None)
+    # Честная пометка: если родитель — проблема, а ни один из показанных ключевых
+    # компонентов сам не «плохой» (все в плане/улучшаются), дерево не объясняет
+    # отставание — причина может быть вне него (аналог self-mechanism в каузале).
+    shown = [k for _, k in ranked[:_OVERVIEW_TOP_DRIVERS]]
+    if _zone_of(row) == "problem" and not any(_zone_of(k) == "problem" for k in shown):
+        notes.append(
+            "ключевые компоненты не ухудшались — отставание не объясняется деревом "
+            "(причина может быть вне него)"
+        )
+    node["note"] = "; ".join(notes) or None
+
+    top_share, top_row = ranked[0]
+    if (
+        depth < _OVERVIEW_MAX_DEPTH
+        and top_share >= _OVERVIEW_MIN_SHARE
+        and children.get(top_row.get("metric_uid"))
+    ):
+        node["main_driver"] = _build_node(children, top_row, depth + 1)
+    return node
+
+
+def build_situation_overview(
+    store: SqliteStore,
+    person: Any | None = None,
+    date: str | None = None,
+) -> dict[str, Any]:
+    """Карта ситуации фокусного человека за один проход: зоны (проблемы / позитив /
+    стабильность) по корневым метрикам и причинная цепочка драйверов в каждой
+    проблеме (произвольной глубины, до листьев). Универсально: любое число корней,
+    любая глубина, корректная деградация при одном уровне / без influent_percent.
+    """
+    tabnum, fio = _focus_person(store, person)
+    if tabnum is None:
+        return {"error": "В датасете нет людей."}
+    cur_date, prev_date = _overview_dates(store, date)
+    if cur_date is None:
+        return {"error": "В датасете нет дат."}
+
+    rows = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT m.metric_uid, m.parent_uid, m.depth, m.metric_name, "
+            "m.metric_type, m.measure_type, m.element, m.fact, m.influent_percent, "
+            "a.plan_status, a.plan_dev_pct, a.benchmark_status, a.trend_status, "
+            "a.pop_status, a.pop_change_pct "
+            "FROM metrics m LEFT JOIN metric_analytics a "
+            "ON a.metric_uid = m.metric_uid "
+            "WHERE m.person_tabnum = ? AND m.date = ?",
+            (tabnum, cur_date),
+        )
+    ]
+    if not rows:
+        return {
+            "person_fio": fio,
+            "person_tabnum": tabnum,
+            "date": cur_date,
+            "prev_date": prev_date,
+            "single_level": True,
+            "problems": [],
+            "positives": [],
+            "stable": [],
+            "note": "Нет данных по сотруднику на этот период.",
+        }
+
+    # Зоны и вердикты читаются из metric_analytics; без неё все статусы NULL и любая
+    # метрика молча попала бы в «стабильно». Честно сообщаем, что аналитика не
+    # посчитана, вместо ложной классификации (в проде compute_analytics всегда есть).
+    if store.analytics_row_count() == 0:
+        return {
+            "person_fio": fio,
+            "person_tabnum": tabnum,
+            "date": cur_date,
+            "prev_date": prev_date,
+            "single_level": True,
+            "problems": [],
+            "positives": [],
+            "stable": [],
+            "note": "Аналитика не посчитана (compute_analytics) — зоны недоступны.",
+        }
+
+    children: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        if r.get("parent_uid") is not None:
+            children[r["parent_uid"]].append(r)
+    roots = [r for r in rows if r.get("depth") == 1 and r.get("element") is None]
+    if not roots:  # датасет только из разрезов (agg-) — корнями станут они
+        roots = [r for r in rows if r.get("depth") == 1]
+
+    buckets: dict[str, list[dict[str, Any]]] = {
+        "problem": [],
+        "positive": [],
+        "stable": [],
+    }
+    for r in roots:
+        buckets[_zone_of(r)].append(r)
+    buckets["problem"].sort(key=_overview_signal, reverse=True)
+
+    problems: list[dict[str, Any]] = []
+    for i, r in enumerate(buckets["problem"]):
+        if i < _OVERVIEW_MAX_PROBLEM_CHAINS:
+            problems.append(_build_node(children, r, depth=1))
+        else:
+            problems.append(_node_header(r))
+
+    positives = [_node_header(r) for r in buckets["positive"][:_OVERVIEW_MAX_HEADLINES]]
+    stable = [_node_header(r) for r in buckets["stable"][:_OVERVIEW_MAX_HEADLINES]]
+    single_level = not any(children.get(r.get("metric_uid")) for r in roots)
+
+    return {
+        "person_fio": fio,
+        "person_tabnum": tabnum,
+        "date": cur_date,
+        "prev_date": prev_date,
+        "single_level": single_level,
+        "problems": problems,
+        "positives": positives,
+        "stable": stable,
+    }

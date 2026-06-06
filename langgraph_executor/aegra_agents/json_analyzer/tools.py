@@ -337,6 +337,111 @@ def _render_summary(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _overview_headline(h: dict[str, Any]) -> str:
+    """Одна строка по метрике: имя [разрез]: факт, план-статус, динамика."""
+    name = h.get("metric") or "—"
+    if h.get("element"):
+        name = f"{name} [{h['element']}]"
+    parts = [f"{name}: {_fmt_num(h.get('fact'), _unit(h.get('measure_type')))}"]
+    if h.get("plan_status"):
+        dev = h.get("plan_dev_pct")
+        parts.append(
+            str(h["plan_status"]) + (f" ({_fmt_num(dev)}%)" if dev is not None else "")
+        )
+    dyn = h.get("trend_status") or h.get("pop_status")
+    if dyn:
+        ch = h.get("pop_change_pct")
+        parts.append("динамика " + str(dyn) + (f" ({_fmt_num(ch)}%)" if ch is not None else ""))
+    return ", ".join(parts)
+
+
+def _overview_driver(d: dict[str, Any]) -> str:
+    name = d.get("metric") or "—"
+    bits: list[str] = []
+    if d.get("influent_percent") is not None:
+        bits.append(f"вес {_fmt_num(d['influent_percent'])}%")
+    elif d.get("share_pct") is not None:  # без бизнес-веса — доля по изменению
+        bits.append(f"доля {_fmt_num(d['share_pct'])}%")
+    if d.get("plan_status"):
+        bits.append(str(d["plan_status"]))
+    dyn = d.get("trend_status") or d.get("pop_status")
+    if dyn:
+        bits.append(str(dyn))
+    # Для «больше всего изменилось» (share не задана) показываем величину Δ.
+    if d.get("share_pct") is None and d.get("pop_change_pct") is not None:
+        bits.append(f"Δ {_fmt_num(d['pop_change_pct'])}%")
+    return name + (f" ({', '.join(bits)})" if bits else "")
+
+
+def _overview_segment(s: dict[str, Any]) -> str:
+    el = s.get("element") or "—"
+    val = _fmt_num(s.get("fact"), _unit(s.get("measure_type")))
+    ch = s.get("pop_change_pct")
+    return f"{el} {val}".strip() + (f" (Δ {_fmt_num(ch)}%)" if ch is not None else "")
+
+
+def _overview_chain(node: dict[str, Any], indent: str) -> list[str]:
+    """Драйверы узла + разрезы + рекурсивный спуск в доминирующий драйвер."""
+    lines: list[str] = []
+    drivers = node.get("drivers") or []
+    if drivers:
+        lines.append(indent + "драйверы: " + "; ".join(_overview_driver(d) for d in drivers))
+    seg = node.get("by_segments")
+    if seg and seg.get("top"):
+        seg_str = "; ".join(_overview_segment(s) for s in seg["top"])
+        lines.append(indent + f"по разрезам ({seg.get('label')}): {seg_str}")
+    mover = node.get("biggest_mover")
+    if mover:
+        lines.append(indent + "больше всего изменилось: " + _overview_driver(mover))
+    main = node.get("main_driver")
+    if main:
+        lines.append(indent + "↳ " + _overview_headline(main))
+        if main.get("note"):
+            lines.append(indent + "  " + str(main["note"]))
+        lines.extend(_overview_chain(main, indent + "  "))
+    return lines
+
+
+def _render_overview(o: dict[str, Any]) -> str:
+    """Фразовый рендер карты ситуации: зоны + причинная цепочка вглубь."""
+    if o.get("error"):
+        return _render_error(o)
+    head = f"Обзор ситуации: {o.get('person_fio') or '—'}, период {o.get('date')}"
+    if o.get("prev_date"):
+        head += f" (сравнение с {o['prev_date']})"
+    lines = [head + "."]
+    if o.get("note"):
+        lines.append(str(o["note"]))
+
+    problems = o.get("problems") or []
+    lines.append("")
+    if problems:
+        lines.append("Проблемные зоны:")
+        for p in problems:
+            lines.append("- " + _overview_headline(p))
+            if p.get("note"):
+                lines.append("    " + str(p["note"]))
+            lines.extend(_overview_chain(p, "    "))
+    else:
+        lines.append("Проблемных зон (хуже плана / ухудшение) не выявлено.")
+
+    for title, key in (("Позитив:", "positives"), ("Стабильно:", "stable")):
+        items = o.get(key) or []
+        if items:
+            lines.append("")
+            lines.append(title)
+            for h in items:
+                lines.append("- " + _overview_headline(h))
+
+    lines.append("")
+    lines.append(
+        "(Причинная вертикаль построена по бизнес-весу влияния (influent_percent); "
+        "«больше всего изменилось» и динамика — отдельные сигналы. Это ориентир, не "
+        "доказанная причинность. Зоны и направление — по готовым вердиктам.)"
+    )
+    return "\n".join(lines)
+
+
 def _safe(render: Any, result: Any) -> str:
     """Рендер с безопасным fallback на JSON при любой ошибке/пустом выводе."""
     try:
@@ -578,6 +683,25 @@ def build_tools(
         метрикам на последнем периоде, топ аномалий, счётчики трендов."""
         return _safe(_render_summary, analytics.build_summary(store))
 
+    def situation_overview(person: str | None = None, date: str | None = None) -> str:
+        """Карта ситуации сотрудника за ОДИН вызов: зоны (проблемы / позитив /
+        стабильность) по корневым метрикам и причинная цепочка драйверов в каждой
+        проблеме — вглубь до компонентов (метрика → главный под-показатель → …),
+        с разрезами-продуктами там, где они есть. Зоны и направление берутся из
+        готовых вердиктов; причинная вертикаль ранжируется по бизнес-весу влияния
+        (influent_percent), а при его отсутствии — по величине изменения (эвристика).
+        Для ШИРОКИХ вопросов («что происходит», «как дела», «общая оценка»,
+        «проблемные зоны», «разбери») вызывай ПЕРВЫМ: один вызов даёт и зоны, и
+        причины — не нужно перебирать метрики по одной через find_flags/metric_tree.
+        person — ФИО/табельный (по умолчанию единственный сотрудник набора);
+        date — YYYY-MM-DD (по умолчанию последний период)."""
+        person = _blank_to_none(person)
+        date = _blank_to_none(date)
+        return _safe(
+            _render_overview,
+            analytics.build_situation_overview(store, person=person, date=date),
+        )
+
     def related_metrics(metric: str) -> str:
         """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий/описаний, не
         из значений). Возвращает рёбра с relation ('опережающая→запаздывающая'/
@@ -607,6 +731,7 @@ def build_tools(
         (list_people, "list_people"),
         (find_flags, "find_flags"),
         (analytics_summary, "analytics_summary"),
+        (situation_overview, "situation_overview"),
         (related_metrics, "related_metrics"),
     ]
 
