@@ -1013,10 +1013,18 @@ def _append_trace(state: OrchestratorState, steps: list[TraceStep]) -> list[Trac
     return _trace(state) + steps
 
 
-def _describe_enabled(config: RunnableConfig | None) -> bool:
-    """Флаг describe_answer из configurable (bool или строка 'true'/'1'/'yes'/'да')."""
+def _config_flag(
+    config: RunnableConfig | None, key: str, *, default: bool
+) -> bool:
+    """Булев флаг из configurable: bool как есть, строка 'true'/'1'/'yes'/'да' → True.
+
+    Отсутствующее значение (None) даёт default — так describe_answer выключен по
+    умолчанию, а emit_progress_messages включён.
+    """
     cfg = (config or {}).get("configurable") or {}
-    val = cfg.get("describe_answer")
+    val = cfg.get(key)
+    if val is None:
+        return default
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
@@ -1096,7 +1104,7 @@ def _with_description(
     text: str, state: OrchestratorState, config: RunnableConfig | None
 ) -> str:
     """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true."""
-    if not _describe_enabled(config):
+    if not _config_flag(config, "describe_answer", default=False):
         return text
     section = render_trace(state.get("reasoning_trace") or [])
     return f"{text}\n\n{section}" if section else text
@@ -1115,23 +1123,10 @@ _STEP_KEY = "orchestrator_step"    # промежуточный шаг хода
 _FINAL_KEY = "orchestrator_final"  # итоговый ответ хода (его показываем юзеру)
 
 
-def _progress_enabled(config: RunnableConfig | None) -> bool:
-    """Флаг emit_progress_messages из configurable (дефолт True)."""
-    cfg = (config or {}).get("configurable") or {}
-    val = cfg.get("emit_progress_messages")
-    if val is None:
-        return True
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, str):
-        return val.strip().lower() in {"true", "1", "yes", "да"}
-    return bool(val)
-
-
 def _step_update(config: RunnableConfig | None, text: str) -> dict:
     """{'messages': [шаговое AIMessage]} либо {} если прогресс выключен/пусто."""
     text = (text or "").strip()
-    if not text or not _progress_enabled(config):
+    if not text or not _config_flag(config, "emit_progress_messages", default=True):
         return {}
     return {"messages": [AIMessage(content=text, additional_kwargs={_STEP_KEY: True})]}
 
@@ -1274,15 +1269,19 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _parse_assignments_json(text: Any) -> list[dict]:
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
+def _load_json(text: Any) -> Any:
+    """Текст (возможно в ```-ограждении) → распарсенный JSON или None при сбое/пустоте."""
+    cleaned = _strip_code_fence(text if isinstance(text, str) else str(text or ""))
     if not cleaned:
-        return []
+        return None
     try:
-        data = json.loads(cleaned)
+        return json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
-        return []
+        return None
+
+
+def _parse_assignments_json(text: Any) -> list[dict]:
+    data = _load_json(text)
     if not isinstance(data, list):
         return []
     result: list[dict] = []
@@ -1301,14 +1300,7 @@ def _parse_assignments_json(text: Any) -> list[dict]:
 
 
 def _parse_indices_json(text: Any, max_n: int) -> list[int]:
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
-    if not cleaned:
-        return []
-    try:
-        data = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        return []
+    data = _load_json(text)
     if not isinstance(data, dict):
         return []
     indices = data.get("indices") or []
@@ -1328,14 +1320,7 @@ def _parse_indices_json(text: Any, max_n: int) -> list[int]:
 def _parse_query_list_json(text: Any, max_n: int) -> list[str]:
     """Парсит JSON-массив строк-запросов к wiki. Дедуп (без учёта регистра),
     cap max_n. Любой сбой/не-массив → []."""
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
-    if not cleaned:
-        return []
-    try:
-        data = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        return []
+    data = _load_json(text)
     if not isinstance(data, list):
         return []
     result: list[str] = []

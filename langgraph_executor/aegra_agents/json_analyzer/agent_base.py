@@ -87,21 +87,35 @@ def format_facts(overview: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
-    """Собирает из сообщений стадии 1 транскрипт «вызов инструмента -> результат»."""
+def _collect_tool_calls(
+    messages: list[Any],
+) -> list[tuple[str, dict[str, Any], str | None]]:
+    """Сводит сообщения стадии 1 к (имя, аргументы, текст-результат) по каждому вызову.
+
+    Единый источник для транскрипта и структурированных шагов трассы: результаты
+    берутся из ToolMessage по tool_call_id, имена/аргументы — из tool_calls.
+    Третий элемент — None, если по id результата нет (отличаем «нет» от «пусто»).
+    """
     results: dict[str, str] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage):
             results[msg.tool_call_id] = _text(msg)
 
-    blocks: list[str] = []
+    calls: list[tuple[str, dict[str, Any], str | None]] = []
     for msg in messages:
         for call in getattr(msg, "tool_calls", None) or []:
-            args = ", ".join(
-                f"{k}={v!r}" for k, v in (call.get("args") or {}).items()
-            )
-            result = results.get(call.get("id"), "(результат отсутствует)")
-            blocks.append(f"{len(blocks) + 1}. {call.get('name')}({args}) ->\n{result}")
+            args = call.get("args") or {}
+            calls.append((call.get("name"), args, results.get(call.get("id"))))
+    return calls
+
+
+def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
+    """Собирает из сообщений стадии 1 транскрипт «вызов инструмента -> результат»."""
+    blocks: list[str] = []
+    for name, args, result in _collect_tool_calls(messages):
+        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        text = result if result is not None else "(результат отсутствует)"
+        blocks.append(f"{len(blocks) + 1}. {name}({arg_str}) ->\n{text}")
     return "\n\n".join(blocks), len(blocks)
 
 
@@ -111,31 +125,20 @@ _STEP_SUMMARY_CAP = 280
 def extract_tool_steps(messages: list[Any]) -> list[dict[str, Any]]:
     """Структурированные шаги tool-loop для сквозной трассы (Блок A.4 ТЗ).
 
-    Тот же источник, что у extract_tool_transcript (ToolMessage + tool_calls),
-    но на выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
+    Тот же источник, что у extract_tool_transcript (_collect_tool_calls), но на
+    выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
     результата (полные выдачи в трассу не тянем — экономим контекст).
     """
-    results: dict[str, str] = {}
-    for msg in messages:
-        if isinstance(msg, ToolMessage):
-            results[msg.tool_call_id] = _text(msg)
-
     steps: list[dict[str, Any]] = []
-    for msg in messages:
-        for call in getattr(msg, "tool_calls", None) or []:
-            raw = results.get(call.get("id"), "")
-            summary = " ".join((raw or "").split())
-            if len(summary) > _STEP_SUMMARY_CAP:
-                summary = summary[:_STEP_SUMMARY_CAP] + "…"
-            steps.append(
-                {
-                    "tool": call.get("name"),
-                    "args": {
-                        k: v
-                        for k, v in (call.get("args") or {}).items()
-                        if v not in (None, "")
-                    },
-                    "result_summary": summary,
-                }
-            )
+    for name, args, result in _collect_tool_calls(messages):
+        summary = " ".join((result or "").split())
+        if len(summary) > _STEP_SUMMARY_CAP:
+            summary = summary[:_STEP_SUMMARY_CAP] + "…"
+        steps.append(
+            {
+                "tool": name,
+                "args": {k: v for k, v in args.items() if v not in (None, "")},
+                "result_summary": summary,
+            }
+        )
     return steps
