@@ -459,6 +459,72 @@ def _format_metric_specs(specs: list[dict]) -> str:
     )
 
 
+def _generate_wiki_queries(
+    llm: GigaChat, state: OrchestratorState, specs: list[dict], *, max_n: int
+) -> list[str]:
+    """LLM-генерация поисковых запросов к wiki по вопросу/брифингу + метрикам.
+
+    Затравка: вопрос/брифинг текущего хода + список метрик. На analytics-ходу
+    добавляем выводы аналитика (он уже отработал) — запросы становятся точнее.
+    На первом ходу answer'а ещё нет (асимметрия by design). Сбой LLM → [].
+    """
+    seed = _last_user_text(state).strip()
+    parts = [
+        f"Вопрос руководителя: {seed}" if seed else "Первичный обзор метрик сотрудника.",
+        "Метрики сотрудника:\n" + _format_metric_specs(specs),
+    ]
+    analytics_answer = state.get("analytics_answer")
+    if analytics_answer and not state.get("analytics_error"):
+        parts.append("Выводы аналитика по метрикам:\n" + str(analytics_answer))
+    try:
+        ai = llm.invoke([
+            SystemMessage(content=WIKI_QUERIES_PROMPT),
+            HumanMessage(content="\n\n".join(parts)),
+        ])
+        return _parse_query_list_json(ai.content, max_n=max_n)
+    except Exception:  # noqa: BLE001 — внешний LLM, сужать нечем
+        return []
+
+
+async def _gather_wiki_snippets(
+    easyrag_graph: Any, queries: list[str], *, direction_key: str, top_k: int
+) -> tuple[list[dict], str | None]:
+    """Параллельные запросы к easyrag + мёрж сниппетов.
+
+    Дедуп по section_id (оставляем больший similarity), сорт по similarity desc,
+    cap top_k. Ошибку возвращаем только если упали ВСЕ запросы и сниппетов нет —
+    частичный сбой не должен прятать находки.
+    """
+    results = await asyncio.gather(
+        *[
+            easyrag_graph.ainvoke({
+                "query": q,
+                "direction_key": direction_key,
+                "top_k": top_k,
+            })
+            for q in queries
+        ],
+        return_exceptions=True,
+    )
+    best: dict[str, dict] = {}
+    errors: list[str] = []
+    for res in results:
+        if isinstance(res, Exception):
+            errors.append(f"{type(res).__name__}: {res}"[:300])
+            continue
+        for s in (res.get("snippets") if isinstance(res, dict) else None) or []:
+            sid = s.get("section_id")
+            key = sid if sid is not None else id(s)
+            prev = best.get(key)
+            if prev is None or (s.get("similarity") or 0) > (prev.get("similarity") or 0):
+                best[key] = s
+    snippets = sorted(
+        best.values(), key=lambda s: s.get("similarity") or 0, reverse=True
+    )[:top_k]
+    err = errors[0] if (errors and not snippets) else None
+    return snippets, err
+
+
 def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
     """Wiki-grounding: по вопросу/брифингу + метрикам генерит запросы к wiki и
     подмешивает найденные сниппеты в state (для initial_analysis и respond).
@@ -483,66 +549,17 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
         if not specs:
             return {}
 
-        # Затравка запросов: вопрос/брифинг текущего хода + список метрик. На
-        # analytics-ходу добавляем выводы аналитика (он уже отработал) — запросы
-        # становятся точнее. На первом ходу answer'а ещё нет (асимметрия by design).
-        seed = _last_user_text(state).strip()
-        parts = [
-            f"Вопрос руководителя: {seed}" if seed else "Первичный обзор метрик сотрудника.",
-            "Метрики сотрудника:\n" + _format_metric_specs(specs),
-        ]
-        analytics_answer = state.get("analytics_answer")
-        if analytics_answer and not state.get("analytics_error"):
-            parts.append("Выводы аналитика по метрикам:\n" + str(analytics_answer))
-
-        try:
-            ai = llm.invoke([
-                SystemMessage(content=WIKI_QUERIES_PROMPT),
-                HumanMessage(content="\n\n".join(parts)),
-            ])
-            queries = _parse_query_list_json(
-                ai.content,
-                max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
-            )
-        except Exception:  # noqa: BLE001 — внешний LLM, сужать нечем
-            queries = []
-
+        queries = _generate_wiki_queries(
+            llm, state, specs,
+            max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
+        )
         if not queries:
             return {}
 
         top_k = int(cfg.get("easyrag_top_k") or _DEFAULT_EASYRAG_TOP_K)
-        results = await asyncio.gather(
-            *[
-                easyrag_graph.ainvoke({
-                    "query": q,
-                    "direction_key": direction_key,
-                    "top_k": top_k,
-                })
-                for q in queries
-            ],
-            return_exceptions=True,
+        snippets, err = await _gather_wiki_snippets(
+            easyrag_graph, queries, direction_key=direction_key, top_k=top_k
         )
-
-        # Мёрж: дедуп по section_id (оставляем больший similarity), сорт по
-        # similarity desc, cap top_k. Ошибку показываем только если упали ВСЕ
-        # запросы и сниппетов нет — частичный сбой не должен прятать находки.
-        best: dict[str, dict] = {}
-        errors: list[str] = []
-        for res in results:
-            if isinstance(res, Exception):
-                errors.append(f"{type(res).__name__}: {res}"[:300])
-                continue
-            for s in (res.get("snippets") if isinstance(res, dict) else None) or []:
-                sid = s.get("section_id")
-                key = sid if sid is not None else id(s)
-                prev = best.get(key)
-                if prev is None or (s.get("similarity") or 0) > (prev.get("similarity") or 0):
-                    best[key] = s
-        snippets = sorted(
-            best.values(), key=lambda s: s.get("similarity") or 0, reverse=True
-        )[:top_k]
-
-        err = errors[0] if (errors and not snippets) else None
         joined_query = " | ".join(queries)
 
         if not snippets and not err:
@@ -1013,10 +1030,18 @@ def _append_trace(state: OrchestratorState, steps: list[TraceStep]) -> list[Trac
     return _trace(state) + steps
 
 
-def _describe_enabled(config: RunnableConfig | None) -> bool:
-    """Флаг describe_answer из configurable (bool или строка 'true'/'1'/'yes'/'да')."""
+def _config_flag(
+    config: RunnableConfig | None, key: str, *, default: bool
+) -> bool:
+    """Булев флаг из configurable: bool как есть, строка 'true'/'1'/'yes'/'да' → True.
+
+    Отсутствующее значение (None) даёт default — так describe_answer выключен по
+    умолчанию, а emit_progress_messages включён.
+    """
     cfg = (config or {}).get("configurable") or {}
-    val = cfg.get("describe_answer")
+    val = cfg.get(key)
+    if val is None:
+        return default
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
@@ -1096,7 +1121,7 @@ def _with_description(
     text: str, state: OrchestratorState, config: RunnableConfig | None
 ) -> str:
     """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true."""
-    if not _describe_enabled(config):
+    if not _config_flag(config, "describe_answer", default=False):
         return text
     section = render_trace(state.get("reasoning_trace") or [])
     return f"{text}\n\n{section}" if section else text
@@ -1115,23 +1140,10 @@ _STEP_KEY = "orchestrator_step"    # промежуточный шаг хода
 _FINAL_KEY = "orchestrator_final"  # итоговый ответ хода (его показываем юзеру)
 
 
-def _progress_enabled(config: RunnableConfig | None) -> bool:
-    """Флаг emit_progress_messages из configurable (дефолт True)."""
-    cfg = (config or {}).get("configurable") or {}
-    val = cfg.get("emit_progress_messages")
-    if val is None:
-        return True
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, str):
-        return val.strip().lower() in {"true", "1", "yes", "да"}
-    return bool(val)
-
-
 def _step_update(config: RunnableConfig | None, text: str) -> dict:
     """{'messages': [шаговое AIMessage]} либо {} если прогресс выключен/пусто."""
     text = (text or "").strip()
-    if not text or not _progress_enabled(config):
+    if not text or not _config_flag(config, "emit_progress_messages", default=True):
         return {}
     return {"messages": [AIMessage(content=text, additional_kwargs={_STEP_KEY: True})]}
 
@@ -1274,15 +1286,19 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _parse_assignments_json(text: Any) -> list[dict]:
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
+def _load_json(text: Any) -> Any:
+    """Текст (возможно в ```-ограждении) → распарсенный JSON или None при сбое/пустоте."""
+    cleaned = _strip_code_fence(text if isinstance(text, str) else str(text or ""))
     if not cleaned:
-        return []
+        return None
     try:
-        data = json.loads(cleaned)
+        return json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
-        return []
+        return None
+
+
+def _parse_assignments_json(text: Any) -> list[dict]:
+    data = _load_json(text)
     if not isinstance(data, list):
         return []
     result: list[dict] = []
@@ -1301,14 +1317,7 @@ def _parse_assignments_json(text: Any) -> list[dict]:
 
 
 def _parse_indices_json(text: Any, max_n: int) -> list[int]:
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
-    if not cleaned:
-        return []
-    try:
-        data = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        return []
+    data = _load_json(text)
     if not isinstance(data, dict):
         return []
     indices = data.get("indices") or []
@@ -1328,14 +1337,7 @@ def _parse_indices_json(text: Any, max_n: int) -> list[int]:
 def _parse_query_list_json(text: Any, max_n: int) -> list[str]:
     """Парсит JSON-массив строк-запросов к wiki. Дедуп (без учёта регистра),
     cap max_n. Любой сбой/не-массив → []."""
-    raw = text if isinstance(text, str) else str(text or "")
-    cleaned = _strip_code_fence(raw)
-    if not cleaned:
-        return []
-    try:
-        data = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        return []
+    data = _load_json(text)
     if not isinstance(data, list):
         return []
     result: list[str] = []

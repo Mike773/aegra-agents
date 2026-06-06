@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any
+from typing import Any, Callable
 
 from .loader import ROW_FIELDS
 
@@ -221,6 +221,31 @@ class SqliteStore:
                 params,
             )
         ]
+
+    def _resolve_element_filter(
+        self,
+        name: str,
+        element: str | None,
+        *,
+        has_aggregate_fn: Callable[[], bool],
+        person: str | int | None = None,
+    ) -> tuple[str, list[Any], list[str] | None]:
+        """WHERE-фрагмент по element — единая логика для get_metric/compare.
+
+        Возвращает (clause, params, fallback_elements):
+        - явный element            → " AND m.element = ?";
+        - не задан + есть агрегат   → " AND m.element IS NULL";
+        - не задан + агрегата нет   → "" (все разрезы) + список разрезов в
+          fallback_elements (для пометки 'разрезы_вместо_агрегата').
+
+        Наличие агрегата проверяется лениво (has_aggregate_fn вызывается только
+        когда element не задан) — иначе при явном element шёл бы лишний запрос.
+        """
+        if element is None or (isinstance(element, str) and element.strip() == ""):
+            if has_aggregate_fn():
+                return " AND m.element IS NULL", [], None
+            return "", [], self._elements_for(name, person=person)
+        return " AND m.element = ?", [element], None
 
     def row_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) c FROM metrics").fetchone()["c"]
@@ -442,18 +467,16 @@ class SqliteStore:
         pc, pp = self._person_clause(person)
         where += pc
         params += pp
-        element_unspecified = element is None or (
-            isinstance(element, str) and element.strip() == ""
+        ec, ep, fallback_elements = self._resolve_element_filter(
+            name,
+            element,
+            has_aggregate_fn=lambda: self._has_aggregate_row(
+                name, person=person, date=date
+            ),
+            person=person,
         )
-        fallback_elements: list[str] | None = None
-        if element_unspecified:
-            if self._has_aggregate_row(name, person=person, date=date):
-                where += " AND m.element IS NULL"
-            else:
-                fallback_elements = self._elements_for(name, person=person)
-        else:
-            where += " AND m.element = ?"
-            params.append(element)
+        where += ec
+        params += ep
         if date:
             where += " AND m.date = ?"
             params.append(date)
@@ -488,18 +511,14 @@ class SqliteStore:
         pc, pp = self._person_clause(person)
         where += pc
         params += pp
-        element_unspecified = element is None or (
-            isinstance(element, str) and element.strip() == ""
+        ec, ep, fallback_elements = self._resolve_element_filter(
+            name,
+            element,
+            has_aggregate_fn=lambda: self._has_aggregate_row(name, person=person),
+            person=person,
         )
-        fallback_elements: list[str] | None = None
-        if element_unspecified:
-            if self._has_aggregate_row(name, person=person):
-                where += " AND m.element IS NULL"
-            else:
-                fallback_elements = self._elements_for(name, person=person)
-        else:
-            where += " AND m.element = ?"
-            params.append(element)
+        where += ec
+        params += ep
         if dates:
             placeholders = ", ".join("?" for _ in dates)
             where += f" AND m.date IN ({placeholders})"

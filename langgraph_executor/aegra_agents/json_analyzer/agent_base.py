@@ -1,18 +1,15 @@
-"""Общие части стратегии-агента: синтез (стадия 2) и форматирование.
+"""Общие части стратегии-агента: форматирование фактов и сбор транскрипта.
 
 Стадия 1 (классическая стратегия) — в agent_classic.py: tool-loop с защитой
-от зацикливания. Стадия 2 — синтез финального ответа: один вызов чат-модели
-БЕЗ инструментов с собранными tool-результатами в виде текста. Без функций
-лимит запроса GigaChat в 4096 токенов не действует — в финальный ответ
-вкладывается весь транскрипт.
+от зацикливания. Стадия 2 (синтез финального ответа) — в nodes.make_synthesize_node:
+один вызов чат-модели БЕЗ инструментов с собранным транскриптом. Здесь — только
+извлечение фактов/транскрипта из сообщений стадии 1.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-
-from .prompts import SYNTHESIS_PROMPT
+from langchain_core.messages import ToolMessage
 
 
 def _text(msg: Any) -> str:
@@ -90,21 +87,35 @@ def format_facts(overview: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
-    """Собирает из сообщений стадии 1 транскрипт «вызов инструмента -> результат»."""
+def _collect_tool_calls(
+    messages: list[Any],
+) -> list[tuple[str, dict[str, Any], str | None]]:
+    """Сводит сообщения стадии 1 к (имя, аргументы, текст-результат) по каждому вызову.
+
+    Единый источник для транскрипта и структурированных шагов трассы: результаты
+    берутся из ToolMessage по tool_call_id, имена/аргументы — из tool_calls.
+    Третий элемент — None, если по id результата нет (отличаем «нет» от «пусто»).
+    """
     results: dict[str, str] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage):
             results[msg.tool_call_id] = _text(msg)
 
-    blocks: list[str] = []
+    calls: list[tuple[str, dict[str, Any], str | None]] = []
     for msg in messages:
         for call in getattr(msg, "tool_calls", None) or []:
-            args = ", ".join(
-                f"{k}={v!r}" for k, v in (call.get("args") or {}).items()
-            )
-            result = results.get(call.get("id"), "(результат отсутствует)")
-            blocks.append(f"{len(blocks) + 1}. {call.get('name')}({args}) ->\n{result}")
+            args = call.get("args") or {}
+            calls.append((call.get("name"), args, results.get(call.get("id"))))
+    return calls
+
+
+def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
+    """Собирает из сообщений стадии 1 транскрипт «вызов инструмента -> результат»."""
+    blocks: list[str] = []
+    for name, args, result in _collect_tool_calls(messages):
+        arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        text = result if result is not None else "(результат отсутствует)"
+        blocks.append(f"{len(blocks) + 1}. {name}({arg_str}) ->\n{text}")
     return "\n\n".join(blocks), len(blocks)
 
 
@@ -114,47 +125,20 @@ _STEP_SUMMARY_CAP = 280
 def extract_tool_steps(messages: list[Any]) -> list[dict[str, Any]]:
     """Структурированные шаги tool-loop для сквозной трассы (Блок A.4 ТЗ).
 
-    Тот же источник, что у extract_tool_transcript (ToolMessage + tool_calls),
-    но на выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
+    Тот же источник, что у extract_tool_transcript (_collect_tool_calls), но на
+    выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
     результата (полные выдачи в трассу не тянем — экономим контекст).
     """
-    results: dict[str, str] = {}
-    for msg in messages:
-        if isinstance(msg, ToolMessage):
-            results[msg.tool_call_id] = _text(msg)
-
     steps: list[dict[str, Any]] = []
-    for msg in messages:
-        for call in getattr(msg, "tool_calls", None) or []:
-            raw = results.get(call.get("id"), "")
-            summary = " ".join((raw or "").split())
-            if len(summary) > _STEP_SUMMARY_CAP:
-                summary = summary[:_STEP_SUMMARY_CAP] + "…"
-            steps.append(
-                {
-                    "tool": call.get("name"),
-                    "args": {
-                        k: v
-                        for k, v in (call.get("args") or {}).items()
-                        if v not in (None, "")
-                    },
-                    "result_summary": summary,
-                }
-            )
+    for name, args, result in _collect_tool_calls(messages):
+        summary = " ".join((result or "").split())
+        if len(summary) > _STEP_SUMMARY_CAP:
+            summary = summary[:_STEP_SUMMARY_CAP] + "…"
+        steps.append(
+            {
+                "tool": name,
+                "args": {k: v for k, v in args.items() if v not in (None, "")},
+                "result_summary": summary,
+            }
+        )
     return steps
-
-
-def synthesize_answer(model: Any, question: str, messages: list[Any]) -> str:
-    """Стадия 2: финальный ответ из собранных данных вызовом модели без инструментов."""
-    transcript, tool_calls = extract_tool_transcript(messages)
-    if tool_calls == 0:
-        # Инструменты не вызывались — стадия 1 уже дала прямой ответ или отказ.
-        return _text(messages[-1]) if messages else ""
-    user_content = (
-        f"Вопрос пользователя: {question}\n\n"
-        f"Данные, собранные инструментами из базы:\n{transcript}"
-    )
-    response = model.invoke(
-        [SystemMessage(content=SYNTHESIS_PROMPT), HumanMessage(content=user_content)]
-    )
-    return _text(response)
