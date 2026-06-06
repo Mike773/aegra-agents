@@ -18,11 +18,7 @@ from langgraph.store.base import BaseStore
 from langgraph.store.memory import InMemoryStore
 
 from ..shared.clients import create_gigachat_embeddings
-from .agent_base import (
-    extract_tool_steps,
-    extract_tool_transcript,
-    synthesize_answer,
-)
+from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import compute_analytics
 from .loader import load_dataset_obj
@@ -245,9 +241,3 @@ def make_synthesize_node(llm: GigaChat):
 
 
 __all__ = ["make_gather_node", "make_synthesize_node"]
-
-
-# Внутри extract_tool_transcript ожидается, что synthesize_answer вызывается
-# отдельно — здесь импорт оставлен для обратной совместимости с возможными
-# внешними утилитами и интеграционными тестами.
-_ = synthesize_answer

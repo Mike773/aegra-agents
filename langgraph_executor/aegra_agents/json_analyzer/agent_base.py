@@ -1,18 +1,15 @@
-"""Общие части стратегии-агента: синтез (стадия 2) и форматирование.
+"""Общие части стратегии-агента: форматирование фактов и сбор транскрипта.
 
 Стадия 1 (классическая стратегия) — в agent_classic.py: tool-loop с защитой
-от зацикливания. Стадия 2 — синтез финального ответа: один вызов чат-модели
-БЕЗ инструментов с собранными tool-результатами в виде текста. Без функций
-лимит запроса GigaChat в 4096 токенов не действует — в финальный ответ
-вкладывается весь транскрипт.
+от зацикливания. Стадия 2 (синтез финального ответа) — в nodes.make_synthesize_node:
+один вызов чат-модели БЕЗ инструментов с собранным транскриптом. Здесь — только
+извлечение фактов/транскрипта из сообщений стадии 1.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-
-from .prompts import SYNTHESIS_PROMPT
+from langchain_core.messages import ToolMessage
 
 
 def _text(msg: Any) -> str:
@@ -142,19 +139,3 @@ def extract_tool_steps(messages: list[Any]) -> list[dict[str, Any]]:
                 }
             )
     return steps
-
-
-def synthesize_answer(model: Any, question: str, messages: list[Any]) -> str:
-    """Стадия 2: финальный ответ из собранных данных вызовом модели без инструментов."""
-    transcript, tool_calls = extract_tool_transcript(messages)
-    if tool_calls == 0:
-        # Инструменты не вызывались — стадия 1 уже дала прямой ответ или отказ.
-        return _text(messages[-1]) if messages else ""
-    user_content = (
-        f"Вопрос пользователя: {question}\n\n"
-        f"Данные, собранные инструментами из базы:\n{transcript}"
-    )
-    response = model.invoke(
-        [SystemMessage(content=SYNTHESIS_PROMPT), HumanMessage(content=user_content)]
-    )
-    return _text(response)

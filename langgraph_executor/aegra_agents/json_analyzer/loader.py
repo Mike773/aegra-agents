@@ -11,7 +11,6 @@
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 ROW_FIELDS: tuple[str, ...] = (
@@ -111,10 +110,3 @@ def load_dataset_obj(data: dict[str, Any]) -> list[dict[str, Any]]:
     for person in people:
         _walk(person.get("metrics", []) or [], person, rows, counter, None, 1)
     return rows
-
-
-def load_dataset(path: str) -> list[dict[str, Any]]:
-    """Читает JSON-файл и возвращает плоский список строк метрик."""
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return load_dataset_obj(data)
