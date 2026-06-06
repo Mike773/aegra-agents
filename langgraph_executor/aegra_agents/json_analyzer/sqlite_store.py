@@ -17,9 +17,9 @@ _ANALYTICS_FIELDS: tuple[str, ...] = (
     "benchmark_dev_abs",
     "benchmark_dev_pct",
     "benchmark_status",
-    "wow_change_abs",
-    "wow_change_pct",
-    "wow_status",
+    "pop_change_abs",
+    "pop_change_pct",
+    "pop_status",
     "trend",
     "trend_status",
     "peer_mean",
@@ -83,9 +83,9 @@ class SqliteStore:
                 benchmark_dev_abs REAL,
                 benchmark_dev_pct REAL,
                 benchmark_status TEXT,
-                wow_change_abs   REAL,
-                wow_change_pct   REAL,
-                wow_status       TEXT,
+                pop_change_abs   REAL,
+                pop_change_pct   REAL,
+                pop_status       TEXT,
                 trend            TEXT,
                 trend_status     TEXT,
                 peer_mean        REAL,
@@ -634,7 +634,7 @@ class SqliteStore:
             "m.fact, m.plan, m.benchmark, m.influent_percent, "
             "a.plan_status, a.plan_dev_pct, a.benchmark_status, "
             "a.benchmark_dev_pct, a.trend, a.trend_status, "
-            "a.wow_change_pct, a.wow_status "
+            "a.pop_change_pct, a.pop_status "
             "FROM metrics m JOIN tree t ON m.metric_uid = t.metric_uid "
             "LEFT JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"
@@ -728,8 +728,8 @@ class SqliteStore:
             "anomaly": "ABS(a.zscore) DESC",
             "below_plan": "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC",
             "above_plan": "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC",
-            "trend": "(a.wow_change_pct IS NULL), a.wow_change_pct ASC",
-            "declining": "(a.wow_change_pct IS NULL), ABS(a.wow_change_pct) DESC",
-            "improving": "(a.wow_change_pct IS NULL), ABS(a.wow_change_pct) DESC",
+            "trend": "(a.pop_change_pct IS NULL), a.pop_change_pct ASC",
+            "declining": "(a.pop_change_pct IS NULL), ABS(a.pop_change_pct) DESC",
+            "improving": "(a.pop_change_pct IS NULL), ABS(a.pop_change_pct) DESC",
         }[kind]
         return self._select_metrics(where, params, order=order, limit=limit)

@@ -73,7 +73,7 @@ def format_facts(overview: dict[str, Any]) -> str:
 
     periods = ", ".join(dates)
     if dates:
-        periods += f" (первая неделя = {dates[0]}, последняя/«сейчас» = {dates[-1]})"
+        periods += f" (первый период = {dates[0]}, последний/«сейчас» = {dates[-1]})"
     lines = [
         "СОСТАВ ЗАГРУЖЕННОГО ДАТАСЕТА (используй эти точные значения в аргументах):",
         f"- Периоды по порядку: {periods}",
