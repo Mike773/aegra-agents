@@ -6,7 +6,8 @@
     "analytic_orchestrator": "./link.py:analytic_orchestrator_graph",
     "wiki_ingest": "./link.py:wiki_ingest_graph",
     "doc_manager": "./link.py:doc_manager_graph",
-    "kb_chat": "./link.py:kb_chat_graph"
+    "kb_chat": "./link.py:kb_chat_graph",
+    "gap_resolver": "./link.py:gap_resolver_graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",

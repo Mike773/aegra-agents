@@ -14,6 +14,9 @@ from langgraph_executor.aegra_agents.doc_manager.graph import (
 from langgraph_executor.aegra_agents.easyrag.graph import (
     graph as easyrag_graph,
 )
+from langgraph_executor.aegra_agents.gap_resolver.graph import (
+    graph as gap_resolver_graph,
+)
 from langgraph_executor.aegra_agents.json_analyzer.graph import (
     graph as json_analyzer_graph,
 )
@@ -31,6 +34,7 @@ __all__ = [
     "analytic_orchestrator_graph",
     "doc_manager_graph",
     "easyrag_graph",
+    "gap_resolver_graph",
     "json_analyzer_graph",
     "json_analyzer_causal_graph",
     "kb_chat_graph",
