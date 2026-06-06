@@ -23,5 +23,15 @@ dependencies = [
     "cydifflib>=1.1",
 ]
 
+[project.optional-dependencies]
+# Каузальный слой json_analyzer_causal (этапы 2-3: DoWhy distribution_change /
+# attribute_anomalies). Импортируется ЛЕНИВО — без этого extra граф работает в
+# алгебраическом режиме (этап 1). Тянет pandas/scipy/sklearn/statsmodels/networkx.
+causal = [
+    "dowhy>=0.13",
+    "pandas>=2.0",
+    "networkx>=3.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["langgraph_executor*"]
