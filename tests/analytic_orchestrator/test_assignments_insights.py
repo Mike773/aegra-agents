@@ -23,6 +23,7 @@ from langgraph_executor.aegra_agents.analytic_orchestrator.nodes import (
     _format_metric_catalog,
     _gather_agent_answers,
     _parse_insights_json,
+    _resolve_insight_metric,
 )
 from langgraph_executor.aegra_agents.shared.assignments_service import (
     SendAssignmentsComponent,
@@ -53,13 +54,51 @@ def test_catalog_walks_tree_and_dedups_by_id():
     cat = _collect_metric_catalog(_dataset())
     ids = [c["id"] for c in cat]
     assert ids == ["90022908", "90022910"]  # дедуп: один 90022910
-    assert {"id": "90022908", "metric_name": "Производительность"} in cat
+    by_id = {c["id"]: c["metric_name"] for c in cat}
+    assert by_id["90022908"] == "Производительность"
+    assert all("description" in c for c in cat)  # описание для маппинга LLM
 
 
 def test_catalog_format_human_readable():
     s = _format_metric_catalog(_collect_metric_catalog(_dataset()))
-    assert "90022908 — Производительность" in s
-    assert "90022910 — Доля переводов" in s
+    assert "90022908 | Производительность" in s
+    assert "90022910 | Доля переводов" in s
+
+
+# --- детерминированный резолвер метрики -------------------------------------
+
+def test_resolve_by_exact_id():
+    cat = _collect_metric_catalog(_dataset())
+    mid, name = _resolve_insight_metric("текст", "90022908", "", cat)
+    assert (mid, name) == ("90022908", "Производительность")
+
+
+def test_resolve_by_exact_name_casefold():
+    cat = _collect_metric_catalog(_dataset())
+    mid, name = _resolve_insight_metric("текст", "", "доля переводов", cat)
+    assert (mid, name) == ("90022910", "Доля переводов")
+
+
+def test_resolve_by_fuzzy_name():
+    cat = _collect_metric_catalog(_dataset())
+    # лёгкая опечатка/склонение имени
+    mid, name = _resolve_insight_metric("текст", "", "Производительности", cat)
+    assert (mid, name) == ("90022908", "Производительность")
+
+
+def test_resolve_by_text_scan_when_fields_empty():
+    cat = _collect_metric_catalog(_dataset())
+    # имя/ид пустые — но в тексте упомянута метрика из каталога
+    mid, name = _resolve_insight_metric(
+        "Доля переводов выросла до 21% при плане 10%.", "", "", cat,
+    )
+    assert (mid, name) == ("90022910", "Доля переводов")
+
+
+def test_resolve_returns_asis_when_no_match():
+    cat = _collect_metric_catalog(_dataset())
+    mid, name = _resolve_insight_metric("ничего знакомого", "", "", cat)
+    assert (mid, name) == ("", "")
 
 
 def test_catalog_empty_dataset():
