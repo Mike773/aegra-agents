@@ -64,6 +64,17 @@ def _pct(value: Any) -> str:
     return "" if value is None else f"{_fmt_num(value)} %"
 
 
+def _delta_cell(pct: Any, abs_: Any, unit: str | None) -> str:
+    """Относительное изменение: процент, если он задан; иначе абсолютное изменение
+    с единицей (для знаковых/индексных метрик относительный % обнулён как
+    бессмысленный — показываем абсолют)."""
+    if pct is not None:
+        return f"{_fmt_num(pct)} %"
+    if abs_ is not None:
+        return _fmt_num(abs_, unit)
+    return ""
+
+
 def _md_cell(value: Any) -> str:
     return str(value).replace("|", "/").replace("\n", " ") if value not in (None, "") else ""
 
@@ -112,10 +123,12 @@ def _flat_columns() -> list[tuple[str, Any]]:
         ("период", plain("date")),
         ("факт", fact_with_unit),
         ("план_статус", plain("plan_status")),
-        ("откл_от_плана_%", lambda r: _pct(r.get("plan_dev_pct"))),
+        ("откл_от_плана", lambda r: _delta_cell(
+            r.get("plan_dev_pct"), r.get("plan_dev_abs"), _unit(r.get("measure_type")))),
         ("бенчмарк_статус", plain("benchmark_status")),
         ("динамика", plain("pop_status")),
-        ("изм_к_прошлому_%", lambda r: _pct(r.get("pop_change_pct"))),
+        ("изм_к_прошлому", lambda r: _delta_cell(
+            r.get("pop_change_pct"), r.get("pop_change_abs"), _unit(r.get("measure_type")))),
         ("тренд", plain("trend_status")),
         ("ранг_среди_коллег", rank_cell),
         ("vs_коллеги", plain("peer_status")),
@@ -188,11 +201,10 @@ def _render_tree(result: dict[str, Any]) -> str:
             rel = r.get("inferred_relation")
             parts.append("влияние н/д" + (f" (связь: {rel})" if rel else ""))
         if r.get("plan_status"):
-            dev = r.get("plan_dev_pct")
-            parts.append(
-                f"план: {r['plan_status']}"
-                + (f" ({_fmt_num(dev)}%)" if dev is not None else "")
+            dev = _delta_cell(
+                r.get("plan_dev_pct"), r.get("plan_dev_abs"), _unit(r.get("measure_type"))
             )
+            parts.append(f"план: {r['plan_status']}" + (f" ({dev})" if dev else ""))
         if r.get("pop_status"):
             parts.append(f"динамика: {r['pop_status']}")
         lines.append(f"{indent}- " + " | ".join(parts))
@@ -223,13 +235,20 @@ def _render_describe(d: dict[str, Any]) -> str:
     if d.get("error"):
         return _render_error(d)
     dir_hint = "меньше=лучше" if d.get("metric_type") == "обратная" else "больше=лучше"
-    return (
+    out = (
         f"Метрика «{d.get('metric_name')}»: "
         f"{d.get('metric_description') or 'описание отсутствует'}\n"
         f"Тип: {d.get('metric_type')} ({dir_hint}). "
         f"Единица: {_unit(d.get('measure_type')) or '—'}. "
         f"Период расчёта: {d.get('calc_period') or '—'}."
     )
+    kind = d.get("kind")
+    if kind and kind != "уровень":
+        out += (
+            f"\nВид: {kind} — относительное %-сравнение неуместно; "
+            "оценивай по факту (уровню) и абсолютному изменению."
+        )
+    return out
 
 
 def _render_people(people: list[dict[str, Any]]) -> str:
@@ -342,16 +361,15 @@ def _overview_headline(h: dict[str, Any]) -> str:
     name = h.get("metric") or "—"
     if h.get("element"):
         name = f"{name} [{h['element']}]"
-    parts = [f"{name}: {_fmt_num(h.get('fact'), _unit(h.get('measure_type')))}"]
+    unit = _unit(h.get("measure_type"))
+    parts = [f"{name}: {_fmt_num(h.get('fact'), unit)}"]
     if h.get("plan_status"):
-        dev = h.get("plan_dev_pct")
-        parts.append(
-            str(h["plan_status"]) + (f" ({_fmt_num(dev)}%)" if dev is not None else "")
-        )
+        dev = _delta_cell(h.get("plan_dev_pct"), h.get("plan_dev_abs"), unit)
+        parts.append(str(h["plan_status"]) + (f" ({dev})" if dev else ""))
     dyn = h.get("trend_status") or h.get("pop_status")
     if dyn:
-        ch = h.get("pop_change_pct")
-        parts.append("динамика " + str(dyn) + (f" ({_fmt_num(ch)}%)" if ch is not None else ""))
+        ch = _delta_cell(h.get("pop_change_pct"), h.get("pop_change_abs"), unit)
+        parts.append("динамика " + str(dyn) + (f" ({ch})" if ch else ""))
     return ", ".join(parts)
 
 
@@ -367,17 +385,23 @@ def _overview_driver(d: dict[str, Any]) -> str:
     dyn = d.get("trend_status") or d.get("pop_status")
     if dyn:
         bits.append(str(dyn))
-    # Для «больше всего изменилось» (share не задана) показываем величину Δ.
-    if d.get("share_pct") is None and d.get("pop_change_pct") is not None:
-        bits.append(f"Δ {_fmt_num(d['pop_change_pct'])}%")
+    # Для «больше всего изменилось» (share не задана) показываем величину Δ
+    # (процент, либо абсолют для знаковых/индексных метрик).
+    if d.get("share_pct") is None:
+        delta = _delta_cell(
+            d.get("pop_change_pct"), d.get("pop_change_abs"), _unit(d.get("measure_type"))
+        )
+        if delta:
+            bits.append(f"Δ {delta}")
     return name + (f" ({', '.join(bits)})" if bits else "")
 
 
 def _overview_segment(s: dict[str, Any]) -> str:
+    unit = _unit(s.get("measure_type"))
     el = s.get("element") or "—"
-    val = _fmt_num(s.get("fact"), _unit(s.get("measure_type")))
-    ch = s.get("pop_change_pct")
-    return f"{el} {val}".strip() + (f" (Δ {_fmt_num(ch)}%)" if ch is not None else "")
+    val = _fmt_num(s.get("fact"), unit)
+    ch = _delta_cell(s.get("pop_change_pct"), s.get("pop_change_abs"), unit)
+    return f"{el} {val}".strip() + (f" (Δ {ch})" if ch else "")
 
 
 def _overview_chain(node: dict[str, Any], indent: str) -> list[str]:
@@ -451,9 +475,10 @@ def _render_overview(o: dict[str, Any]) -> str:
 
 
 def _rank_elem_cell(e: dict[str, Any]) -> str:
-    s = f"{e.get('element')} {_fmt_num(e.get('fact'), _unit(e.get('measure_type')))}"
-    ch = e.get("pop_change_pct")
-    return s + (f" (Δ {_fmt_num(ch)}%)" if ch is not None else "")
+    unit = _unit(e.get("measure_type"))
+    s = f"{e.get('element')} {_fmt_num(e.get('fact'), unit)}"
+    ch = _delta_cell(e.get("pop_change_pct"), e.get("pop_change_abs"), unit)
+    return s + (f" (Δ {ch})" if ch else "")
 
 
 def _render_rank_elements(r: dict[str, Any]) -> str:
@@ -585,6 +610,7 @@ def build_tools(
             return _render_error(
                 {"error": f"Метрика '{metric}' не найдена", "hint": "используй resolve_entity"}
             )
+        result["kind"] = store.metric_kind_of(metric)
         return _safe(_render_describe, result)
 
     def get_metric(

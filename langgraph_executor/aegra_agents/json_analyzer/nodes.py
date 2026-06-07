@@ -20,9 +20,10 @@ from langgraph.store.memory import InMemoryStore
 from ..shared.clients import create_gigachat_embeddings
 from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
-from .analytics import compute_analytics
+from .analytics import apply_metric_kinds, compute_analytics
 from .loader import load_dataset_obj
 from .prompts import SYNTHESIS_PROMPT
+from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
 from .sqlite_store import SqliteStore
 from .store_cache import EmbeddingIndex, sync_embeddings
@@ -190,6 +191,16 @@ def make_gather_node(llm: GigaChat):
             lg_store, store, direction_key=direction_key, llm=llm
         )
         await asyncio.to_thread(store.load_relations, relations)
+
+        # Классификация видов метрик (уровень/вклад/индекс) — LLM по названиям/
+        # описаниям, кэш per-direction. Применяем к посчитанной аналитике: для
+        # знаковых «вкладов»/индексов обнуляем относительные % (они бессмысленны) и
+        # пересчитываем вердикт динамики из абсолютного изменения. Сбой изолирован
+        # внутри (пусто → все метрики как 'уровень', прежнее поведение).
+        kinds = await sync_metric_kinds(
+            lg_store, store, direction_key=direction_key, llm=llm
+        )
+        await asyncio.to_thread(apply_metric_kinds, store, kinds)
 
         # Tool-loop блокирующий (llm.invoke + sqlite) — уводим в поток; поиск
         # внутри идёт по in-memory индексу, обращений к БД нет.
