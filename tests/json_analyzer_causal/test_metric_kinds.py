@@ -22,8 +22,8 @@ def _store():
     metrics = []
     for date, va, vb, t in [("2026-05-04", 10, -5, 100), ("2026-05-11", -8, 12, 130)]:
         metrics += [
-            _m("Вклад", "обратная", va, date, element="A"),
-            _m("Вклад", "обратная", vb, date, element="B"),
+            _m("Вклад", "обратная", va, date, element="A", plan=5),
+            _m("Вклад", "обратная", vb, date, element="B", plan=5),
             _m("Время", "обратная", t, date, plan=120),
         ]
     data = {"me": {"fio": "Босс", "metrics": []},
@@ -36,9 +36,9 @@ def _store():
 
 def _row(store, metric, element):
     return store.conn.execute(
-        "SELECT a.pop_change_pct pct, a.pop_change_abs abs, a.pop_status ps "
-        "FROM metrics m JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
-        "WHERE m.metric_name = ? "
+        "SELECT a.pop_change_pct pct, a.pop_change_abs abs, a.pop_status ps, "
+        "a.plan_dev_pct pdp FROM metrics m JOIN metric_analytics a "
+        "ON a.metric_uid = m.metric_uid WHERE m.metric_name = ? "
         "AND (m.element = ? OR (? IS NULL AND m.element IS NULL)) AND m.date='2026-05-11'",
         (metric, element, element),
     ).fetchone()
@@ -46,9 +46,11 @@ def _row(store, metric, element):
 
 def test_apply_kinds_contribution():
     store = _store()
+    assert _row(store, "Вклад", "A")["pdp"] is not None  # до: % отклонения от плана есть
     assert apply_metric_kinds(store, {"Вклад": "вклад"}) == 4
     a = _row(store, "Вклад", "A")
-    assert a["pct"] is None and a["abs"] == -18 and a["ps"] == "улучшение"
+    assert a["pct"] is None and a["pdp"] is None  # оба относительных % обнулены
+    assert a["abs"] == -18 and a["ps"] == "улучшение"
     b = _row(store, "Вклад", "B")
     assert b["abs"] == 17 and b["ps"] == "ухудшение"
     assert _row(store, "Время", None)["pct"] is not None
