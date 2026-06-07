@@ -440,7 +440,15 @@ def build_tools(
         text = str(person).strip()
         people = store.list_people()
         if text.isdigit():
-            found = any(str(p["person_tabnum"]) == text for p in people)
+            # person_tabnum может быть NULL (на проде не приходит) — не сравниваем
+            # 'None' со строкой; число может встретиться и в ФИО.
+            needle = text.lower()
+            found = any(
+                (p.get("person_tabnum") is not None and str(p["person_tabnum"]) == text)
+                or p.get("person_key") == text
+                or needle in (p.get("person_fio") or "").lower()
+                for p in people
+            )
         else:
             needle = text.lower()
             found = any(needle in (p["person_fio"] or "").lower() for p in people)

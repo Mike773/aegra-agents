@@ -140,7 +140,7 @@ def compute_analytics(store: SqliteStore) -> int:
     rows = [
         dict(r)
         for r in conn.execute(
-            "SELECT metric_uid, person_tabnum, person_is_me, metric_name, "
+            "SELECT metric_uid, person_tabnum, person_key, person_is_me, metric_name, "
             "metric_type, element, date, fact, plan, benchmark FROM metrics"
         )
     ]
@@ -179,7 +179,9 @@ def compute_analytics(store: SqliteStore) -> int:
 
     series: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        series[(r["person_tabnum"], r["metric_name"], r["element"])].append(r)
+        # Ключ серии по person_key (фолбэк на ФИО): иначе руководитель и сотрудник
+        # с null табельным схлопнулись бы в один ряд и исказили динамику/тренд.
+        series[(r["person_key"], r["metric_name"], r["element"])].append(r)
     for items in series.values():
         items.sort(key=lambda x: x["date"] or "")
         prev: dict | None = None
@@ -302,7 +304,7 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
     trends = {"улучшение": 0, "ухудшение": 0, "стабильно": 0}
     for r in conn.execute(
         "SELECT a.trend_status AS trend_status, "
-        "COUNT(DISTINCT m.person_tabnum || '|' || m.metric_name) AS c "
+        "COUNT(DISTINCT m.person_key || '|' || m.metric_name) AS c "
         "FROM metrics m JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
         "WHERE m.depth = 1 AND m.element IS NULL AND a.trend_status IS NOT NULL "
         "GROUP BY a.trend_status"
@@ -346,44 +348,46 @@ _OVERVIEW_MAX_HEADLINES = 8      # сколько позитивных/стаб�
 
 
 def _focus_person(store: SqliteStore, person: Any | None) -> tuple[Any, Any]:
-    """Резолв фокусного человека → (tabnum, fio).
+    """Резолв фокусного человека → (person_key, fio).
 
     person задан → он (ФИО-подстрока или табельный); иначе единственный сотрудник
-    (person_is_me=0); иначе руководитель; иначе любой. None,None если людей нет.
+    (person_is_me=0); иначе руководитель; иначе любой. (None, None) если людей нет.
+    Идентичность — по person_key (фолбэк на ФИО при null табельном), поэтому
+    работает и когда tabnum в данных не пришёл.
     """
     if person is not None and str(person).strip():
         text = str(person).strip()
         if text.isdigit():
             row = store.conn.execute(
-                "SELECT person_tabnum, person_fio FROM metrics "
-                "WHERE person_tabnum = ? LIMIT 1",
-                (int(text),),
+                "SELECT person_key, person_fio FROM metrics "
+                "WHERE person_tabnum = ? OR person_key = ? LIMIT 1",
+                (int(text), text),
             ).fetchone()
         else:
             row = store.conn.execute(
-                "SELECT person_tabnum, person_fio FROM metrics "
+                "SELECT person_key, person_fio FROM metrics "
                 "WHERE person_fio LIKE ? LIMIT 1",
                 (f"%{text}%",),
             ).fetchone()
-        return (row["person_tabnum"], row["person_fio"]) if row else (None, None)
+        return (row["person_key"], row["person_fio"]) if row else (None, None)
 
     emps = [
         dict(r)
         for r in store.conn.execute(
-            "SELECT DISTINCT person_tabnum, person_fio FROM metrics "
+            "SELECT DISTINCT person_key, person_fio FROM metrics "
             "WHERE person_is_me = 0"
         )
     ]
     if len(emps) == 1:
-        return emps[0]["person_tabnum"], emps[0]["person_fio"]
+        return emps[0]["person_key"], emps[0]["person_fio"]
     boss = store.conn.execute(
-        "SELECT person_tabnum, person_fio FROM metrics "
+        "SELECT person_key, person_fio FROM metrics "
         "WHERE person_is_me = 1 LIMIT 1"
     ).fetchone()
     if boss:
-        return boss["person_tabnum"], boss["person_fio"]
+        return boss["person_key"], boss["person_fio"]
     if emps:
-        return emps[0]["person_tabnum"], emps[0]["person_fio"]
+        return emps[0]["person_key"], emps[0]["person_fio"]
     return None, None
 
 
@@ -608,8 +612,8 @@ def build_situation_overview(
     проблеме (произвольной глубины, до листьев). Универсально: любое число корней,
     любая глубина, корректная деградация при одном уровне / без influent_percent.
     """
-    tabnum, fio = _focus_person(store, person)
-    if tabnum is None:
+    pkey, fio = _focus_person(store, person)
+    if pkey is None:
         return {"error": "В датасете нет людей."}
     cur_date, prev_date = _overview_dates(store, date)
     if cur_date is None:
@@ -624,14 +628,14 @@ def build_situation_overview(
             "a.pop_status, a.pop_change_pct "
             "FROM metrics m LEFT JOIN metric_analytics a "
             "ON a.metric_uid = m.metric_uid "
-            "WHERE m.person_tabnum = ? AND m.date = ?",
-            (tabnum, cur_date),
+            "WHERE m.person_key = ? AND m.date = ?",
+            (pkey, cur_date),
         )
     ]
     if not rows:
         return {
             "person_fio": fio,
-            "person_tabnum": tabnum,
+            "person_key": pkey,
             "date": cur_date,
             "prev_date": prev_date,
             "single_level": True,
@@ -647,7 +651,7 @@ def build_situation_overview(
     if store.analytics_row_count() == 0:
         return {
             "person_fio": fio,
-            "person_tabnum": tabnum,
+            "person_key": pkey,
             "date": cur_date,
             "prev_date": prev_date,
             "single_level": True,
@@ -687,7 +691,7 @@ def build_situation_overview(
 
     return {
         "person_fio": fio,
-        "person_tabnum": tabnum,
+        "person_key": pkey,
         "date": cur_date,
         "prev_date": prev_date,
         "single_level": single_level,

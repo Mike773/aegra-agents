@@ -140,7 +140,7 @@ def compute_analytics(store: SqliteStore) -> int:
     rows = [
         dict(r)
         for r in conn.execute(
-            "SELECT metric_uid, person_tabnum, person_is_me, metric_name, "
+            "SELECT metric_uid, person_tabnum, person_key, person_is_me, metric_name, "
             "metric_type, element, date, fact, plan, benchmark FROM metrics"
         )
     ]
@@ -179,7 +179,9 @@ def compute_analytics(store: SqliteStore) -> int:
 
     series: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        series[(r["person_tabnum"], r["metric_name"], r["element"])].append(r)
+        # Ключ серии по person_key (фолбэк на ФИО): иначе руководитель и сотрудник
+        # с null табельным схлопнулись бы в один ряд и исказили динамику/тренд.
+        series[(r["person_key"], r["metric_name"], r["element"])].append(r)
     for items in series.values():
         items.sort(key=lambda x: x["date"] or "")
         prev: dict | None = None
@@ -302,7 +304,7 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
     trends = {"улучшение": 0, "ухудшение": 0, "стабильно": 0}
     for r in conn.execute(
         "SELECT a.trend_status AS trend_status, "
-        "COUNT(DISTINCT m.person_tabnum || '|' || m.metric_name) AS c "
+        "COUNT(DISTINCT m.person_key || '|' || m.metric_name) AS c "
         "FROM metrics m JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
         "WHERE m.depth = 1 AND m.element IS NULL AND a.trend_status IS NOT NULL "
         "GROUP BY a.trend_status"

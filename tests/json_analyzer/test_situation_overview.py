@@ -193,3 +193,55 @@ def test_render_overview_phrased_with_numbers():
     assert "вес 90%" in out          # бизнес-вес в драйвере
     assert "по разрезам" in out       # продукты Talk
     assert "Позитив:" in out and "Стабильно:" in out
+
+
+# --- Устойчивость к null person_tabnum (прод: табельный не приходит) -----------
+
+def _flat(name, fact, plan, date):
+    return {"id": f"{name}{date}", "metric_name": name, "metric_type": "прямая",
+            "measure_type": "у.е.", "date": date, "calc_period": "д", "fact": fact,
+            "plan": plan, "benchmark": None, "element": None}
+
+
+def _store_no_tabnum():
+    """Руководитель и сотрудник БЕЗ tabnum (разные ФИО), одна метрика с разными
+    значениями — моделирует прод, где табельный не приходит."""
+    data = {
+        "me": {"fio": "Босс", "post": "рук", "depart": "О", "metrics": [
+            _flat("Производительность", 99, 18, "2026-05-04"),
+            _flat("Производительность", 99, 18, "2026-05-11")]},
+        "employees": [{"fio": "Иванов", "post": "оп", "depart": "О", "metrics": [
+            _flat("Производительность", 20, 18, "2026-05-04"),
+            _flat("Производительность", 12, 18, "2026-05-11")]}],
+    }
+    store = SqliteStore()
+    store.load(load_dataset_obj(data))
+    compute_analytics(store)
+    return store
+
+
+def test_null_tabnum_people_not_collapsed():
+    store = _store_no_tabnum()
+    people = store.schema_overview()["people"]
+    fios = sorted(p["person_fio"] for p in people)
+    assert fios == ["Босс", "Иванов"]  # не схлопнулись в одного по NULL tabnum
+
+
+def test_null_tabnum_series_not_mixed():
+    store = _store_no_tabnum()
+    row = store.conn.execute(
+        "SELECT a.pop_change_pct FROM metrics m JOIN metric_analytics a "
+        "ON a.metric_uid = m.metric_uid WHERE m.person_fio = 'Иванов' "
+        "AND m.date = '2026-05-11' AND m.element IS NULL"
+    ).fetchone()
+    assert round(row["pop_change_pct"], 2) == -40.0  # (12-20)/20, не смешано с рук.
+
+
+def test_null_tabnum_situation_overview_focus_by_fio():
+    store = _store_no_tabnum()
+    o_default = build_situation_overview(store)
+    assert o_default.get("error") is None
+    assert o_default["person_fio"] == "Иванов"  # единственный сотрудник, не «нет людей»
+    assert any(p["metric"] == "Производительность" for p in o_default["problems"])
+    o_by_fio = build_situation_overview(store, person="Иванов")
+    assert o_by_fio["person_fio"] == "Иванов"
