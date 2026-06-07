@@ -45,6 +45,11 @@ _WIKI_METRIC_DESC_PREVIEW = 200
 _MAX_CANDIDATES = 5
 # Классификация метрик в инсайты для сервиса поручений.
 _MAX_INSIGHTS = 12
+# Сколько символов описания метрики кладём в каталог для промпта классификации
+# (описание помогает LLM сопоставить разговорную формулировку с именем метрики).
+_CATALOG_DESC_PREVIEW = 200
+# Порог нечёткого совпадения имени метрики из ответа LLM с именем из каталога.
+_METRIC_NAME_FUZZY = 0.82
 _INSIGHT_TYPES = ("main_problem", "problem", "norm", "achievement")
 _INSIGHT_TYPE_LABELS = {
     "main_problem": "Главная проблема",
@@ -1339,37 +1344,91 @@ def _load_json(text: Any) -> Any:
 
 
 def _collect_metric_catalog(metrics: Any) -> list[dict]:
-    """Плоский каталог метрик ``[{id, metric_name}]`` из дерева датасета.
+    """Плоский каталог метрик ``[{id, metric_name, description}]`` из датасета.
 
-    Рекурсивно обходит ``employees[].metrics[].child_metrics[]``. Дедуп по ``id``
-    (одна метрика повторяется в разрезах по ``element`` — id и имя у них общие).
+    Строится через канонический ``load_dataset_obj`` (тот же парсер, что у
+    json_analyzer и _distinct_metric_specs) — поэтому совпадает с реальной формой
+    данных, а не с догадкой о ключах. Дедуп по ``metric_id`` (одна метрика
+    повторяется в разрезах по ``element`` — id и имя у них общие). Описание нужно,
+    чтобы LLM мог сопоставить разговорную формулировку с именем метрики.
     """
+    try:
+        rows = load_dataset_obj(metrics)
+    except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
+        return []
     catalog: list[dict] = []
     seen: set[str] = set()
-
-    def walk(items: Any) -> None:
-        for m in items or []:
-            if not isinstance(m, dict):
-                continue
-            mid = str(m.get("id") or "").strip()
-            name = str(m.get("metric_name") or "").strip()
-            if mid and mid not in seen:
-                seen.add(mid)
-                catalog.append({"id": mid, "metric_name": name})
-            walk(m.get("child_metrics"))
-
-    if isinstance(metrics, dict):
-        for emp in metrics.get("employees") or []:
-            if isinstance(emp, dict):
-                walk(emp.get("metrics"))
+    for r in rows:
+        mid = str(r.get("metric_id") or "").strip()
+        name = str(r.get("metric_name") or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        catalog.append({
+            "id": mid,
+            "metric_name": name,
+            "description": str(r.get("metric_description") or "").strip(),
+        })
     return catalog
 
 
 def _format_metric_catalog(catalog: list[dict]) -> str:
-    """Каталог метрик в человекочитаемые строки ``id — название`` для промпта."""
-    return "\n".join(
-        f"{c['id']} — {c['metric_name']}" for c in catalog if c.get("id")
-    ) or "(каталог пуст)"
+    """Каталог метрик в строки ``id | название — краткое описание`` для промпта."""
+    lines: list[str] = []
+    for c in catalog:
+        if not c.get("id"):
+            continue
+        desc = c.get("description") or ""
+        if len(desc) > _CATALOG_DESC_PREVIEW:
+            desc = desc[:_CATALOG_DESC_PREVIEW] + "…"
+        suffix = f" — {desc}" if desc else ""
+        lines.append(f"{c['id']} | {c['metric_name']}{suffix}")
+    return "\n".join(lines) or "(каталог пуст)"
+
+
+def _resolve_insight_metric(
+    text: str, metric_id: str, metric_name: str, catalog: list[dict]
+) -> tuple[str, str]:
+    """Детерминированно проставляет ``(metric_id, metric_name)`` по каталогу.
+
+    LLM ненадёжно мапит разговорные формулировки на терсые имена метрик, поэтому
+    доводим сопоставление в коде, по убыванию надёжности:
+      1) точный id из каталога → каноничное имя;
+      2) точное совпадение имени (casefold);
+      3) нечёткое совпадение имени (similarity_ratio ≥ порога);
+      4) скан текста инсайта на вхождение имён метрик (берём самое длинное).
+    Если ничего не нашлось — возвращаем как было (может остаться пустым).
+    """
+    if not catalog:
+        return metric_id, metric_name
+
+    name_by_id = {c["id"]: c["metric_name"] for c in catalog}
+    if metric_id and metric_id in name_by_id:
+        return metric_id, name_by_id[metric_id] or metric_name
+
+    nlow = metric_name.casefold().strip()
+    if nlow:
+        for c in catalog:
+            if (c["metric_name"] or "").casefold().strip() == nlow:
+                return c["id"], c["metric_name"]
+        best = max(
+            catalog,
+            key=lambda c: similarity_ratio(nlow, (c["metric_name"] or "").casefold()),
+        )
+        if similarity_ratio(nlow, (best["metric_name"] or "").casefold()) >= _METRIC_NAME_FUZZY:
+            return best["id"], best["metric_name"]
+
+    low = (text or "").casefold()
+    matched: dict | None = None
+    for c in catalog:
+        nm = (c["metric_name"] or "").strip()
+        if nm and nm.casefold() in low:
+            if matched is None or len(nm) > len(matched["metric_name"]):
+                matched = c
+    if matched:
+        return matched["id"], matched["metric_name"]
+
+    return metric_id, metric_name
 
 
 def _gather_agent_answers(state: OrchestratorState) -> str:
@@ -1416,11 +1475,6 @@ def _parse_insights_json(text: Any, catalog: list[dict]) -> list[dict]:
     if not isinstance(items, list):
         return []
 
-    name_by_id = {c["id"]: c["metric_name"] for c in catalog}
-    id_by_name = {
-        c["metric_name"].casefold(): c["id"] for c in catalog if c.get("metric_name")
-    }
-
     result: list[dict] = []
     for item in items:
         if not isinstance(item, dict):
@@ -1433,11 +1487,9 @@ def _parse_insights_json(text: Any, catalog: list[dict]) -> list[dict]:
             itype = "problem"
         mid = str(item.get("metric_id") or "").strip()
         name = str(item.get("metric_name") or "").strip()
-        # Сверяем с каталогом: восстанавливаем имя по id или id по имени.
-        if mid and mid in name_by_id:
-            name = name_by_id[mid] or name
-        elif name and name.casefold() in id_by_name:
-            mid = id_by_name[name.casefold()]
+        # Детерминированно доводим сопоставление метрики по каталогу (LLM мапит
+        # разговорные формулировки на терсые имена ненадёжно).
+        mid, name = _resolve_insight_metric(text_val, mid, name, catalog)
         result.append({
             "type": itype,
             "metric_id": mid,
