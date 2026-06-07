@@ -8,15 +8,37 @@
 from __future__ import annotations
 
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 _ENV_LOADED = False
 _FALLBACK_ENGINE: AsyncEngine | None = None
+
+# Схемы на search_path. ``ext`` обязателен: на проме pgvector установлен в схему
+# ``ext`` (тип ``ext.vector`` и оператор ``<=>`` живут там), и без неё на пути
+# косинусный поиск падает «operator does not exist: ext.vector <=> unknown».
+# ``public`` — для инстансов, где pgvector в public (dev). Отсутствующая схема в
+# search_path безопасна — Postgres её просто игнорирует.
+_DEFAULT_SEARCH_PATH = "wiki_rag, public, ext"
+
+
+def _search_path() -> str:
+    """search_path для сессий easyrag. Override через env ``WIKI_RAG_SEARCH_PATH``.
+
+    Значение инлайнится в ``SET`` (bind-параметром его не передать), поэтому
+    пропускаем только идентификаторы/запятые/пробелы — иначе дефолт.
+    """
+    _ensure_env_loaded()
+    val = (os.environ.get("WIKI_RAG_SEARCH_PATH") or "").strip()
+    if val and re.fullmatch(r"[\w, ]+", val):
+        return val
+    return _DEFAULT_SEARCH_PATH
 
 
 def _ensure_env_loaded() -> None:
@@ -66,7 +88,9 @@ def get_engine() -> AsyncEngine:
         _FALLBACK_ENGINE = create_async_engine(
             _async_dsn(dsn),
             pool_pre_ping=True,
-            connect_args={"server_settings": {"search_path": "wiki_rag,public"}},
+            connect_args={
+                "server_settings": {"search_path": _search_path().replace(" ", "")}
+            },
         )
     return _FALLBACK_ENGINE
 
@@ -75,6 +99,11 @@ def get_engine() -> AsyncEngine:
 async def session_scope() -> AsyncIterator[AsyncSession]:
     async with AsyncSession(get_engine(), expire_on_commit=False) as session:
         try:
+            # Прод-движок aegra мы не конфигурируем, а pgvector там в схеме ``ext``.
+            # SET LOCAL добавляет её на search_path только для нашей транзакции
+            # (откатится на commit/rollback, не протечёт на чужие запросы по пулу),
+            # иначе оператор ``<=>`` не резолвится. autobegin откроет транзакцию.
+            await session.execute(text(f"SET LOCAL search_path = {_search_path()}"))
             yield session
             await session.commit()
         except Exception:
