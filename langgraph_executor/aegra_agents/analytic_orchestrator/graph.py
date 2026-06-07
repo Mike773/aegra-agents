@@ -4,7 +4,9 @@ from langchain_gigachat import GigaChat
 from langgraph.graph import END, START, StateGraph
 
 from ..easyrag.graph import graph as easyrag_graph
-from ..json_analyzer.graph import graph as json_analyzer_graph
+# Оркестратор использует аналитика json_analyzer_v2: без аналитики по бенчмарку,
+# pop-сравнения только у метрик с указанным планом.
+from ..json_analyzer_v2.graph import graph as json_analyzer_graph
 from ..shared.clients import create_gigachat_client
 from .nodes import (
     after_route,
