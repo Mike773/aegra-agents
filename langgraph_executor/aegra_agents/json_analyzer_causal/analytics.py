@@ -326,3 +326,138 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
         "top_anomalies_latest": anomalies,
         "trend_counts_level1": trends,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Лучшие/худшие разрезы (element) метрики по факту с учётом направления.
+# Сравнивает element-строки ОДНОЙ метрики между собой (план/бенчмарк не нужны) —
+# для метрик без плана это единственный осмысленный ориентир «лучше/хуже».
+# --------------------------------------------------------------------------- #
+_RANK_ELEMENTS_TOP = 5
+
+
+def _focus_person(store: SqliteStore, person: Any | None) -> tuple[Any, Any]:
+    """Резолв фокусного человека → (person_key, fio) с фолбэком на ФИО (работает и
+    при null табельном). person задан → он; иначе единственный сотрудник; иначе
+    руководитель; иначе любой; (None, None) если людей нет."""
+    if person is not None and str(person).strip():
+        text = str(person).strip()
+        if text.isdigit():
+            row = store.conn.execute(
+                "SELECT person_key, person_fio FROM metrics "
+                "WHERE person_tabnum = ? OR person_key = ? LIMIT 1",
+                (int(text), text),
+            ).fetchone()
+        else:
+            row = store.conn.execute(
+                "SELECT person_key, person_fio FROM metrics "
+                "WHERE person_fio LIKE ? LIMIT 1",
+                (f"%{text}%",),
+            ).fetchone()
+        return (row["person_key"], row["person_fio"]) if row else (None, None)
+
+    emps = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT DISTINCT person_key, person_fio FROM metrics "
+            "WHERE person_is_me = 0"
+        )
+    ]
+    if len(emps) == 1:
+        return emps[0]["person_key"], emps[0]["person_fio"]
+    boss = store.conn.execute(
+        "SELECT person_key, person_fio FROM metrics WHERE person_is_me = 1 LIMIT 1"
+    ).fetchone()
+    if boss:
+        return boss["person_key"], boss["person_fio"]
+    if emps:
+        return emps[0]["person_key"], emps[0]["person_fio"]
+    return None, None
+
+
+def _overview_dates(
+    store: SqliteStore, date: str | None
+) -> tuple[str | None, str | None]:
+    """(текущая, предыдущая) даты: текущая = заданная или последняя."""
+    dates = [
+        r["date"]
+        for r in store.conn.execute(
+            "SELECT DISTINCT date FROM metrics WHERE date IS NOT NULL ORDER BY date"
+        )
+    ]
+    if not dates:
+        return None, None
+    cur = date or dates[-1]
+    before = [d for d in dates if d < cur]
+    return cur, (before[-1] if before else None)
+
+
+def rank_elements(
+    store: SqliteStore,
+    metric: str,
+    person: Any | None = None,
+    date: str | None = None,
+    top: int = _RANK_ELEMENTS_TOP,
+) -> dict[str, Any]:
+    """Ранжирует element-строки метрики одного человека за период по факту с учётом
+    направления (прямая: выше=лучше, обратная: ниже=лучше). Возвращает ranked-список
+    (лучшее→худшее). План/бенчмарк не используются."""
+    mt = store.metric_type_of(metric)
+    if mt is None:
+        return {"error": f"Метрика '{metric}' не найдена."}
+    pkey, fio = _focus_person(store, person)
+    if pkey is None:
+        return {"error": "В датасете нет людей."}
+    cur_date, _prev = _overview_dates(store, date)
+    if cur_date is None:
+        return {"error": "В датасете нет дат."}
+
+    rows = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT m.element, m.fact, m.measure_type, a.plan_status, a.pop_change_pct "
+            "FROM metrics m LEFT JOIN metric_analytics a "
+            "ON a.metric_uid = m.metric_uid "
+            "WHERE m.metric_name = ? AND m.element IS NOT NULL "
+            "AND m.person_key = ? AND m.date = ? AND m.fact IS NOT NULL",
+            (metric, pkey, cur_date),
+        )
+    ]
+    if not rows:
+        return {
+            "metric": metric,
+            "metric_type": mt,
+            "date": cur_date,
+            "person_fio": fio,
+            "count": 0,
+            "best": [],
+            "worst": [],
+            "top": top,
+            "note": "у метрики нет разрезов (element) с данными на этот период.",
+        }
+
+    higher_is_better = mt != "обратная"
+    rows.sort(key=lambda r: r["fact"], reverse=higher_is_better)
+
+    def _view(r: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "element": r["element"],
+            "fact": r["fact"],
+            "measure_type": r.get("measure_type"),
+            "pop_change_pct": r.get("pop_change_pct"),
+            "plan_status": r.get("plan_status"),
+        }
+
+    best = [_view(r) for r in rows[:top]]
+    worst = [_view(r) for r in reversed(rows[-top:])]
+    return {
+        "metric": metric,
+        "metric_type": mt,
+        "measure_type": rows[0].get("measure_type"),
+        "date": cur_date,
+        "person_fio": fio,
+        "count": len(rows),
+        "best": best,
+        "worst": worst,
+        "top": top,
+    }

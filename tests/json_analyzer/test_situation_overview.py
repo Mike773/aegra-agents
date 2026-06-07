@@ -9,10 +9,14 @@ from langgraph_executor.aegra_agents.json_analyzer.analytics import (
     _overview_signal,
     build_situation_overview,
     compute_analytics,
+    rank_elements,
 )
 from langgraph_executor.aegra_agents.json_analyzer.loader import load_dataset_obj
 from langgraph_executor.aegra_agents.json_analyzer.sqlite_store import SqliteStore
-from langgraph_executor.aegra_agents.json_analyzer.tools import _render_overview
+from langgraph_executor.aegra_agents.json_analyzer.tools import (
+    _render_overview,
+    _render_rank_elements,
+)
 
 
 def _m(name, mtype, measure, fact, plan, date, *, influent=None, element=None, children=None):
@@ -112,13 +116,15 @@ def test_recursive_chain_depth_gt_two():
     assert acd_sub["main_driver"] is None
 
 
-def test_by_segments_products_on_driver():
+def test_by_segments_products_by_value():
+    """Разрезы (продукты) под AHT ранжируются по ЗНАЧЕНИЮ с учётом направления:
+    Talk обратная (выше=хуже) → ПродуктX (20) худший, ПродуктY (2) лучший."""
     o = _full_overview()
     perf = next(p for p in o["problems"] if p["metric"] == "Производительность")
     seg = perf["main_driver"]["by_segments"]  # разрезы под AHT
     assert seg is not None and seg["label"] == "Talk"
-    elements = {s["element"] for s in seg["top"]}
-    assert {"ПродуктX", "ПродуктY"} & elements
+    assert seg["worst"][0]["element"] == "ПродуктX"  # худший по значению
+    assert seg["best"][0]["element"] == "ПродуктY"   # лучший по значению
 
 
 def test_rank_metric_excluded_from_drivers():
@@ -245,3 +251,72 @@ def test_null_tabnum_situation_overview_focus_by_fio():
     assert any(p["metric"] == "Производительность" for p in o_default["problems"])
     o_by_fio = build_situation_overview(store, person="Иванов")
     assert o_by_fio["person_fio"] == "Иванов"
+
+
+# --- rank_elements: лучшие/худшие разрезы по значению (без плана) --------------
+
+def _influence_store(direction, facts, date="2026-05-11"):
+    """Один сотрудник, метрика «Влияние» с element-разрезами БЕЗ плана."""
+    metrics = [
+        _m("Влияние", direction, "секунда", f, None, date, element=el)
+        for el, f in facts.items()
+    ]
+    data = {"me": {"fio": "Босс", "metrics": []},
+            "employees": [{"fio": "Иванов", "metrics": metrics}]}
+    store = SqliteStore()
+    store.load(load_dataset_obj(data))
+    compute_analytics(store)
+    return store
+
+
+def test_rank_elements_inverse_no_plan():
+    s = _influence_store("обратная", {"A": 25, "B": -20, "C": 5})
+    r = rank_elements(s, "Влияние")
+    assert r.get("error") is None and r["count"] == 3
+    assert r["worst"][0]["element"] == "A"   # обратная: выше=хуже
+    assert r["best"][0]["element"] == "B"    # ниже=лучше
+
+
+def test_rank_elements_direct_no_plan():
+    s = _influence_store("прямая", {"A": 25, "B": -20, "C": 5})
+    r = rank_elements(s, "Влияние")
+    assert r["best"][0]["element"] == "A"    # прямая: выше=лучше
+    assert r["worst"][0]["element"] == "B"
+
+
+def test_rank_elements_render_phrased():
+    out = _render_rank_elements({
+        "metric": "Влияние", "metric_type": "обратная", "date": "2026-05-11",
+        "person_fio": "Иванов", "count": 8, "top": 5,
+        "worst": [{"element": "A", "fact": 25, "measure_type": "секунда"}],
+        "best": [{"element": "B", "fact": -20, "measure_type": "секунда"}],
+    })
+    assert "Худшие" in out and "A 25" in out and "Лучшие" in out
+
+
+def _overview_with_segments(seg_d1, seg_d2):
+    """Производительность(прямая) ← AHT(обратная, 90%) ← Talk-продукты (обратная)."""
+    def tree(date, perf, segs):
+        return _m("Производительность", "прямая", "у.е.", perf, 18, date, children=[
+            _m("AHT", "обратная", "секунда", 320, 180, date, influent=90, children=[
+                _m("Talk", "обратная", "секунда", v, None, date, element=el)
+                for el, v in segs.items()
+            ]),
+        ])
+    data = {"me": {"fio": "Босс", "metrics": []},
+            "employees": [{"fio": "Иванов", "metrics": [
+                tree("2026-05-04", 20, seg_d1), tree("2026-05-11", 12, seg_d2)]}]}
+    store = SqliteStore()
+    store.load(load_dataset_obj(data))
+    compute_analytics(store)
+    return store
+
+
+def test_by_segments_worst_by_value_not_most_changed():
+    """Регресс бага: худший разрез по ЗНАЧЕНИЮ (A=25, стабилен) всплывает первым,
+    а не самый ИЗМЕНИВШИЙСЯ (C: 4→18)."""
+    s = _overview_with_segments({"A": 24, "C": 4, "B": -20}, {"A": 25, "C": 18, "B": -20})
+    o = build_situation_overview(s)
+    perf = next(p for p in o["problems"] if p["metric"] == "Производительность")
+    seg = perf["main_driver"]["by_segments"]
+    assert seg["worst"][0]["element"] == "A"  # худший по значению, не C (самый изменившийся)
