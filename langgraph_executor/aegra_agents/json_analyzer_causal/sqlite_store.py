@@ -48,6 +48,9 @@ class SqliteStore:
         self.conn.row_factory = sqlite3.Row
         self._create_schema()
         self._element_info_cache: dict[str, dict[str, Any]] = {}
+        # Вид метрики (уровень/вклад/индекс) из LLM-классификации; заполняет
+        # analytics.apply_metric_kinds. Пусто = все метрики трактуются как 'уровень'.
+        self.metric_kinds: dict[str, str] = {}
 
     def _create_schema(self) -> None:
         self.conn.executescript(
@@ -158,6 +161,10 @@ class SqliteStore:
         )
         row = cur.fetchone()
         return row["metric_type"] if row else None
+
+    def metric_kind_of(self, name: str) -> str | None:
+        """Вид метрики (уровень/вклад/индекс) из LLM-классификации, если применена."""
+        return self.metric_kinds.get(name)
 
     def _metric_element_info(self, name: str) -> dict[str, Any]:
         cached = self._element_info_cache.get(name)
@@ -659,9 +666,9 @@ class SqliteStore:
             "SELECT m.metric_uid, m.parent_uid, m.depth, m.person_fio, "
             "m.metric_name, m.metric_type, m.measure_type, m.date, m.element, "
             "m.fact, m.plan, m.benchmark, m.influent_percent, "
-            "a.plan_status, a.plan_dev_pct, a.benchmark_status, "
+            "a.plan_status, a.plan_dev_pct, a.plan_dev_abs, a.benchmark_status, "
             "a.benchmark_dev_pct, a.trend, a.trend_status, "
-            "a.pop_change_pct, a.pop_status "
+            "a.pop_change_pct, a.pop_change_abs, a.pop_status "
             "FROM metrics m JOIN tree t ON m.metric_uid = t.metric_uid "
             "LEFT JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"

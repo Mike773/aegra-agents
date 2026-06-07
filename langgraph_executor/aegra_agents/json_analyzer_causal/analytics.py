@@ -415,7 +415,8 @@ def rank_elements(
     rows = [
         dict(r)
         for r in store.conn.execute(
-            "SELECT m.element, m.fact, m.measure_type, a.plan_status, a.pop_change_pct "
+            "SELECT m.element, m.fact, m.measure_type, a.plan_status, "
+            "a.pop_change_pct, a.pop_change_abs "
             "FROM metrics m LEFT JOIN metric_analytics a "
             "ON a.metric_uid = m.metric_uid "
             "WHERE m.metric_name = ? AND m.element IS NOT NULL "
@@ -445,6 +446,7 @@ def rank_elements(
             "fact": r["fact"],
             "measure_type": r.get("measure_type"),
             "pop_change_pct": r.get("pop_change_pct"),
+            "pop_change_abs": r.get("pop_change_abs"),
             "plan_status": r.get("plan_status"),
         }
 
@@ -461,3 +463,51 @@ def rank_elements(
         "worst": worst,
         "top": top,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Применение классификации видов метрик (metric_kinds_cache): для не-«уровней»
+# (вклад/индекс) относительное %-сравнение бессмысленно — обнуляем относительные %
+# и пересчитываем вердикт динамики из ЗНАКА абсолютного изменения.
+# --------------------------------------------------------------------------- #
+def _pop_status_from_abs(
+    pop_change_abs: float | None, metric_type: str | None
+) -> str | None:
+    """Вердикт динамики из АБСОЛЮТНОГО изменения (для знаковых/индексных метрик,
+    где относительный % недоступен). Ноль — 'стабильно', иначе по знаку с учётом
+    направления."""
+    better, stable, worse = _DYNAMIC_LABELS
+    if pop_change_abs is None:
+        return None
+    if pop_change_abs == 0:
+        return stable
+    return better if _direction_better(pop_change_abs > 0, metric_type) else worse
+
+
+def apply_metric_kinds(store: SqliteStore, kinds: dict[str, str]) -> int:
+    """Применяет виды метрик к посчитанной аналитике. Для метрик вида ≠ 'уровень'
+    обнуляет относительные %-поля (pop_change_pct/plan_dev_pct/benchmark_dev_pct) и
+    пересчитывает pop_status из знака pop_change_abs. Виды кладёт в store.metric_kinds.
+    Пустой ввод — no-op. Возвращает число затронутых строк."""
+    store.metric_kinds = dict(kinds or {})
+    non_level = [m for m, k in (kinds or {}).items() if k and k != "уровень"]
+    if not non_level:
+        return 0
+    affected = 0
+    for name in non_level:
+        rows = store.conn.execute(
+            "SELECT a.metric_uid AS uid, a.pop_change_abs AS abs, m.metric_type AS mt "
+            "FROM metric_analytics a JOIN metrics m ON m.metric_uid = a.metric_uid "
+            "WHERE m.metric_name = ?",
+            (name,),
+        ).fetchall()
+        for r in rows:
+            store.conn.execute(
+                "UPDATE metric_analytics SET pop_change_pct = NULL, "
+                "plan_dev_pct = NULL, benchmark_dev_pct = NULL, pop_status = ? "
+                "WHERE metric_uid = ?",
+                (_pop_status_from_abs(r["abs"], r["mt"]), r["uid"]),
+            )
+            affected += 1
+    store.conn.commit()
+    return affected
