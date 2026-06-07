@@ -90,30 +90,36 @@ def _metric_type(store: SqliteStore, name: str) -> str | None:
 
 
 def _agg_value(
-    store: SqliteStore, tabnum: Any, metric: str, date: str
+    store: SqliteStore, pkey: Any, metric: str, date: str
 ) -> float | None:
+    # Идентичность человека — по person_key (фолбэк на ФИО при null табельном).
+    if pkey is None:
+        return None
+    # person_key — TEXT; приводим аргумент к строке, чтобы сравнение было
+    # детерминированным, даже если кто-то передал табельный как int.
     row = store.conn.execute(
-        "SELECT fact FROM metrics WHERE person_tabnum = ? AND metric_name = ? "
+        "SELECT fact FROM metrics WHERE person_key = ? AND metric_name = ? "
         "AND element IS NULL AND date = ? AND fact IS NOT NULL LIMIT 1",
-        (tabnum, metric, date),
+        (str(pkey), metric, date),
     ).fetchone()
     return row["fact"] if row else None
 
 
 def _employee_tabnums(store: SqliteStore) -> list[Any]:
+    # Возвращает person_key сотрудников (фолбэк на ФИО при null табельном).
     return [
-        r["person_tabnum"]
+        r["person_key"]
         for r in store.conn.execute(
-            "SELECT DISTINCT person_tabnum FROM metrics WHERE person_is_me = 0"
+            "SELECT DISTINCT person_key FROM metrics WHERE person_is_me = 0"
         )
     ]
 
 
 def _self_tabnum(store: SqliteStore) -> Any | None:
     row = store.conn.execute(
-        "SELECT person_tabnum FROM metrics WHERE person_is_me = 1 LIMIT 1"
+        "SELECT person_key FROM metrics WHERE person_is_me = 1 LIMIT 1"
     ).fetchone()
-    return row["person_tabnum"] if row else None
+    return row["person_key"] if row else None
 
 
 def _verdict(effect_on_value: float, parent_type: str | None) -> str:
@@ -471,15 +477,17 @@ def attribute_change(
 
 
 def _resolve_person_tabnum(store: SqliteStore, person: Any) -> Any | None:
+    # Возвращает person_key (фолбэк на ФИО): на проде табельный приходит null.
     text = str(person).strip()
     if text.isdigit():
         row = store.conn.execute(
-            "SELECT person_tabnum FROM metrics WHERE person_tabnum = ? LIMIT 1",
-            (int(text),),
+            "SELECT person_key FROM metrics "
+            "WHERE person_tabnum = ? OR person_key = ? LIMIT 1",
+            (int(text), text),
         ).fetchone()
-        return row["person_tabnum"] if row else None
+        return row["person_key"] if row else None
     row = store.conn.execute(
-        "SELECT person_tabnum FROM metrics WHERE person_fio LIKE ? LIMIT 1",
+        "SELECT person_key FROM metrics WHERE person_fio LIKE ? LIMIT 1",
         (f"%{text}%",),
     ).fetchone()
-    return row["person_tabnum"] if row else None
+    return row["person_key"] if row else None

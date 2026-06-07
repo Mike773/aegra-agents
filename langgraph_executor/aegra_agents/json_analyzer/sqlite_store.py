@@ -61,6 +61,7 @@ class SqliteStore:
                 person_post         TEXT,
                 person_depart       TEXT,
                 person_is_me        INTEGER,
+                person_key          TEXT,
                 metric_id           TEXT,
                 metric_name         TEXT,
                 metric_description  TEXT,
@@ -113,6 +114,7 @@ class SqliteStore:
             CREATE INDEX idx_metrics_date   ON metrics(date);
             CREATE INDEX idx_metrics_elem   ON metrics(element);
             CREATE INDEX idx_metrics_person ON metrics(person_tabnum);
+            CREATE INDEX idx_metrics_pkey   ON metrics(person_key);
             CREATE INDEX idx_metrics_parent ON metrics(parent_uid);
             """
         )
@@ -137,7 +139,9 @@ class SqliteStore:
             return "", []
         text = str(person).strip()
         if text.isdigit():
-            return " AND m.person_tabnum = ?", [int(text)]
+            # При null person_tabnum числовой фильтр дал бы 0 строк; матчим и
+            # person_key (он = табельный-как-текст при наличии tabnum).
+            return " AND (m.person_tabnum = ? OR m.person_key = ?)", [int(text), text]
         return " AND m.person_fio LIKE ?", [f"%{text}%"]
 
     @staticmethod
@@ -276,9 +280,11 @@ class SqliteStore:
         ]
         people = self._rows(
             self.conn.execute(
-                "SELECT person_tabnum, person_fio, person_post, person_depart, "
+                "SELECT person_key, MAX(person_tabnum) AS person_tabnum, "
+                "MAX(person_fio) AS person_fio, MAX(person_post) AS person_post, "
+                "MAX(person_depart) AS person_depart, "
                 "MAX(person_is_me) AS person_is_me FROM metrics "
-                "GROUP BY person_tabnum ORDER BY person_is_me DESC, person_fio"
+                "GROUP BY person_key ORDER BY person_is_me DESC, person_fio"
             )
         )
         dates = [
@@ -425,9 +431,11 @@ class SqliteStore:
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         return self._rows(
             self.conn.execute(
-                "SELECT person_tabnum, person_fio, person_post, person_depart, "
+                "SELECT person_key, MAX(person_tabnum) AS person_tabnum, "
+                "MAX(person_fio) AS person_fio, MAX(person_post) AS person_post, "
+                "MAX(person_depart) AS person_depart, "
                 f"MAX(person_is_me) AS person_is_me FROM metrics{where} "
-                "GROUP BY person_tabnum ORDER BY person_is_me DESC, person_fio",
+                "GROUP BY person_key ORDER BY person_is_me DESC, person_fio",
                 params,
             )
         )

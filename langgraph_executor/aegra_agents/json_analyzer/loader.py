@@ -22,6 +22,7 @@ ROW_FIELDS: tuple[str, ...] = (
     "person_post",
     "person_depart",
     "person_is_me",
+    "person_key",
     "metric_id",
     "metric_name",
     "metric_description",
@@ -76,6 +77,7 @@ def _walk(
                 "person_post": person.get("post"),
                 "person_depart": person.get("depart"),
                 "person_is_me": 1 if person.get("_is_me") else 0,
+                "person_key": person.get("_key"),
                 "metric_id": node.get("id"),
                 "metric_name": node.get("metric_name"),
                 "metric_description": node.get("metric_description"),
@@ -104,6 +106,14 @@ def load_dataset_obj(data: dict[str, Any]) -> list[dict[str, Any]]:
         people.append(me)
     for emp in data.get("employees", []) or []:
         people.append({**emp, "_is_me": False})
+
+    # Канонический ключ человека для ВНУТРЕННЕЙ идентичности: табельный (как текст),
+    # иначе ФИО, иначе индекс. Нужен, т.к. на проде tabnum может приходить null —
+    # тогда без фолбэка разные люди схлопывались бы по NULL person_tabnum.
+    for i, person in enumerate(people):
+        tab = person.get("tabnum")
+        fio = person.get("fio")
+        person["_key"] = str(tab) if tab is not None else (fio if fio else f"person{i}")
 
     rows: list[dict[str, Any]] = []
     counter = [1]
