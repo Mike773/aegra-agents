@@ -387,9 +387,17 @@ def _overview_chain(node: dict[str, Any], indent: str) -> list[str]:
     if drivers:
         lines.append(indent + "драйверы: " + "; ".join(_overview_driver(d) for d in drivers))
     seg = node.get("by_segments")
-    if seg and seg.get("top"):
-        seg_str = "; ".join(_overview_segment(s) for s in seg["top"])
-        lines.append(indent + f"по разрезам ({seg.get('label')}): {seg_str}")
+    if seg and (seg.get("worst") or seg.get("best")):
+        worst = seg.get("worst") or []
+        worst_els = {s.get("element") for s in worst}
+        best = [s for s in (seg.get("best") or []) if s.get("element") not in worst_els]
+        parts = []
+        if worst:
+            parts.append("худшие: " + "; ".join(_overview_segment(s) for s in worst))
+        if best:
+            parts.append("лучшие: " + "; ".join(_overview_segment(s) for s in best))
+        if parts:
+            lines.append(indent + f"по разрезам ({seg.get('label')}) — " + "; ".join(parts))
     mover = node.get("biggest_mover")
     if mover:
         lines.append(indent + "больше всего изменилось: " + _overview_driver(mover))
@@ -439,6 +447,39 @@ def _render_overview(o: dict[str, Any]) -> str:
         "«больше всего изменилось» и динамика — отдельные сигналы. Это ориентир, не "
         "доказанная причинность. Зоны и направление — по готовым вердиктам.)"
     )
+    return "\n".join(lines)
+
+
+def _rank_elem_cell(e: dict[str, Any]) -> str:
+    s = f"{e.get('element')} {_fmt_num(e.get('fact'), _unit(e.get('measure_type')))}"
+    ch = e.get("pop_change_pct")
+    return s + (f" (Δ {_fmt_num(ch)}%)" if ch is not None else "")
+
+
+def _render_rank_elements(r: dict[str, Any]) -> str:
+    """Лучшие/худшие разрезы метрики по значению (направление-зависимо)."""
+    if r.get("error"):
+        return _render_error(r)
+    best = r.get("best") or []
+    worst = r.get("worst") or []
+    dir_hint = "ниже=лучше" if r.get("metric_type") == "обратная" else "выше=лучше"
+    head = (
+        f"Разрезы метрики «{r.get('metric')}» по значению ({dir_hint}), "
+        f"сотрудник {r.get('person_fio') or '—'}, период {r.get('date')}"
+    )
+    if not best and not worst:
+        return head + ". " + (r.get("note") or "Разрезов нет.")
+    count = r.get("count") or 0
+    top = r.get("top") or len(best)
+    lines = [head + f" (всего разрезов: {count}):"]
+    if count <= top:  # мало разрезов — один список
+        lines.append("по значению (лучшие→худшие): " + "; ".join(_rank_elem_cell(e) for e in best))
+    else:
+        worst_els = {e.get("element") for e in worst}
+        best_shown = [e for e in best if e.get("element") not in worst_els]
+        lines.append("Худшие: " + "; ".join(_rank_elem_cell(e) for e in worst))
+        if best_shown:
+            lines.append("Лучшие: " + "; ".join(_rank_elem_cell(e) for e in best_shown))
     return "\n".join(lines)
 
 
@@ -710,6 +751,28 @@ def build_tools(
             analytics.build_situation_overview(store, person=person, date=date),
         )
 
+    def rank_elements(
+        metric: str, person: str | None = None, date: str | None = None
+    ) -> str:
+        """Лучшие и худшие разрезы (element/продукты) метрики, сравнённые МЕЖДУ
+        СОБОЙ по фактическому значению с учётом направления (прямая: выше=лучше,
+        обратная: ниже=лучше). План и бенчмарк НЕ используются — только сравнение
+        разрезов одной метрики у одного сотрудника между собой. Используй для
+        вопросов «какие продукты/разрезы лучшие/худшие по метрике X», и ОСОБЕННО
+        когда у метрики НЕТ плана (тогда find_flags(below_plan) её разрезы не
+        ловит, а бенчмарк может быть неуместен). person — ФИО/табельный (по
+        умолчанию сотрудник набора); date — YYYY-MM-DD (по умолчанию последний)."""
+        metric = _blank_to_none(metric)
+        person = _blank_to_none(person)
+        date = _blank_to_none(date)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rank_elements,
+            analytics.rank_elements(store, metric, person=person, date=date),
+        )
+
     def related_metrics(metric: str) -> str:
         """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий/описаний, не
         из значений). Возвращает рёбра с relation ('опережающая→запаздывающая'/
@@ -740,6 +803,7 @@ def build_tools(
         (find_flags, "find_flags"),
         (analytics_summary, "analytics_summary"),
         (situation_overview, "situation_overview"),
+        (rank_elements, "rank_elements"),
         (related_metrics, "related_metrics"),
     ]
 

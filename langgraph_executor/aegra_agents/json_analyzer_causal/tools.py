@@ -399,6 +399,39 @@ def _render_summary(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _rank_elem_cell(e: dict[str, Any]) -> str:
+    s = f"{e.get('element')} {_fmt_num(e.get('fact'), _unit(e.get('measure_type')))}"
+    ch = e.get("pop_change_pct")
+    return s + (f" (Δ {_fmt_num(ch)}%)" if ch is not None else "")
+
+
+def _render_rank_elements(r: dict[str, Any]) -> str:
+    """Лучшие/худшие разрезы метрики по значению (направление-зависимо)."""
+    if r.get("error"):
+        return _render_error(r)
+    best = r.get("best") or []
+    worst = r.get("worst") or []
+    dir_hint = "ниже=лучше" if r.get("metric_type") == "обратная" else "выше=лучше"
+    head = (
+        f"Разрезы метрики «{r.get('metric')}» по значению ({dir_hint}), "
+        f"сотрудник {r.get('person_fio') or '—'}, период {r.get('date')}"
+    )
+    if not best and not worst:
+        return head + ". " + (r.get("note") or "Разрезов нет.")
+    count = r.get("count") or 0
+    top = r.get("top") or len(best)
+    lines = [head + f" (всего разрезов: {count}):"]
+    if count <= top:
+        lines.append("по значению (лучшие→худшие): " + "; ".join(_rank_elem_cell(e) for e in best))
+    else:
+        worst_els = {e.get("element") for e in worst}
+        best_shown = [e for e in best if e.get("element") not in worst_els]
+        lines.append("Худшие: " + "; ".join(_rank_elem_cell(e) for e in worst))
+        if best_shown:
+            lines.append("Лучшие: " + "; ".join(_rank_elem_cell(e) for e in best_shown))
+    return "\n".join(lines)
+
+
 def _safe(render: Any, result: Any) -> str:
     """Рендер с безопасным fallback на JSON при любой ошибке/пустом выводе."""
     try:
@@ -649,6 +682,26 @@ def build_tools(
         метрикам на последнем периоде, топ аномалий, счётчики трендов."""
         return _safe(_render_summary, analytics.build_summary(store))
 
+    def rank_elements(
+        metric: str, person: str | None = None, date: str | None = None
+    ) -> str:
+        """Лучшие и худшие разрезы (element/продукты) метрики, сравнённые МЕЖДУ
+        СОБОЙ по фактическому значению с учётом направления (прямая: выше=лучше,
+        обратная: ниже=лучше). План и бенчмарк НЕ используются. Используй для
+        «какие продукты/разрезы лучшие/худшие по метрике X», особенно когда у
+        метрики НЕТ плана. person — ФИО/табельный (по умолчанию сотрудник набора);
+        date — YYYY-MM-DD (по умолчанию последний)."""
+        metric = _blank_to_none(metric)
+        person = _blank_to_none(person)
+        date = _blank_to_none(date)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rank_elements,
+            analytics.rank_elements(store, metric, person=person, date=date),
+        )
+
     def related_metrics(metric: str) -> str:
         """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий/описаний, не
         из значений). Возвращает рёбра с relation ('опережающая→запаздывающая'/
@@ -734,6 +787,7 @@ def build_tools(
         (list_people, "list_people"),
         (find_flags, "find_flags"),
         (analytics_summary, "analytics_summary"),
+        (rank_elements, "rank_elements"),
         (related_metrics, "related_metrics"),
         (attribute_change, "attribute_change"),
         (attribute_anomaly, "attribute_anomaly"),

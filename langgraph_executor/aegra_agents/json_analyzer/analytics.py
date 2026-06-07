@@ -493,9 +493,10 @@ def _rank_drivers(
 
 
 def _top_segments(segments: list[dict[str, Any]]) -> dict[str, Any]:
-    """Топ-K разрезов (продуктов/тематик) узла. Разрезы группируются по имени
+    """Худшие/лучшие разрезы (продуктов/тематик) узла. Разрезы группируются по имени
     дочерней метрики (напр. «Влияние тематик на Talk&Hold»); берём группу с
-    наибольшим суммарным |сигналом| и её топ-K по |сигналу|."""
+    наибольшим суммарным |сигналом|, а ВНУТРИ неё ранжируем по факту с учётом
+    направления (а не по изменению) — чтобы всплывал худший/лучший по ЗНАЧЕНИЮ."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for s in segments:
         groups[s.get("metric_name")].append(s)
@@ -503,22 +504,23 @@ def _top_segments(segments: list[dict[str, Any]]) -> dict[str, Any]:
         groups.items(),
         key=lambda kv: sum(_overview_signal(i) for i in kv[1]),
     )
-    items = sorted(items, key=_overview_signal, reverse=True)[:_OVERVIEW_TOP_SEGMENTS]
-    return {
-        "label": label,
-        "top": [
-            {
-                "element": i.get("element"),
-                "fact": i.get("fact"),
-                "measure_type": i.get("measure_type"),
-                "plan_status": i.get("plan_status"),
-                "plan_dev_pct": i.get("plan_dev_pct"),
-                "pop_status": i.get("pop_status"),
-                "pop_change_pct": i.get("pop_change_pct"),
-            }
-            for i in items
-        ],
-    }
+    valued = [i for i in items if i.get("fact") is not None]
+    if not valued:
+        return {"label": label, "worst": [], "best": []}
+    higher_is_better = valued[0].get("metric_type") != "обратная"
+    valued.sort(key=lambda i: i["fact"], reverse=higher_is_better)  # лучшее первым
+
+    def _seg(i: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "element": i.get("element"),
+            "fact": i.get("fact"),
+            "measure_type": i.get("measure_type"),
+            "pop_change_pct": i.get("pop_change_pct"),
+        }
+
+    worst = [_seg(i) for i in reversed(valued[-_OVERVIEW_TOP_SEGMENTS:])]
+    best = [_seg(i) for i in valued[:_OVERVIEW_TOP_SEGMENTS]]
+    return {"label": label, "worst": worst, "best": best}
 
 
 def _node_header(row: dict[str, Any]) -> dict[str, Any]:
@@ -698,4 +700,85 @@ def build_situation_overview(
         "problems": problems,
         "positives": positives,
         "stable": stable,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Лучшие/худшие разрезы (element) метрики, сравнённые МЕЖДУ СОБОЙ по факту с учётом
+# направления (metric_type). Нужно для метрик без плана (план/бенчмарк не задают
+# «хорошо/плохо», а сравнение сотрудника с коллегами недоступно при одном человеке):
+# тогда единственный осмысленный ориентир — какой разрез лучше/хуже ОСТАЛЬНЫХ
+# разрезов той же метрики у этого сотрудника.
+# --------------------------------------------------------------------------- #
+_RANK_ELEMENTS_TOP = 5
+
+
+def rank_elements(
+    store: SqliteStore,
+    metric: str,
+    person: Any | None = None,
+    date: str | None = None,
+    top: int = _RANK_ELEMENTS_TOP,
+) -> dict[str, Any]:
+    """Ранжирует element-строки метрики одного человека за период по факту с учётом
+    направления (прямая: выше=лучше, обратная: ниже=лучше). Возвращает ranked-список
+    (лучшее→худшее). План/бенчмарк не используются."""
+    mt = store.metric_type_of(metric)
+    if mt is None:
+        return {"error": f"Метрика '{metric}' не найдена."}
+    pkey, fio = _focus_person(store, person)
+    if pkey is None:
+        return {"error": "В датасете нет людей."}
+    cur_date, _prev = _overview_dates(store, date)
+    if cur_date is None:
+        return {"error": "В датасете нет дат."}
+
+    rows = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT m.element, m.fact, m.measure_type, a.plan_status, a.pop_change_pct "
+            "FROM metrics m LEFT JOIN metric_analytics a "
+            "ON a.metric_uid = m.metric_uid "
+            "WHERE m.metric_name = ? AND m.element IS NOT NULL "
+            "AND m.person_key = ? AND m.date = ? AND m.fact IS NOT NULL",
+            (metric, pkey, cur_date),
+        )
+    ]
+    if not rows:
+        return {
+            "metric": metric,
+            "metric_type": mt,
+            "date": cur_date,
+            "person_fio": fio,
+            "count": 0,
+            "best": [],
+            "worst": [],
+            "top": top,
+            "note": "у метрики нет разрезов (element) с данными на этот период.",
+        }
+
+    higher_is_better = mt != "обратная"
+    rows.sort(key=lambda r: r["fact"], reverse=higher_is_better)  # лучшее первым
+
+    def _view(r: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "element": r["element"],
+            "fact": r["fact"],
+            "measure_type": r.get("measure_type"),
+            "pop_change_pct": r.get("pop_change_pct"),
+            "plan_status": r.get("plan_status"),
+        }
+
+    best = [_view(r) for r in rows[:top]]              # лучшие (голова)
+    worst = [_view(r) for r in reversed(rows[-top:])]  # худшие (хвост), худший первым
+    return {
+        "metric": metric,
+        "metric_type": mt,
+        "measure_type": rows[0].get("measure_type"),
+        "date": cur_date,
+        "person_fio": fio,
+        "count": len(rows),
+        "best": best,
+        "worst": worst,
+        "top": top,
     }
