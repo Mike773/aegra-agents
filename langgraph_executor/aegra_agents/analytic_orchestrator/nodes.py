@@ -11,7 +11,9 @@ from langchain_gigachat import GigaChat
 from sqlalchemy import select
 
 from ..easyrag.db import session_scope
+from ..easyrag.gap import record_gap
 from ..easyrag.models import WikiPage
+from ..gap_resolver.judge import answer_in_sources
 from ..json_analyzer.loader import load_dataset_obj
 from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
@@ -388,6 +390,24 @@ def make_call_json_analyzer_node(json_analyzer_graph: Any):
     return call_json_analyzer
 
 
+async def _record_unanswered_gap(
+    direction_key: str, question: str, query_vec: list[float] | None
+) -> None:
+    """Зафиксировать gap: сниппеты были, но судья счёл, что ответа в них нет.
+
+    Пустую выборку фиксирует сам easyrag-подграф (maybe_record_gap), поэтому сюда
+    попадает только случай «нашли, но не отвечает» — иначе задвоили бы gap.
+    """
+    async with session_scope() as session:
+        await record_gap(
+            session,
+            direction_key=direction_key,
+            question=question,
+            embedding=query_vec or None,
+            resolved_section_ids=(),
+        )
+
+
 def make_call_easyrag_node(easyrag_graph: Any):
     """Обёртка, дёргающая easyrag-подграф под последний вопрос пользователя.
 
@@ -419,6 +439,21 @@ def make_call_easyrag_node(easyrag_graph: Any):
                 "top_k": top_k,
             })
             snippets = result.get("snippets") or []
+            # Сниппеты есть, но отвечают ли они на вопрос — решает LLM-судья. Если
+            # нет — фиксируем gap (пустую выборку easyrag уже записал сам, поэтому
+            # тут только случай «нашли, но не отвечает»). Side-эффект: запись gap
+            # никогда не должна влиять на ответ пользователю.
+            if snippets and cfg.get("gap_on_unanswered") is not False:
+                try:
+                    verdict = await answer_in_sources(
+                        last_text, [s.get("body_md") or "" for s in snippets]
+                    )
+                    if verdict.found is False:
+                        await _record_unanswered_gap(
+                            direction_key, last_text, result.get("query_vec")
+                        )
+                except Exception:  # noqa: BLE001 — запись gap не влияет на ответ
+                    pass
             # Контента нет — но, возможно, сущность уже заведена как пустая
             # заглушка. Найдём релевантные заглушки, чтобы респондер сказал об этом.
             stub_pages = (
