@@ -88,12 +88,14 @@ class OrchestratorOutput(TypedDict, total=False):
     analytics_answer: str | None
     analytics_error: str | None
 
-    # Поручения по проблемным зонам сотрудника.
+    # Поручения сотруднику в формате инсайтов сервиса: каждый элемент —
+    # {type, metric_id, metric_name, text}, type ∈
+    # {main_problem, problem, norm, achievement} (см. _parse_insights_json).
     # candidate_assignments — последняя извлечённая «корзина» кандидатов.
     # pending_assignments — кандидаты, по которым прямо сейчас ждём выбор пользователя.
     # Пока pending не пуст, роутер форсит intent="assignments_select".
     # selected_assignments — выбранное к фиксации в текущей итерации.
-    # last_committed_assignments — что реально ушло в mock-сервис в прошлый раз.
+    # last_committed_assignments — что реально ушло в сервис поручений в прошлый раз.
     candidate_assignments: list[dict]
     pending_assignments: list[dict]
     selected_assignments: list[dict]

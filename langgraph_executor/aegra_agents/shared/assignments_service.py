@@ -9,30 +9,31 @@ from typing import Any
 
 
 class SendAssignmentsComponent:
-    """Отправка списка поручений в сервис управления задачами.
+    """Отправка списка поручений (insights) в сервис управления задачами.
 
     Args:
-        boss_tabnum:     Табельный номер руководителя (автор поручения).
         employee_tabnum: Табельный номер сотрудника-исполнителя.
-        assignments:     Список поручений; каждое — dict с ключами
-                         ``title`` / ``problem`` / ``action``.
+        direction_key:   Ключ направления сотрудника.
+        insights:        Список наблюдений; каждое — dict с ключами
+                         ``type`` / ``metric_id`` / ``metric_name`` / ``text``.
+                         ``type`` ∈ {main_problem, problem, norm, achievement}.
     """
 
     def __init__(
         self,
-        boss_tabnum: str,
         employee_tabnum: str,
-        assignments: list[dict[str, Any]],
+        direction_key: str,
+        insights: list[dict[str, Any]],
     ) -> None:
-        self.boss_tabnum = boss_tabnum
         self.employee_tabnum = employee_tabnum
-        self.assignments = assignments
+        self.direction_key = direction_key
+        self.insights = insights
 
     def submit(self) -> dict[str, Any]:
         return {
-            "boss_tabnum": self.boss_tabnum,
             "employee_tabnum": self.employee_tabnum,
-            "assignments": self.assignments,
-            "accepted": len(self.assignments),
+            "direction_key": self.direction_key,
+            "insights": self.insights,
+            "accepted": len(self.insights),
             "_stub": True,
         }

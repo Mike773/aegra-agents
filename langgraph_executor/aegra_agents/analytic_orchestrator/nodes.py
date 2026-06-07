@@ -20,8 +20,7 @@ from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
-    ASSIGNMENTS_ANALYSIS_QUESTION,
-    EXTRACT_ASSIGNMENTS_PROMPT,
+    CLASSIFY_INSIGHTS_PROMPT,
     INITIAL_ANALYSIS_PROMPT,
     INITIAL_OFFER_HINT,
     LOAD_ERROR_PROMPT,
@@ -44,6 +43,15 @@ _DEFAULT_WIKI_MAX_QUERIES = 3
 _WIKI_METRIC_SPECS_CAP = 30
 _WIKI_METRIC_DESC_PREVIEW = 200
 _MAX_CANDIDATES = 5
+# Классификация метрик в инсайты для сервиса поручений.
+_MAX_INSIGHTS = 12
+_INSIGHT_TYPES = ("main_problem", "problem", "norm", "achievement")
+_INSIGHT_TYPE_LABELS = {
+    "main_problem": "Главная проблема",
+    "problem": "Проблема",
+    "norm": "Норма",
+    "achievement": "Достижение",
+}
 # Порог нечёткого совпадения слова запроса с заголовком заглушки.
 # Ловит склонённые формы: «бабушку» ↔ «бабушка».
 _STUB_MATCH_RATIO = 0.72
@@ -723,18 +731,17 @@ def _name_matches_query(names: list[str], q_words: set[str]) -> bool:
     return False
 
 
-def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
-    """Извлекает кандидатов-поручения из анализа проблемных зон сотрудника.
+def make_extract_assignments_node(llm: GigaChat):
+    """Классифицирует обсуждённые в диалоге метрики в инсайты-поручения.
 
-    Запускается автоматически после ``initial_analysis`` и повторно — когда
-    роутер ловит явный intent ``assignments``. Источник анализа — подграф
-    ``json_analyzer``, который видит ПОЛНЫЙ датасет через инструменты (SQLite +
-    pgvector), а не обрезанный под ``_METRICS_PREVIEW_LIMIT`` JSON. Анализ затем
-    структурируется вторым LLM-вызовом в JSON-поручения.
+    Запускается, когда роутер ловит явный intent ``assignments`` («оформи
+    поручения»). Источник фактов — НАКОПЛЕННЫЕ ответы агента в диалоге (а не
+    свежий прогон анализа): классифицируем то, что реально обсуждалось. Каждой
+    метрике сопоставляем ``metric_id``/``metric_name`` из каталога датасета
+    (внешний сервис ждёт именно их). На выход — список инсайтов формата
+    ``{type, metric_id, metric_name, text}``.
 
-    Фоллбэк: если json_analyzer недоступен (нет ``direction_key``, упал или
-    вернул пусто) — деградируем на прежний путь по обрезанному JSON, чтобы не
-    терять функциональность. Пустой список кандидатов — нормальный исход.
+    Пустой список — нормальный исход (нечего классифицировать).
     """
 
     async def extract(state: OrchestratorState, config: RunnableConfig) -> dict:
@@ -749,40 +756,46 @@ def make_extract_assignments_node(llm: GigaChat, json_analyzer_graph: Any):
                 }]),
             }
 
-        direction_key = (state.get("direction_key") or "").strip()
-        analysis, tool_steps, _err = await _run_analyzer(
-            json_analyzer_graph, metrics, ASSIGNMENTS_ANALYSIS_QUESTION, direction_key
-        )
-        if analysis:
-            context = f"Анализ проблемных зон сотрудника:\n{analysis}"
-        else:
-            # Фоллбэк на сырой (обрезанный) JSON + предыдущий анализ.
-            context = _metrics_payload(metrics)
-            last_ai = _last_ai_text(state)
-            if last_ai:
-                context = f"{context}\n\nПредыдущий анализ:\n{last_ai}"
+        catalog = _collect_metric_catalog(metrics)
+        answers = _gather_agent_answers(state) or (state.get("metrics_summary") or "").strip()
+        if not answers:
+            return {
+                "candidate_assignments": [],
+                "pending_assignments": [],
+                "reasoning_trace": _append_trace(state, [{
+                    "stage": "assignments", "kind": "decision",
+                    "summary": "В диалоге ещё нет разбора метрик — нечего классифицировать.",
+                }]),
+                **_step_update(config, "🔎 Пока нет разбора метрик для поручений."),
+            }
 
+        context = (
+            f"Каталог метрик (id — название):\n{_format_metric_catalog(catalog)}\n\n"
+            f"Ответы агента в диалоге:\n{answers}"
+        )
         try:
             ai = llm.invoke([
-                SystemMessage(content=EXTRACT_ASSIGNMENTS_PROMPT),
+                SystemMessage(content=CLASSIFY_INSIGHTS_PROMPT),
                 HumanMessage(content=context),
             ])
-            candidates = _parse_assignments_json(ai.content)
+            insights = _parse_insights_json(ai.content, catalog)
         except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
-            candidates = []
+            insights = []
 
-        steps = _analyzer_trace_steps(tool_steps)
-        steps.append({
+        steps: list[TraceStep] = [{
             "stage": "assignments", "kind": "decision",
-            "summary": f"Проанализировал проблемные зоны, выделил кандидатов: {len(candidates)}.",
-            "detail": {"candidates": [c.get("title") for c in candidates]},
-        })
+            "summary": f"Классифицировал обсуждённые метрики в инсайты: {len(insights)}.",
+            "detail": {"insights": [
+                {"type": i.get("type"), "metric_name": i.get("metric_name")}
+                for i in insights
+            ]},
+        }]
         return {
-            "candidate_assignments": candidates,
-            "pending_assignments": candidates,
+            "candidate_assignments": insights,
+            "pending_assignments": insights,
             "reasoning_trace": _append_trace(state, steps),
             **_step_update(
-                config, f"🔎 Выделил проблемные зоны, кандидатов: {len(candidates)}."
+                config, f"🔎 Выделил инсайтов по метрикам: {len(insights)}."
             ),
         }
 
@@ -804,15 +817,14 @@ def make_propose_assignments_node():
                 "pending_assignments": [],
             }
 
-        lines = ["Выделил кандидатов на поручения сотруднику:"]
+        lines = ["Выделил наблюдения по метрикам сотрудника:"]
         for i, p in enumerate(pending, 1):
-            lines.append(f"{i}. {p.get('title', '').strip() or '(без названия)'}")
-            problem = (p.get("problem") or "").strip()
-            if problem:
-                lines.append(f"   Проблема: {problem}")
-            action = (p.get("action") or "").strip()
-            if action:
-                lines.append(f"   Действие: {action}")
+            label = _INSIGHT_TYPE_LABELS.get(p.get("type"), p.get("type") or "")
+            name = (p.get("metric_name") or "").strip() or "(метрика не указана)"
+            lines.append(f"{i}. [{label}] {name}")
+            text = (p.get("text") or "").strip()
+            if text:
+                lines.append(f"   {text}")
         lines.append("")
         lines.append(
             "Какие зафиксировать? Напишите номера через запятую "
@@ -837,7 +849,7 @@ def make_select_assignments_node(llm: GigaChat):
             return {"selected_assignments": []}
 
         listing = "\n".join(
-            f"{i}. {p.get('title', '').strip() or '(без названия)'}"
+            f"{i}. {(p.get('metric_name') or '').strip() or '(метрика не указана)'}"
             for i, p in enumerate(pending, 1)
         )
         try:
@@ -875,8 +887,8 @@ def make_commit_assignments_node():
 
     def commit(state: OrchestratorState, config: RunnableConfig) -> dict:
         selected = state.get("selected_assignments") or []
-        boss = (state.get("boss_tabnum") or "").strip()
         employee = (state.get("employee_tabnum") or "").strip()
+        direction_key = (state.get("direction_key") or "").strip()
 
         if not selected:
             new_trace = _append_trace(state, [{
@@ -895,9 +907,9 @@ def make_commit_assignments_node():
 
         try:
             component = SendAssignmentsComponent(
-                boss_tabnum=boss,
                 employee_tabnum=employee,
-                assignments=selected,
+                direction_key=direction_key,
+                insights=selected,
             )
             component.submit()
             committed = selected
@@ -912,15 +924,17 @@ def make_commit_assignments_node():
                                "summary": f"Ошибка отправки поручений: {err}"}
         else:
             lines = [
-                f"Зафиксировал {len(committed)} поручение(й) "
-                f"для сотрудника {employee} (от руководителя {boss}):"
+                f"Отправил {len(committed)} наблюдение(й) "
+                f"по сотруднику {employee}:"
             ]
             for s in committed:
-                lines.append(f"- {s.get('title', '').strip() or '(без названия)'}")
+                label = _INSIGHT_TYPE_LABELS.get(s.get("type"), s.get("type") or "")
+                name = (s.get("metric_name") or "").strip() or "(метрика не указана)"
+                lines.append(f"- [{label}] {name}")
             text = "\n".join(lines)
             step = {"stage": "assignments", "kind": "decision",
-                    "summary": f"Отправил {len(committed)} поручение(й) в сервис.",
-                    "detail": {"committed": [s.get("title") for s in committed]}}
+                    "summary": f"Отправил {len(committed)} инсайт(ов) в сервис поручений.",
+                    "detail": {"committed": [s.get("metric_name") for s in committed]}}
 
         new_trace = _append_trace(state, [step])
         return {
@@ -1324,23 +1338,115 @@ def _load_json(text: Any) -> Any:
         return None
 
 
-def _parse_assignments_json(text: Any) -> list[dict]:
+def _collect_metric_catalog(metrics: Any) -> list[dict]:
+    """Плоский каталог метрик ``[{id, metric_name}]`` из дерева датасета.
+
+    Рекурсивно обходит ``employees[].metrics[].child_metrics[]``. Дедуп по ``id``
+    (одна метрика повторяется в разрезах по ``element`` — id и имя у них общие).
+    """
+    catalog: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(items: Any) -> None:
+        for m in items or []:
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id") or "").strip()
+            name = str(m.get("metric_name") or "").strip()
+            if mid and mid not in seen:
+                seen.add(mid)
+                catalog.append({"id": mid, "metric_name": name})
+            walk(m.get("child_metrics"))
+
+    if isinstance(metrics, dict):
+        for emp in metrics.get("employees") or []:
+            if isinstance(emp, dict):
+                walk(emp.get("metrics"))
+    return catalog
+
+
+def _format_metric_catalog(catalog: list[dict]) -> str:
+    """Каталог метрик в человекочитаемые строки ``id — название`` для промпта."""
+    return "\n".join(
+        f"{c['id']} — {c['metric_name']}" for c in catalog if c.get("id")
+    ) or "(каталог пуст)"
+
+
+def _gather_agent_answers(state: OrchestratorState) -> str:
+    """Накопленные ИТОГОВЫЕ ответы агента в диалоге (без шагов и трассы).
+
+    Источник фактов для классификации инсайтов: классифицируем то, что реально
+    обсуждалось. Шаговые сообщения (_STEP_KEY) и раздел трассы отбрасываем.
+    """
+    answers: list[str] = []
+    for m in state.get("messages") or []:
+        if isinstance(m, AIMessage) and not _is_step(m):
+            txt = _strip_trace_section(_plain_text(m)).strip()
+            if txt:
+                answers.append(txt)
+    return "\n\n".join(answers)
+
+
+def _enforce_single_main_problem(insights: list[dict]) -> list[dict]:
+    """Гарантирует СТРОГО ОДНУ ``main_problem``: лишние понижаем до ``problem``."""
+    seen_main = False
+    for ins in insights:
+        if ins.get("type") == "main_problem":
+            if seen_main:
+                ins["type"] = "problem"
+            else:
+                seen_main = True
+    return insights
+
+
+def _parse_insights_json(text: Any, catalog: list[dict]) -> list[dict]:
+    """Парсит ответ классификатора в список инсайтов ``{type, metric_id, metric_name, text}``.
+
+    Принимает как ``{"insights": [...]}``, так и голый массив. Сверяет
+    ``metric_id``/``metric_name`` с каталогом (восстанавливает недостающее по
+    парному полю), нормализует ``type`` и число ``main_problem``.
+    """
     data = _load_json(text)
-    if not isinstance(data, list):
+    if isinstance(data, dict):
+        items = data.get("insights")
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = None
+    if not isinstance(items, list):
         return []
+
+    name_by_id = {c["id"]: c["metric_name"] for c in catalog}
+    id_by_name = {
+        c["metric_name"].casefold(): c["id"] for c in catalog if c.get("metric_name")
+    }
+
     result: list[dict] = []
-    for item in data[:_MAX_CANDIDATES]:
+    for item in items:
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or "").strip()
-        if not title:
+        text_val = str(item.get("text") or "").strip()
+        if not text_val:
             continue
+        itype = str(item.get("type") or "").strip()
+        if itype not in _INSIGHT_TYPES:
+            itype = "problem"
+        mid = str(item.get("metric_id") or "").strip()
+        name = str(item.get("metric_name") or "").strip()
+        # Сверяем с каталогом: восстанавливаем имя по id или id по имени.
+        if mid and mid in name_by_id:
+            name = name_by_id[mid] or name
+        elif name and name.casefold() in id_by_name:
+            mid = id_by_name[name.casefold()]
         result.append({
-            "title": title,
-            "problem": str(item.get("problem") or "").strip(),
-            "action": str(item.get("action") or "").strip(),
+            "type": itype,
+            "metric_id": mid,
+            "metric_name": name,
+            "text": text_val,
         })
-    return result
+        if len(result) >= _MAX_INSIGHTS:
+            break
+    return _enforce_single_main_problem(result)
 
 
 def _parse_indices_json(text: Any, max_n: int) -> list[int]:

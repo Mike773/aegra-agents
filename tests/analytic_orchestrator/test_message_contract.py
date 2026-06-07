@@ -158,21 +158,24 @@ def test_ground_wiki_no_step_when_progress_disabled():
 
 def test_extract_assignments_step_then_propose_final_last():
     # extract кладёт шаг (без итога), propose — итог. Итог помечен final.
-    llm = FakeLLM('[{"title": "Поднять CSAT", "problem": "p", "action": "a"}]')
-    extract = make_extract_assignments_node(llm, _analyzer_stub())
-    ex_out = asyncio.run(extract(_state(), _cfg()))
+    llm = FakeLLM(
+        '{"insights": [{"type": "problem", "metric_id": "1", '
+        '"metric_name": "CSAT", "text": "CSAT ниже плана"}]}'
+    )
+    # Источник фактов — ответ агента в диалоге: добавляем его в state.
+    state = _state(messages=[
+        HumanMessage(content="Что с метриками?"),
+        AIMessage(content="CSAT = 70%, ниже плана."),
+        HumanMessage(content="оформи поручения"),
+    ], metrics=_metrics("CSAT"))
+    extract = make_extract_assignments_node(llm)
+    ex_out = asyncio.run(extract(state, _cfg()))
     ex_msgs = ex_out.get("messages") or []
     assert len(ex_msgs) == 1 and _is_step(ex_msgs[0])
+    assert ex_out["pending_assignments"][0]["metric_name"] == "CSAT"
 
     propose = make_propose_assignments_node()
     pr_out = propose({"pending_assignments": ex_out["pending_assignments"]})
     final = pr_out["messages"][0]
     assert final.additional_kwargs.get(_FINAL_KEY) is True
     assert not _is_step(final)
-
-
-def _analyzer_stub():
-    class _Stub:
-        async def ainvoke(self, payload):
-            return {"answer": "анализ", "tool_steps": []}
-    return _Stub()
