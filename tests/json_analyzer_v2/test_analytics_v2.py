@@ -17,6 +17,7 @@ def _store():
     data = {"me": {"fio": "Босс", "metrics": []}, "employees": [{"fio": "Иванов", "metrics": [
         _m("СПланом", 20, 18, 16, "2026-05-04"), _m("СПланом", 12, 18, 16, "2026-05-11"),
         _m("БезПлана", 5, None, 3, "2026-05-04"), _m("БезПлана", 9, None, 3, "2026-05-11"),
+        _m("ПланНоль", 5, 0, 3, "2026-05-04"), _m("ПланНоль", 9, 0, 3, "2026-05-11"),
     ]}]}
     store = SqliteStore()
     store.load(load_dataset_obj(data))
@@ -27,24 +28,30 @@ def _store():
 def _row(store, name):
     return store.conn.execute(
         "SELECT a.benchmark_status bs, a.benchmark_dev_abs bda, a.benchmark_dev_pct bdp, "
-        "a.pop_change_pct pct, a.pop_change_abs abs, a.pop_status ps "
+        "a.pop_change_pct pct, a.pop_change_abs abs, a.pop_status ps, a.trend_status ts "
         "FROM metrics m JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
         "WHERE m.metric_name = ? AND m.date = '2026-05-11'", (name,)).fetchone()
 
 
 def test_no_benchmark_analytics():
     store = _store()
-    for name in ("СПланом", "БезПлана"):
+    for name in ("СПланом", "БезПлана", "ПланНоль"):
         r = _row(store, name)
         assert r["bs"] is None and r["bda"] is None and r["bdp"] is None
 
 
-def test_pop_only_for_metrics_with_plan():
+def test_pop_and_trend_only_for_metrics_with_real_plan():
     store = _store()
     planned = _row(store, "СПланом")
     assert planned["pct"] == -40.0 and planned["ps"] == "ухудшение"
+    assert planned["ts"] is not None  # тренд тоже есть у метрики с планом
+    # Нет плана → ни pop, ни тренда.
     no_plan = _row(store, "БезПлана")
     assert no_plan["pct"] is None and no_plan["abs"] is None and no_plan["ps"] is None
+    assert no_plan["ts"] is None
+    # План=0 (плейсхолдер) трактуется как «нет плана» → тоже без pop/тренда.
+    zero_plan = _row(store, "ПланНоль")
+    assert zero_plan["pct"] is None and zero_plan["ps"] is None and zero_plan["ts"] is None
 
 
 def test_benchmark_column_absent_in_render():

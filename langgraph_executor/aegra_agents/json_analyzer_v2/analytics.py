@@ -135,6 +135,12 @@ def _round(value: Any) -> Any:
     return round(value, 4) if isinstance(value, float) else value
 
 
+def _has_plan(plan: Any) -> bool:
+    """json_analyzer_v2: «план указан» = задан и НЕнулевой. Нулевой/None план —
+    плейсхолдер (нет реальной цели), временные сравнения по такой метрике не строим."""
+    return plan is not None and plan != 0
+
+
 def compute_analytics(store: SqliteStore) -> int:
     conn = store.conn
     rows = [
@@ -183,16 +189,19 @@ def compute_analytics(store: SqliteStore) -> int:
         series[(r["person_key"], r["metric_name"], r["element"])].append(r)
     for items in series.values():
         items.sort(key=lambda x: x["date"] or "")
+        # json_analyzer_v2: любые сравнения ВО ВРЕМЕНИ (pop — изменение к прошлому
+        # периоду, и trend — тренд по ряду) считаем ТОЛЬКО для метрик с УКАЗАННЫМ
+        # планом. «План указан» = задан и НЕнулевой (0/0.0 — это плейсхолдер, не цель).
+        # Без цели такое сравнение неинформативно и его ошибочно принимают за
+        # «отклонение от нормы».
+        series_has_plan = any(_has_plan(it.get("plan")) for it in items)
         prev: dict | None = None
         for r in items:
-            # json_analyzer_v2: pop-сравнение (изменение к прошлому периоду) считаем
-            # ТОЛЬКО для метрик с указанным планом — иначе изменение неинформативно
-            # (нет цели, относительно которой судить) и часто бессмысленно у знаковых.
             if (
                 prev is not None
                 and r["fact"] is not None
                 and prev["fact"] is not None
-                and r["plan"] is not None
+                and _has_plan(r.get("plan"))
             ):
                 change_abs = r["fact"] - prev["fact"]
                 change_pct = (
@@ -204,7 +213,11 @@ def compute_analytics(store: SqliteStore) -> int:
                     change_pct, r["metric_type"]
                 )
             prev = r
-        trend = _trend([r["fact"] for r in items if r["fact"] is not None])
+        trend = (
+            _trend([r["fact"] for r in items if r["fact"] is not None])
+            if series_has_plan
+            else None
+        )
         for r in items:
             result[r["metric_uid"]]["trend"] = trend
             result[r["metric_uid"]]["trend_status"] = _trend_status(
