@@ -33,7 +33,14 @@ class TraceStep(TypedDict, total=False):
     detail: dict
 
 
-class OrchestratorState(TypedDict, total=False):
+class OrchestratorOutput(TypedDict, total=False):
+    """Публичная (возвращаемая) схема графа — output_schema в build_graph.
+
+    Содержит ВСЕ каналы стейта, КРОМЕ внутренних, которые не нужно отдавать
+    наружу в run/stream (см. OrchestratorState ниже). Новое возвращаемое поле
+    добавляй сюда; внутреннее-невозвращаемое — в OrchestratorState.
+    """
+
     messages: Annotated[list[AnyMessage], add_messages]
 
     boss_tabnum: str
@@ -54,7 +61,6 @@ class OrchestratorState(TypedDict, total=False):
     # трасса копилась бы между ходами).
     reasoning_trace: list[TraceStep]
 
-    metrics: Any
     metrics_error: str | None
     loaded: bool
 
@@ -92,3 +98,18 @@ class OrchestratorState(TypedDict, total=False):
     pending_assignments: list[dict]
     selected_assignments: list[dict]
     last_committed_assignments: list[dict]
+
+
+class OrchestratorState(OrchestratorOutput, total=False):
+    """Полный стейт графа (output-схема + внутренние каналы).
+
+    Узлы типизируются этим типом и работают со всеми полями. Поля, объявленные
+    ЗДЕСЬ (а не в OrchestratorOutput), остаются каналами стейта — чекпойнтятся и
+    живут между ходами, — но НЕ входят в output-схему, поэтому aegra не отдаёт их
+    наружу в run/stream.
+    """
+
+    # Полный JSON-датасет сотрудника. Грузится load_data на ходе 1, переживает
+    # ходы по loaded-гейту, нужен call_json_analyzer/extract_assignments/ground_wiki
+    # как raw_json для json_analyzer. Наружу не отдаётся — большой и не нужен клиенту.
+    metrics: Any

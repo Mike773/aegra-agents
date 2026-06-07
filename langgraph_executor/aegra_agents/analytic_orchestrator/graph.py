@@ -21,11 +21,13 @@ from .nodes import (
     make_select_assignments_node,
     need_load,
 )
-from .state import OrchestratorState
+from .state import OrchestratorOutput, OrchestratorState
 
 
 def build_graph(llm: GigaChat):
-    g = StateGraph(OrchestratorState)
+    # output_schema без metrics: полный датасет остаётся каналом стейта
+    # (чекпойнтится, живёт между ходами), но не отдаётся наружу в run/stream.
+    g = StateGraph(OrchestratorState, output_schema=OrchestratorOutput)
 
     g.add_node("load_data", make_load_data_node())
     g.add_node(

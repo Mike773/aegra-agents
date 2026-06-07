@@ -75,6 +75,15 @@ def test_ground_wiki_analytics_after_json_analyzer():
     assert ("call_json_analyzer", "respond") not in edges
 
 
+def test_metrics_excluded_from_output_channels():
+    # Полный датасет — внутренний канал: остаётся в стейте (чекпойнт, межходовая
+    # передача), но не отдаётся наружу в run/stream через output-схему.
+    g = build_graph(object())
+    assert "metrics" not in g.output_channels      # не возвращается клиенту
+    assert "messages" in g.output_channels         # нужное — остаётся
+    assert "metrics_error" in g.output_channels    # небольшой признак ошибки — остаётся
+
+
 def test_wiki_intent_path_unchanged():
     edges = _edges()
     # Явный wiki-интент остаётся отдельным single-query путём.
