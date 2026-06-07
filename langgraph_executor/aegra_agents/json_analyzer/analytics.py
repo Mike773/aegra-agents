@@ -797,15 +797,18 @@ def rank_elements(
 # знаковых метрик pop_status, выведенный из знака pop_change_pct, инвертируется).
 # --------------------------------------------------------------------------- #
 def _pop_status_from_abs(
-    pop_change_abs: float | None, metric_type: str | None
+    pop_change_abs: float | None,
+    metric_type: str | None,
+    deadzone: float = 0.0,
 ) -> str | None:
     """Вердикт динамики из АБСОЛЮТНОГО изменения (для знаковых/индексных метрик,
-    где относительный % недоступен). Без относительной мёртвой зоны: ноль —
-    'стабильно', иначе по знаку с учётом направления."""
+    где относительный % недоступен). Мёртвая зона задаётся в абсолюте (deadzone):
+    |изменение| ≤ deadzone → 'стабильно', иначе по знаку с учётом направления.
+    deadzone калибруется по масштабу метрики (аналог относительной мёртвой зоны)."""
     better, stable, worse = _DYNAMIC_LABELS
     if pop_change_abs is None:
         return None
-    if pop_change_abs == 0:
+    if abs(pop_change_abs) <= deadzone:
         return stable
     return better if _direction_better(pop_change_abs > 0, metric_type) else worse
 
@@ -813,9 +816,11 @@ def _pop_status_from_abs(
 def apply_metric_kinds(store: SqliteStore, kinds: dict[str, str]) -> int:
     """Применяет виды метрик к посчитанной аналитике. Для метрик вида ≠ 'уровень'
     обнуляет относительные %-поля (pop_change_pct/plan_dev_pct/benchmark_dev_pct) и
-    пересчитывает pop_status из знака pop_change_abs. Виды кладёт в store.metric_kinds
-    (для describe_metric). Пустой ввод — no-op (текущее поведение). Возвращает число
-    затронутых строк."""
+    пересчитывает pop_status из знака pop_change_abs (мёртвая зона — 5% от масштаба
+    метрики max|fact|, аналог относительной зоны). plan_status/benchmark_status уже
+    основаны на знаке абс. отклонения и остаются как есть (в выводе показывается
+    plan_dev_abs). Виды кладёт в store.metric_kinds. Пустой ввод — no-op. Возвращает
+    число затронутых строк."""
     store.metric_kinds = dict(kinds or {})
     non_level = [m for m, k in (kinds or {}).items() if k and k != "уровень"]
     if not non_level:
@@ -823,17 +828,19 @@ def apply_metric_kinds(store: SqliteStore, kinds: dict[str, str]) -> int:
     affected = 0
     for name in non_level:
         rows = store.conn.execute(
-            "SELECT a.metric_uid AS uid, a.pop_change_abs AS abs, m.metric_type AS mt "
-            "FROM metric_analytics a JOIN metrics m ON m.metric_uid = a.metric_uid "
-            "WHERE m.metric_name = ?",
+            "SELECT a.metric_uid AS uid, a.pop_change_abs AS abs, m.metric_type AS mt, "
+            "m.fact AS fact FROM metric_analytics a "
+            "JOIN metrics m ON m.metric_uid = a.metric_uid WHERE m.metric_name = ?",
             (name,),
         ).fetchall()
+        facts = [abs(r["fact"]) for r in rows if r["fact"] is not None]
+        deadzone = (max(facts) * _TREND_TOLERANCE_PCT / 100.0) if facts else 0.0
         for r in rows:
             store.conn.execute(
                 "UPDATE metric_analytics SET pop_change_pct = NULL, "
                 "plan_dev_pct = NULL, benchmark_dev_pct = NULL, pop_status = ? "
                 "WHERE metric_uid = ?",
-                (_pop_status_from_abs(r["abs"], r["mt"]), r["uid"]),
+                (_pop_status_from_abs(r["abs"], r["mt"], deadzone), r["uid"]),
             )
             affected += 1
     store.conn.commit()

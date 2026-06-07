@@ -22,8 +22,8 @@ def _store():
     metrics = []
     for date, va, vb, t in [("2026-05-04", 10, -5, 100), ("2026-05-11", -8, 12, 130)]:
         metrics += [
-            _m("Вклад", "обратная", va, date, element="A"),
-            _m("Вклад", "обратная", vb, date, element="B"),
+            _m("Вклад", "обратная", va, date, element="A", plan=5),
+            _m("Вклад", "обратная", vb, date, element="B", plan=5),
             _m("Время", "обратная", t, date, plan=120),
         ]
     data = {"me": {"fio": "Босс", "metrics": []},
@@ -46,11 +46,13 @@ def _row(store, metric, element):
 
 def test_apply_kinds_nulls_relative_pct_for_contribution():
     store = _store()
-    assert _row(store, "Вклад", "A")["pct"] is not None  # до применения % есть
+    before = _row(store, "Вклад", "A")
+    assert before["pct"] is not None and before["pdp"] is not None  # до: оба % есть
     affected = apply_metric_kinds(store, {"Вклад": "вклад"})
     assert affected == 4  # 2 разреза × 2 даты
     a = _row(store, "Вклад", "A")
-    assert a["pct"] is None and a["abs"] == -18  # % обнулён, абсолют сохранён
+    # оба относительных % обнулены, абсолют сохранён
+    assert a["pct"] is None and a["pdp"] is None and a["abs"] == -18
     # обратная, значение упало (10→-8) → улучшение (вердикт из знака абс., НЕ инвертирован)
     assert a["ps"] == "улучшение"
     b = _row(store, "Вклад", "B")
