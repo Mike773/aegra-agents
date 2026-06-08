@@ -63,7 +63,13 @@ class UsageTracker(BaseCallbackHandler):
 
 
 async def main():
-    from langgraph_executor.aegra_agents.analytic_orchestrator.graph import graph
+    # E2E_ORCHESTRATOR=v2 гоняет бизнес-оркестратор (analytic_orchestrator_v2):
+    # многоуровневый разбор по бизнес-методологии + блок «Что делаем дальше?» +
+    # завершение через post_insights. По умолчанию — прод-оркестратор.
+    if os.environ.get("E2E_ORCHESTRATOR", "").strip().lower() in {"v2", "2", "business"}:
+        from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import graph
+    else:
+        from langgraph_executor.aegra_agents.analytic_orchestrator.graph import graph
 
     briefing = os.environ.get(
         "E2E_BRIEFING",

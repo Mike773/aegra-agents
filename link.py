@@ -8,6 +8,9 @@
 from langgraph_executor.aegra_agents.analytic_orchestrator.graph import (
     graph as analytic_orchestrator_graph,
 )
+from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import (
+    graph as analytic_orchestrator_v2_graph,
+)
 from langgraph_executor.aegra_agents.doc_manager.graph import (
     graph as doc_manager_graph,
 )
@@ -35,6 +38,7 @@ from langgraph_executor.aegra_agents.wiki_ingest.graph import (
 
 __all__ = [
     "analytic_orchestrator_graph",
+    "analytic_orchestrator_v2_graph",
     "doc_manager_graph",
     "easyrag_graph",
     "gap_resolver_graph",
