@@ -24,9 +24,12 @@ from .nodes import (
 from .state import OrchestratorOutput, OrchestratorState
 
 
-def build_graph(llm: GigaChat):
+def build_graph(llm: GigaChat, checkpointer=None):
     # output_schema без metrics: полный датасет остаётся каналом стейта
     # (чекпойнтится, живёт между ходами), но не отдаётся наружу в run/stream.
+    # checkpointer: в проде его подставляет aegra (per-thread); для локального
+    # multi-turn прогона можно передать MemorySaver, иначе состояние между
+    # ходами не сохранится (need_load полагается на персистентный loaded).
     g = StateGraph(OrchestratorState, output_schema=OrchestratorOutput)
 
     g.add_node("load_data", make_load_data_node())
@@ -86,7 +89,7 @@ def build_graph(llm: GigaChat):
     g.add_edge("save_insights", END)
     g.add_edge("respond", END)
 
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)
 
 
 llm = create_gigachat_client().get_llm()
