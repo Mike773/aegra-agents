@@ -964,8 +964,12 @@ def make_save_insights_node():
                 "reasoning_trace": new_trace,
             }
 
+        cfg = (config or {}).get("configurable") or {}
+        # thread_id — id треда aegra из /threads, сервер инжектит его в configurable.
+        thread_id = str(cfg.get("thread_id") or "").strip()
         selected = state.get("candidate_assignments") or []
         employee = (state.get("employee_tabnum") or "").strip()
+        boss = (state.get("boss_tabnum") or "").strip()
         direction_key = (state.get("direction_key") or "").strip()
         if not selected:
             new_trace = _append_trace(state, [{
@@ -981,8 +985,10 @@ def make_save_insights_node():
 
         try:
             component = SendAssignmentsComponent(
+                boss_tabnum=boss,
                 employee_tabnum=employee,
                 direction_key=direction_key,
+                thread_id=thread_id,
                 insights=selected,
             )
             component.submit()
