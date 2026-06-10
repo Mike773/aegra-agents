@@ -39,7 +39,6 @@ from .prompts import (
 from .state import OrchestratorState, TraceStep
 
 _DEFAULT_DATASET = "metrics_for_agent_analyst"
-_METRICS_PREVIEW_LIMIT = 8000
 _DEFAULT_EASYRAG_TOP_K = 5
 _EASYRAG_SNIPPET_PREVIEW = 400
 # Wiki-grounding: сколько запросов к wiki максимум генерит LLM и сколько метрик
@@ -270,9 +269,14 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         if analysis:
             parts.append("Данные по метрикам сотрудника (собраны из полного набора):\n" + analysis)
         else:
-            parts.append(_metrics_payload(metrics))
-            if err:
-                parts.append(f"(Глубокий сбор недоступен: {err} — опирайся на данные выше.)")
+            # Разбора нет (аналитик упал/пусто). Сырой обрезанный JSON в контекст НЕ
+            # отдаём — обрезка даёт неверные числа. Честно говорим «данных нет» и
+            # просим не выдумывать значения.
+            parts.append(
+                "Данных по метрикам сейчас нет: аналитический разбор недоступен. "
+                "Не приводи конкретных числовых значений по памяти; предложи "
+                "уточнить вопрос или повторить запрос — он будет пересчитан аналитиком."
+            )
         parts.append(INITIAL_TASK_HINT)
 
         human = briefing or "Что происходит с показателями сотрудника?"
@@ -1118,14 +1122,6 @@ def _question_with_dialogue_context(state: OrchestratorState, current_q: str) ->
     )
 
 
-def _metrics_payload(metrics: Any) -> str:
-    try:
-        payload = json.dumps(metrics, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        payload = repr(metrics)
-    return f"JSON с метриками сотрудника:\n{payload[:_METRICS_PREVIEW_LIMIT]}"
-
-
 # --- Блок A/B: сквозная трасса рассуждения и режим describe_answer -----------
 
 def _trace(state: OrchestratorState) -> list[TraceStep]:
@@ -1337,10 +1333,9 @@ def _metrics_system_block(state: OrchestratorState) -> str | None:
         return f"Контекст: {state['metrics_error']}"
     if state.get("metrics") is None:
         return None
-    # Разбора нет, но метрики загружены. Раньше тут шёл сырой обрезанный JSON
-    # (_metrics_payload) — отказались: обрезка под _METRICS_PREVIEW_LIMIT на
-    # большом датасете даёт неверные числа. Честно говорим, что разбор недоступен,
-    # и просим не выдумывать значения (запрос пересчитается через analytics-ход).
+    # Разбора нет, но метрики загружены. Сырой обрезанный JSON сюда не отдаём:
+    # обрезка на большом датасете даёт неверные числа. Честно говорим, что разбор
+    # недоступен, и просим не выдумывать значения (пересчитается через analytics-ход).
     return (
         "Метрики сотрудника загружены, но аналитический разбор сейчас недоступен. "
         "Не приводи конкретных числовых значений по памяти; предложи уточнить "
