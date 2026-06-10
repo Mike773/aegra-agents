@@ -8,6 +8,9 @@
 from langgraph_executor.aegra_agents.analytic_orchestrator.graph import (
     graph as analytic_orchestrator_graph,
 )
+from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import (
+    graph as analytic_orchestrator_v2_graph,
+)
 from langgraph_executor.aegra_agents.doc_manager.graph import (
     graph as doc_manager_graph,
 )
@@ -23,6 +26,9 @@ from langgraph_executor.aegra_agents.json_analyzer.graph import (
 from langgraph_executor.aegra_agents.json_analyzer_causal.graph import (
     graph as json_analyzer_causal_graph,
 )
+from langgraph_executor.aegra_agents.json_analyzer_v2.graph import (
+    graph as json_analyzer_v2_graph,
+)
 from langgraph_executor.aegra_agents.kb_chat.graph import (
     graph as kb_chat_graph,
 )
@@ -32,11 +38,13 @@ from langgraph_executor.aegra_agents.wiki_ingest.graph import (
 
 __all__ = [
     "analytic_orchestrator_graph",
+    "analytic_orchestrator_v2_graph",
     "doc_manager_graph",
     "easyrag_graph",
     "gap_resolver_graph",
     "json_analyzer_graph",
     "json_analyzer_causal_graph",
+    "json_analyzer_v2_graph",
     "kb_chat_graph",
     "wiki_ingest_graph",
 ]
