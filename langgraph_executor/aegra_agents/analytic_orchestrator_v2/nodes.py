@@ -280,7 +280,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         parts.append(INITIAL_TASK_HINT)
 
         human = briefing or "Что происходит с показателями сотрудника?"
-        ai = llm.invoke([
+        ai = await asyncio.to_thread(llm.invoke, [
             SystemMessage(content="\n\n".join(parts)),
             HumanMessage(content=human),
         ])
@@ -704,7 +704,8 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
         if not specs:
             return {}
 
-        queries = _generate_wiki_queries(
+        queries = await asyncio.to_thread(
+            _generate_wiki_queries,
             llm, state, specs,
             max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
         )
@@ -893,7 +894,7 @@ def make_form_insights_node(llm: GigaChat):
                 f"Пожелание руководителя по корректировке выводов:\n{correction}"
             )
         try:
-            ai = llm.invoke([
+            ai = await asyncio.to_thread(llm.invoke, [
                 SystemMessage(content=CLASSIFY_INSIGHTS_PROMPT),
                 HumanMessage(content="\n\n".join(ctx_parts)),
             ])
