@@ -175,9 +175,10 @@ def test_service_submit_contract():
     insights = [{"type": "problem", "metric_id": "1",
                  "metric_name": "CSAT", "text": "ниже плана"}]
     out = SendAssignmentsComponent(
-        employee_tabnum="2", direction_key="dir-1", insights=insights,
+        boss_tabnum="999", employee_tabnum="2", direction_key="dir-1",
+        thread_id="thread-1", insights=insights,
     ).submit()
-    assert out["employee_tabnum"] == "2"
-    assert out["direction_key"] == "dir-1"
-    assert out["insights"] == insights
-    assert out["accepted"] == 1
+    assert out["object_id"] == "2"          # employee_tabnum
+    assert out["subject_id"] == "999"       # boss_tabnum
+    assert out["session_id"] == "thread-1"  # thread_id
+    assert out["content"]["insights"] == insights

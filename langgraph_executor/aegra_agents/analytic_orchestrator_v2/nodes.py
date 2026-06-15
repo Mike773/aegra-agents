@@ -295,7 +295,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         parts.append(INITIAL_TASK_HINT)
 
         human = briefing or "Что происходит с показателями сотрудника?"
-        ai = llm.invoke([
+        ai = await asyncio.to_thread(llm.invoke, [
             SystemMessage(content="\n\n".join(parts)),
             HumanMessage(content=human),
         ])
@@ -719,7 +719,8 @@ def make_ground_wiki_node(llm: GigaChat, easyrag_graph: Any):
         if not specs:
             return {}
 
-        queries = _generate_wiki_queries(
+        queries = await asyncio.to_thread(
+            _generate_wiki_queries,
             llm, state, specs,
             max_n=int(cfg.get("wiki_max_queries") or _DEFAULT_WIKI_MAX_QUERIES),
         )
@@ -908,7 +909,7 @@ def make_form_insights_node(llm: GigaChat):
                 f"Пожелание руководителя по корректировке выводов:\n{correction}"
             )
         try:
-            ai = llm.invoke([
+            ai = await asyncio.to_thread(llm.invoke, [
                 SystemMessage(content=CLASSIFY_INSIGHTS_PROMPT),
                 HumanMessage(content="\n\n".join(ctx_parts)),
             ])
@@ -979,8 +980,12 @@ def make_save_insights_node():
                 "reasoning_trace": new_trace,
             }
 
+        cfg = (config or {}).get("configurable") or {}
+        # thread_id — id треда aegra из /threads, сервер инжектит его в configurable.
+        thread_id = str(cfg.get("thread_id") or "").strip()
         selected = state.get("candidate_assignments") or []
         employee = (state.get("employee_tabnum") or "").strip()
+        boss = (state.get("boss_tabnum") or "").strip()
         direction_key = (state.get("direction_key") or "").strip()
         if not selected:
             new_trace = _append_trace(state, [{
@@ -996,8 +1001,10 @@ def make_save_insights_node():
 
         def _submit() -> None:
             SendAssignmentsComponent(
+                boss_tabnum=boss,
                 employee_tabnum=employee,
                 direction_key=direction_key,
+                thread_id=thread_id,
                 insights=selected,
             ).submit()
 

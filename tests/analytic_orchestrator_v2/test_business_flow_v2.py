@@ -175,8 +175,11 @@ def test_save_insights_confirm_submits(monkeypatch):
     captured = {}
 
     class FakeSend:
-        def __init__(self, employee_tabnum, direction_key, insights):
+        def __init__(self, boss_tabnum, employee_tabnum, direction_key,
+                     thread_id, insights):
+            captured["boss"] = boss_tabnum
             captured["employee"] = employee_tabnum
+            captured["thread_id"] = thread_id
             captured["insights"] = insights
 
         def submit(self):
@@ -190,11 +193,15 @@ def test_save_insights_confirm_submits(monkeypatch):
                                    "metric_name": "Производительность", "text": "..."}],
         "pending_confirmation": True,
         "employee_tabnum": "12345",
+        "boss_tabnum": "999",
         "direction_key": "dir-1",
         "messages": [HumanMessage("да")],
     }
-    out = asyncio.run(save(state, {}))
+    out = asyncio.run(save(state, {"configurable": {"thread_id": "thread-abc"}}))
     assert captured.get("submitted") is True
+    assert captured["boss"] == "999"
+    assert captured["employee"] == "12345"
+    assert captured["thread_id"] == "thread-abc"
     assert out["messages"][-1].content == SAVE_DONE_PROMPT
     assert out["pending_confirmation"] is False
     assert out["candidate_assignments"] == []
