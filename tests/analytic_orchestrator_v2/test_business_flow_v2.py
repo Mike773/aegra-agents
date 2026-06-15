@@ -193,7 +193,7 @@ def test_save_insights_confirm_submits(monkeypatch):
         "direction_key": "dir-1",
         "messages": [HumanMessage("да")],
     }
-    out = save(state, {})
+    out = asyncio.run(save(state, {}))
     assert captured.get("submitted") is True
     assert out["messages"][-1].content == SAVE_DONE_PROMPT
     assert out["pending_confirmation"] is False
@@ -219,7 +219,7 @@ def test_save_insights_cancel_does_not_submit(monkeypatch):
         "pending_confirmation": True,
         "messages": [HumanMessage("нет, отмена")],
     }
-    out = save(state, {})
+    out = asyncio.run(save(state, {}))
     assert called["submitted"] is False
     assert out["messages"][-1].content == SAVE_CANCEL_PROMPT
     assert out["pending_confirmation"] is False

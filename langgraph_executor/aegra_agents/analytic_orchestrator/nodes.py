@@ -18,6 +18,7 @@ from ..json_analyzer.loader import load_dataset_obj
 from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
+from ..shared.offload import run_blocking
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
     CLASSIFY_INSIGHTS_PROMPT,
@@ -80,7 +81,7 @@ _EASYRAG_RESET = {
 
 
 def make_load_data_node():
-    def load_data(state: OrchestratorState, config: RunnableConfig) -> dict:
+    async def load_data(state: OrchestratorState, config: RunnableConfig) -> dict:
         cfg = (config or {}).get("configurable") or {}
         boss = (cfg.get("boss_tabnum") or "").strip()
         employee = (cfg.get("employee_tabnum") or "").strip()
@@ -105,22 +106,36 @@ def make_load_data_node():
                 ),
             }
 
-        orgstructure = IsuEmployeeOrgstructureInfo(
-            manager_id=boss,
-            position=position,
-            employee_id=employee,
-        )
-        direction_key = orgstructure.direction_key()
-        try:
-            component = GetBatchAgentDatasetByFiltersComponent(
-                dataset_name=dataset_name,
-                filters=orgstructure.combined_json(),
+        # orgstructure + dataset — СИНХРОННЫЕ внешние HTTP-клиенты. Уводим весь
+        # блокирующий блок в выделенный пул с таймаутом (offload.run_blocking),
+        # чтобы не блокировать event loop и не зависнуть навсегда, если сервис
+        # данных не отвечает. См. shared/offload.py.
+        def _fetch() -> tuple[str, dict | None, str | None]:
+            orgstructure = IsuEmployeeOrgstructureInfo(
+                manager_id=boss,
+                position=position,
+                employee_id=employee,
             )
-            metrics = component.build_json_output()
-            error: str | None = None
-        except Exception as exc:  # noqa: BLE001 — внешний клиент, сужать нечем
-            metrics = None
-            error = f"Ошибка при загрузке датасета {dataset_name!r}: {exc}"
+            dkey = orgstructure.direction_key()
+            try:
+                component = GetBatchAgentDatasetByFiltersComponent(
+                    dataset_name=dataset_name,
+                    filters=orgstructure.combined_json(),
+                )
+                return dkey, component.build_json_output(), None
+            except Exception as exc:  # noqa: BLE001 — внешний клиент, сужать нечем
+                return dkey, None, f"Ошибка при загрузке датасета {dataset_name!r}: {exc}"
+
+        try:
+            direction_key, metrics, error = await run_blocking(_fetch)
+        except asyncio.TimeoutError:
+            direction_key, metrics, error = "", None, (
+                "Сервис данных (оргструктура/датасет) не ответил за отведённое время."
+            )
+        except Exception as exc:  # noqa: BLE001 — сбой оргструктуры до датасета
+            direction_key, metrics, error = "", None, (
+                f"Ошибка внешнего сервиса данных: {type(exc).__name__}: {exc}"[:300]
+            )
 
         return {
             "boss_tabnum": boss,
@@ -890,7 +905,7 @@ def make_commit_assignments_node():
     успех = подтверждение и обновлённый ``last_committed_assignments``.
     """
 
-    def commit(state: OrchestratorState, config: RunnableConfig) -> dict:
+    async def commit(state: OrchestratorState, config: RunnableConfig) -> dict:
         selected = state.get("selected_assignments") or []
         employee = (state.get("employee_tabnum") or "").strip()
         direction_key = (state.get("direction_key") or "").strip()
@@ -910,15 +925,21 @@ def make_commit_assignments_node():
                 "reasoning_trace": new_trace,
             }
 
-        try:
-            component = SendAssignmentsComponent(
+        def _submit() -> None:
+            SendAssignmentsComponent(
                 employee_tabnum=employee,
                 direction_key=direction_key,
                 insights=selected,
-            )
-            component.submit()
+            ).submit()
+
+        try:
+            # Синхронный HTTP-клиент сервиса поручений — в выделенный пул с таймаутом.
+            await run_blocking(_submit)
             committed = selected
             err: str | None = None
+        except asyncio.TimeoutError:
+            committed = []
+            err = "Сервис поручений не ответил за отведённое время (timeout)."
         except Exception as exc:  # noqa: BLE001 — внешний клиент, сужать нечем
             committed = []
             err = f"{type(exc).__name__}: {exc}"[:300]
