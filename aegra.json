@@ -3,6 +3,7 @@
     "json_analyzer": "./link.py:json_analyzer_graph",
     "json_analyzer_causal": "./link.py:json_analyzer_causal_graph",
     "json_analyzer_v2": "./link.py:json_analyzer_v2_graph",
+    "json_analyzer_v3": "./link.py:json_analyzer_v3_graph",
     "easyrag": "./link.py:easyrag_graph",
     "analytic_orchestrator": "./link.py:analytic_orchestrator_graph",
     "analytic_orchestrator_v2": "./link.py:analytic_orchestrator_v2_graph",
