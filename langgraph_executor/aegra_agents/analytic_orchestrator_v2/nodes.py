@@ -14,7 +14,7 @@ from ..easyrag.db import session_scope
 from ..easyrag.gap import record_gap
 from ..easyrag.models import WikiPage
 from ..gap_resolver.judge import answer_in_sources
-from ..json_analyzer_v2.loader import load_dataset_obj
+from ..json_analyzer_v3.loader import load_dataset_obj
 from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import GetBatchAgentDatasetByFiltersComponent
 from ..shared.assignments_service import SendAssignmentsComponent
@@ -235,7 +235,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
 
     Роль/методологию/формат задаёт BUSINESS_SYSTEM_PROMPT (наш, не пользователя).
     Первое сообщение — лишь триггер («Что происходит?»). Сырому JSON не доверяем —
-    факты по метрикам собирает json_analyzer_v2 (без аналитики по бенчмарку,
+    факты по метрикам собирает json_analyzer_v3 (без аналитики по бенчмарку,
     pop только у метрик с планом). Ответ обязан завершаться блоком «Что делаем
     дальше?» (1/2/3) — его варианты парсим в pending_options.
     """
