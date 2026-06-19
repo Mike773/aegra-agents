@@ -29,6 +29,9 @@ from langgraph_executor.aegra_agents.json_analyzer_causal.graph import (
 from langgraph_executor.aegra_agents.json_analyzer_v2.graph import (
     graph as json_analyzer_v2_graph,
 )
+from langgraph_executor.aegra_agents.json_analyzer_v3.graph import (
+    graph as json_analyzer_v3_graph,
+)
 from langgraph_executor.aegra_agents.kb_chat.graph import (
     graph as kb_chat_graph,
 )
@@ -45,6 +48,7 @@ __all__ = [
     "json_analyzer_graph",
     "json_analyzer_causal_graph",
     "json_analyzer_v2_graph",
+    "json_analyzer_v3_graph",
     "kb_chat_graph",
     "wiki_ingest_graph",
 ]
