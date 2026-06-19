@@ -38,6 +38,14 @@ ROW_FIELDS: tuple[str, ...] = (
 )
 
 
+def _is_empty_fact(value: Any) -> bool:
+    """Факт «пустой» = None или пустая строка. Ноль (0/0.0) — ВАЛИДНЫЙ факт и
+    пустым не считается (иначе потеряли бы законные нулевые значения)."""
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip() == ""
+
+
 def _normalize_metric_type(value: Any) -> Any:
     """Приводит направление метрики к каноничным 'прямая'/'обратная'.
 
@@ -65,6 +73,14 @@ def _walk(
     depth: int,
 ) -> None:
     for node in metrics:
+        children = node.get("child_metrics") or []
+        # Строку с пустым фактом в базу не грузим: в ряду по датам пустая точка
+        # затеняет последнюю реальную (analytics берёт prev = непосредственно
+        # предыдущий период), и сравнение период-к-периоду не считается. Отбрасываем
+        # только ЛИСТ без факта — узел-агрегат с детьми сохраняем, чтобы не потерять
+        # реальные разрезы под ним (на практике пустой факт всегда у листьев).
+        if not children and _is_empty_fact(node.get("fact")):
+            continue
         uid = counter[0]
         counter[0] += 1
         rows.append(
@@ -92,7 +108,6 @@ def _walk(
                 "element": node.get("element"),
             }
         )
-        children = node.get("child_metrics") or []
         if children:
             _walk(children, person, rows, counter, uid, depth + 1)
 
