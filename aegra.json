@@ -10,7 +10,8 @@
     "wiki_ingest": "./link.py:wiki_ingest_graph",
     "doc_manager": "./link.py:doc_manager_graph",
     "kb_chat": "./link.py:kb_chat_graph",
-    "gap_resolver": "./link.py:gap_resolver_graph"
+    "gap_resolver": "./link.py:gap_resolver_graph",
+    "external_doc_loader": "./link.py:external_doc_loader_graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",

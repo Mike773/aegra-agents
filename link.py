@@ -17,6 +17,9 @@ from langgraph_executor.aegra_agents.doc_manager.graph import (
 from langgraph_executor.aegra_agents.easyrag.graph import (
     graph as easyrag_graph,
 )
+from langgraph_executor.aegra_agents.external_doc_loader.graph import (
+    graph as external_doc_loader_graph,
+)
 from langgraph_executor.aegra_agents.gap_resolver.graph import (
     graph as gap_resolver_graph,
 )
@@ -44,6 +47,7 @@ __all__ = [
     "analytic_orchestrator_v2_graph",
     "doc_manager_graph",
     "easyrag_graph",
+    "external_doc_loader_graph",
     "gap_resolver_graph",
     "json_analyzer_graph",
     "json_analyzer_causal_graph",
