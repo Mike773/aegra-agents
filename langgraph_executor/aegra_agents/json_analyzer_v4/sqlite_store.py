@@ -8,7 +8,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Callable
 
-from .loader import ROW_FIELDS
+from .loader import AGG_ROW_FIELDS, ROW_FIELDS, parse_rank
 
 _ANALYTICS_FIELDS: tuple[str, ...] = (
     "plan_dev_abs",
@@ -75,8 +75,45 @@ class SqliteStore:
                 fact                REAL,
                 plan                REAL,
                 benchmark           REAL,
+                ex                  REAL,
+                rr                  REAL,
                 influent_percent    REAL,
                 element             TEXT
+            );
+
+            -- Место сотрудника в peer-группе (приходит готовым с сервера,
+            -- в отличие от peer_rank/peer_percentile в metric_analytics,
+            -- которые считаются локально по загруженному датасету).
+            CREATE TABLE metric_rankings (
+                metric_uid  INTEGER REFERENCES metrics(metric_uid),
+                level       TEXT,       -- ORG | TERR | OFFICE
+                rank_pos    INTEGER,    -- 458 из «458 из 500»
+                rank_total  INTEGER,    -- 500
+                rank_raw    TEXT,       -- исходная строка как есть
+                percentile  REAL
+            );
+
+            -- Общие агрегаты peer-групп по уровням (отдельный batch-вход);
+            -- все срезы узла метрики (текущий + history) делят node_uid.
+            CREATE TABLE peer_aggregates (
+                node_uid        INTEGER,
+                parent_node_uid INTEGER,
+                depth           INTEGER,
+                level           TEXT,      -- ORG | TERR | OFFICE
+                metric_id       TEXT,
+                metric_name     TEXT,
+                dt              TEXT,
+                calc_period     TEXT,
+                is_current      INTEGER,   -- 1 = верхний aggregates, 0 = history
+                mean_fact       REAL,
+                mean_plan       REAL,
+                mean_ex         REAL,
+                median          REAL,
+                hit_rate        REAL,
+                top20_mean_fact REAL,
+                iqr             REAL,
+                cv              REAL,
+                total_objects   INTEGER
             );
 
             CREATE TABLE metric_analytics (
@@ -119,6 +156,10 @@ class SqliteStore:
             CREATE INDEX idx_metrics_person ON metrics(person_tabnum);
             CREATE INDEX idx_metrics_pkey   ON metrics(person_key);
             CREATE INDEX idx_metrics_parent ON metrics(parent_uid);
+
+            CREATE INDEX idx_rankings_uid ON metric_rankings(metric_uid);
+            CREATE INDEX idx_agg_node ON peer_aggregates(node_uid);
+            CREATE INDEX idx_agg_name ON peer_aggregates(metric_name, level, dt);
             """
         )
 
@@ -129,8 +170,48 @@ class SqliteStore:
             f"INSERT INTO metrics ({cols}) VALUES ({placeholders})",
             [tuple(r[f] for f in ROW_FIELDS) for r in rows],
         )
+        rank_rows: list[tuple[Any, ...]] = []
+        for r in rows:
+            for rk in r.get("rankings") or []:
+                if not isinstance(rk, dict):
+                    continue
+                pos, total = parse_rank(rk.get("rank"))
+                rank_rows.append(
+                    (
+                        r["metric_uid"],
+                        rk.get("level"),
+                        pos,
+                        total,
+                        rk.get("rank"),
+                        rk.get("percentile"),
+                    )
+                )
+        if rank_rows:
+            self.conn.executemany(
+                "INSERT INTO metric_rankings "
+                "(metric_uid, level, rank_pos, rank_total, rank_raw, percentile) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rank_rows,
+            )
         self.conn.commit()
         return len(rows)
+
+    def load_aggregates(self, rows: list[dict[str, Any]]) -> int:
+        """Загрузить плоские строки peer-агрегатов (см. loader.load_aggregates_obj)."""
+        cols = ", ".join(AGG_ROW_FIELDS)
+        placeholders = ", ".join("?" for _ in AGG_ROW_FIELDS)
+        self.conn.executemany(
+            f"INSERT INTO peer_aggregates ({cols}) VALUES ({placeholders})",
+            [tuple(r[f] for f in AGG_ROW_FIELDS) for r in rows],
+        )
+        self.conn.commit()
+        return len(rows)
+
+    def rankings_row_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM metric_rankings").fetchone()[0]
+
+    def aggregates_row_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM peer_aggregates").fetchone()[0]
 
     @staticmethod
     def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
@@ -306,6 +387,8 @@ class SqliteStore:
             "people": people,
             "dates": dates,
             "total_metric_rows": self.row_count(),
+            "rankings_rows": self.rankings_row_count(),
+            "peer_aggregate_rows": self.aggregates_row_count(),
         }
 
     def describe_metric(self, name: str) -> dict[str, Any] | None:

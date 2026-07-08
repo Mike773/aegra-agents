@@ -84,6 +84,14 @@ def format_facts(overview: dict[str, Any]) -> str:
         f"- Значения element (продукты/разрезы): {', '.join(elements)}",
         people_line,
     ]
+    rankings_rows = overview.get("rankings_rows") or 0
+    agg_rows = overview.get("peer_aggregate_rows") or 0
+    if rankings_rows or agg_rows:
+        lines.append(
+            "- Доп. данные загружены (инструментов для них ПОКА НЕТ, не пытайся "
+            f"их искать): рейтингов в peer-группах {rankings_rows}, строк "
+            f"peer-агрегатов {agg_rows}."
+        )
     return "\n".join(lines)
 
 

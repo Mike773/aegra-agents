@@ -22,6 +22,9 @@ from typing import Any, Awaitable, Callable
 import numpy as np
 from langgraph.store.base import BaseStore
 
+# Неймспейс общий с json_analyzer_v3 сознательно: ключи — content-hash каталога
+# метрик (имя+описание), который v4 не меняет, так что кэш переиспользуется.
+# Бампить при изменении состава каталога или семантики эмбеддингов.
 _NAMESPACE_ROOT = ("json_analyzer", "metric_embeddings")
 _PAGE = 200
 

@@ -21,7 +21,7 @@ from ..shared.clients import create_gigachat_embeddings
 from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import apply_metric_kinds, compute_analytics
-from .loader import load_dataset_obj
+from .loader import load_aggregates_obj, load_dataset_obj
 from .prompts import SYNTHESIS_PROMPT
 from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
@@ -50,12 +50,31 @@ def _resolve_store() -> BaseStore:
     return _FALLBACK_STORE
 
 
-def _prepare_store(rows: list[dict[str, Any]]) -> SqliteStore:
+def _prepare_store(
+    rows: list[dict[str, Any]], agg_rows: list[dict[str, Any]] | None = None
+) -> SqliteStore:
     """Блокирующая подготовка: in-memory SQLite + производная аналитика."""
     store = SqliteStore()
     store.load(rows)
+    if agg_rows:
+        store.load_aggregates(agg_rows)
     compute_analytics(store)
     return store
+
+
+def _parse_aggregates(raw: Any) -> list[dict[str, Any]]:
+    """Опциональные batch-агрегаты: строка → json, битый вход → []."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if raw is None:
+        return []
+    try:
+        return load_aggregates_obj(raw)
+    except Exception:  # noqa: BLE001 — внешний payload, форма не гарантирована
+        return []
 
 
 def _safe_embed_query(
@@ -166,7 +185,8 @@ def make_gather_node(llm: GigaChat):
             }
 
         rows = load_dataset_obj(raw_obj)
-        store = await asyncio.to_thread(_prepare_store, rows)
+        agg_rows = _parse_aggregates(state.get("raw_aggregates"))
+        store = await asyncio.to_thread(_prepare_store, rows, agg_rows)
 
         # Кэш эмбеддингов — в LangGraph Store (подключение aegra). Доступ async,
         # сам подсчёт недостающих эмбеддингов (GigaChat) — внутри в to_thread.
@@ -222,6 +242,7 @@ def make_gather_node(llm: GigaChat):
                 )
             return {
                 "parsed_rows": rows,
+                "parsed_agg_rows": agg_rows,
                 "gathered_facts": "",
                 "tool_steps": tool_steps,
                 "question": question,
@@ -231,6 +252,7 @@ def make_gather_node(llm: GigaChat):
 
         return {
             "parsed_rows": rows,
+            "parsed_agg_rows": agg_rows,
             "gathered_facts": transcript,
             "tool_steps": tool_steps,
             "question": question,
