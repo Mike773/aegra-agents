@@ -116,6 +116,14 @@ def _flat_columns() -> list[tuple[str, Any]]:
         pc = r.get("peer_count")
         return f"{r['peer_rank']}/{pc}" if pc else str(r["peer_rank"])
 
+    def rel_cell(r: dict[str, Any]) -> str:
+        if r.get("rel_status") is None:
+            return ""
+        pct = r.get("rel_change_pct")
+        if pct is None:
+            return str(r["rel_status"])
+        return f"{r['rel_status']} ({_fmt_num(pct)} п.п.)"
+
     return [
         ("сотрудник", plain("person_fio")),
         ("метрика", plain("metric_name")),
@@ -125,10 +133,12 @@ def _flat_columns() -> list[tuple[str, Any]]:
         ("план_статус", plain("plan_status")),
         ("откл_от_плана", lambda r: _delta_cell(
             r.get("plan_dev_pct"), r.get("plan_dev_abs"), _unit(r.get("measure_type")))),
+        ("жёсткость_плана", plain("plan_rigidity")),
         ("бенчмарк_статус", plain("benchmark_status")),
         ("динамика", plain("pop_status")),
         ("изм_к_прошлому", lambda r: _delta_cell(
             r.get("pop_change_pct"), r.get("pop_change_abs"), _unit(r.get("measure_type")))),
+        ("vs_группы", rel_cell),
         ("тренд", plain("trend_status")),
         ("ранг_среди_коллег", rank_cell),
         ("vs_коллеги", plain("peer_status")),
@@ -508,6 +518,91 @@ def _render_rank_elements(r: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_peer_context(result: dict[str, Any]) -> str:
+    """Peer-контекст метрики: независимые секции, пустые пропускаются молча —
+    состав данных плавает (уровни/history/rankings приходят частично)."""
+    if result.get("error"):
+        return _render_error(result)
+    if result.get("note"):
+        return f"«{result.get('metric')}»: {result['note']}."
+
+    lines: list[str] = []
+    head = f"Peer-контекст метрики «{result.get('metric')}»"
+    if result.get("person_fio"):
+        head += f" — {result['person_fio']}"
+    if result.get("ref_level"):
+        head += f" (референсная группа: уровень {result['ref_level']})"
+    lines.append(head + ":")
+
+    dynamics = result.get("dynamics") or []
+    if dynamics:
+        unit = _unit(dynamics[0].get("measure_type"))
+        cols = [
+            ("период", lambda r: r.get("date") or ""),
+            ("факт", lambda r: _fmt_num(r.get("fact"), unit)),
+            ("группа_средн", lambda r: _fmt_num(r.get("group_mean"), unit)),
+            ("медиана_группы", lambda r: _fmt_num(r.get("group_median"), unit)),
+            ("топ20_группы", lambda r: _fmt_num(r.get("group_top20"), unit)),
+            ("gap_до_топ20", lambda r: _fmt_num(r.get("gap_top20"), unit)),
+            ("vs_группы", lambda r: (
+                "" if r.get("rel_status") is None
+                else f"{r['rel_status']} ({_fmt_num(r.get('rel_change_pct'))} п.п.)"
+                if r.get("rel_change_pct") is not None else str(r["rel_status"]))),
+            ("hit_rate_группы", lambda r: _pct(r.get("group_hit_rate"))),
+            ("жёсткость_плана", lambda r: r.get("plan_rigidity") or ""),
+        ]
+        table = _md_table(dynamics, cols)
+        if table:
+            lines.append("Динамика на фоне группы (vs_группы = личное изменение "
+                         "минус групповое, направление учтено):")
+            lines.append(table)
+        gap_change = result.get("gap_top20_change")
+        first_gap = dynamics[0].get("gap_top20")
+        if gap_change is not None and first_gap is not None:
+            last_gap = first_gap + gap_change
+            direction = (
+                "сократился" if abs(last_gap) < abs(first_gap)
+                else "вырос" if abs(last_gap) > abs(first_gap) else "не изменился"
+            )
+            lines.append(
+                f"Разрыв с топ-20% группы от первого к последнему периоду "
+                f"{direction}: {_fmt_num(first_gap, unit)} → {_fmt_num(last_gap, unit)}."
+            )
+
+    levels = result.get("levels") or []
+    if levels:
+        cols = [
+            ("уровень", lambda r: r.get("level") or ""),
+            ("период", lambda r: r.get("dt") or ""),
+            ("группа_средн", lambda r: _fmt_num(r.get("mean_fact"))),
+            ("медиана", lambda r: _fmt_num(r.get("median"))),
+            ("hit_rate", lambda r: _pct(r.get("hit_rate"))),
+            ("cv", lambda r: _fmt_num(r.get("cv"))),
+            ("объектов", lambda r: _fmt_num(r.get("total_objects"))),
+            ("изм_группы", lambda r: _pct(r.get("change_pct"))),
+            ("место", lambda r: r.get("rank_raw") or ""),
+            ("процентиль", lambda r: _fmt_num(r.get("percentile"))),
+        ]
+        table = _md_table(levels, cols)
+        if table:
+            lines.append("Уровни peer-групп (имена уровней — как в данных):")
+            lines.append(table)
+    if result.get("localization"):
+        lines.append(f"Локализация: {result['localization']}.")
+
+    for p in result.get("position_dynamics") or []:
+        arrow = "вырос" if p["change"] > 0 else ("снизился" if p["change"] < 0 else "не изменился")
+        lines.append(
+            f"Позиция в рейтинге ({p['level']}): процентиль {arrow} "
+            f"с {_fmt_num(p['from_percentile'])} ({p['from_date']}) до "
+            f"{_fmt_num(p['to_percentile'])} ({p['to_date']})."
+        )
+
+    if len(lines) == 1:
+        lines.append("Секций с данными нет — peer-данные пришли пустыми.")
+    return "\n".join(lines)
+
+
 def _safe(render: Any, result: Any) -> str:
     """Рендер с безопасным fallback на JSON при любой ошибке/пустом выводе."""
     try:
@@ -832,6 +927,29 @@ def build_tools(
             analytics.rank_elements(store, metric, person=person, date=date),
         )
 
+    def peer_context(metric: str, person: str | None = None) -> str:
+        """Сравнение сотрудника с БОЛЬШОЙ peer-группой (серверные данные, сотни
+        объектов — не 2-3 коллеги из датасета): динамика на фоне группы («падает
+        вместе с группой или против неё» — vs_группы), разрыв с топ-20% группы,
+        реалистичность плана (hit_rate — какая доля группы вообще выполняет
+        план), срезы по уровням иерархии (организация/территория/офис — имена
+        как в данных) с локализацией «системное/локальное», место и процентиль
+        в рейтинге. Используй для вопросов «как он на фоне банка/территории/
+        офиса», «это у всех так или только у него», «насколько реалистичен
+        план», «догоняет ли лучших», «какое место в рейтинге». ОДИН вызов на
+        метрику отдаёт всё доступное; если какой-то секции нет в ответе — таких
+        данных не пришло, повторный вызов не поможет. person — ФИО/табельный
+        (по умолчанию сотрудник набора)."""
+        metric = _blank_to_none(metric)
+        person = _blank_to_none(person)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_peer_context,
+            analytics.build_peer_context(store, metric, person=person),
+        )
+
     def related_metrics(metric: str) -> str:
         """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий/описаний, не
         из значений). Возвращает рёбра с relation ('опережающая→запаздывающая'/
@@ -864,6 +982,7 @@ def build_tools(
         (analytics_summary, "analytics_summary"),
         (situation_overview, "situation_overview"),
         (rank_elements, "rank_elements"),
+        (peer_context, "peer_context"),
         (related_metrics, "related_metrics"),
     ]
 

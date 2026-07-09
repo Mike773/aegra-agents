@@ -88,9 +88,10 @@ def format_facts(overview: dict[str, Any]) -> str:
     agg_rows = overview.get("peer_aggregate_rows") or 0
     if rankings_rows or agg_rows:
         lines.append(
-            "- Доп. данные загружены (инструментов для них ПОКА НЕТ, не пытайся "
-            f"их искать): рейтингов в peer-группах {rankings_rows}, строк "
-            f"peer-агрегатов {agg_rows}."
+            f"- Загружены peer-данные (рейтингов {rankings_rows}, строк "
+            f"peer-агрегатов {agg_rows}) — для сравнения с большой peer-группой "
+            "(на фоне организации/территории/офиса, реалистичность плана, место "
+            "в рейтинге) используй peer_context."
         )
     return "\n".join(lines)
 
