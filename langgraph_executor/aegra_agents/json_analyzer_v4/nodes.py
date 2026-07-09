@@ -51,14 +51,19 @@ def _resolve_store() -> BaseStore:
 
 
 def _prepare_store(
-    rows: list[dict[str, Any]], agg_rows: list[dict[str, Any]] | None = None
+    rows: list[dict[str, Any]],
+    agg_rows: list[dict[str, Any]] | None = None,
+    ref_level: str | None = None,
 ) -> SqliteStore:
-    """Блокирующая подготовка: in-memory SQLite + производная аналитика."""
+    """Блокирующая подготовка: in-memory SQLite + производная аналитика.
+
+    ref_level — явный референсный уровень peer-агрегатов (имена уровней
+    инстанс-специфичны); не задан — эвристика по total_objects в analytics."""
     store = SqliteStore()
     store.load(rows)
     if agg_rows:
         store.load_aggregates(agg_rows)
-    compute_analytics(store)
+    compute_analytics(store, ref_level=ref_level)
     return store
 
 
@@ -186,7 +191,9 @@ def make_gather_node(llm: GigaChat):
 
         rows = load_dataset_obj(raw_obj)
         agg_rows = _parse_aggregates(state.get("raw_aggregates"))
-        store = await asyncio.to_thread(_prepare_store, rows, agg_rows)
+        cfg = (config or {}).get("configurable") or {}
+        ref_level = (str(cfg.get("peer_ref_level") or "").strip()) or None
+        store = await asyncio.to_thread(_prepare_store, rows, agg_rows, ref_level)
 
         # Кэш эмбеддингов — в LangGraph Store (подключение aegra). Доступ async,
         # сам подсчёт недостающих эмбеддингов (GigaChat) — внутри в to_thread.

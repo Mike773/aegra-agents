@@ -30,6 +30,11 @@ _ANALYTICS_FIELDS: tuple[str, ...] = (
     "zscore",
     "peer_status",
     "is_anomaly",
+    "group_change_pct",
+    "rel_change_pct",
+    "rel_status",
+    "group_hit_rate",
+    "plan_rigidity",
 )
 
 _GROUP_BY_COLUMNS = {
@@ -136,7 +141,13 @@ class SqliteStore:
                 peer_percentile  REAL,
                 zscore           REAL,
                 peer_status      TEXT,
-                is_anomaly       INTEGER
+                is_anomaly       INTEGER,
+                -- Против серверных peer-агрегатов (референсный уровень):
+                group_change_pct REAL,   -- изменение mean_fact группы за период
+                rel_change_pct   REAL,   -- личное изменение минус групповое, п.п.
+                rel_status       TEXT,   -- лучше_группы|на_уровне_группы|хуже_группы
+                group_hit_rate   REAL,   -- доля объектов группы, выполнивших план
+                plan_rigidity    TEXT    -- жёсткий_план|обычный_план|мягкий_план
             );
 
             CREATE TABLE metric_relations (

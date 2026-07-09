@@ -35,18 +35,34 @@ _ANALYTICS_COLUMNS: tuple[str, ...] = (
     "zscore",
     "peer_status",
     "is_anomaly",
+    "group_change_pct",
+    "rel_change_pct",
+    "rel_status",
+    "group_hit_rate",
+    "plan_rigidity",
 )
 
 _PLAN_LABELS = ("лучше_плана", "в_плане", "хуже_плана")
 _BENCH_LABELS = ("лучше_бенчмарка", "на_уровне_бенчмарка", "хуже_бенчмарка")
 _DYNAMIC_LABELS = ("улучшение", "стабильно", "ухудшение")
 _PEER_LABELS = ("лучше_коллег", "на_уровне_коллег", "хуже_коллег")
+# Детрендинг: личная динамика относительно peer-группы (серверные агрегаты).
+_REL_LABELS = ("лучше_группы", "на_уровне_группы", "хуже_группы")
+# Жёсткость плана по доле объектов группы, выполнивших план (hit_rate).
+_RIGIDITY_LABELS = ("жёсткий_план", "обычный_план", "мягкий_план")
 
 _IN_PLAN_TOLERANCE_PCT = 1.0
 _TREND_TOLERANCE_PCT = 5.0
 # Зона «на уровне коллег» по модулю z-score: ниже — статистически не отличим от
 # среднего группы, вердикт «лучше/хуже» вводил бы в заблуждение.
 _PEER_NEUTRAL_ZSCORE = 0.5
+# Зона «на уровне группы» для детрендинга, процентные пункты: личное изменение
+# в пределах ±2 п.п. от группового — движение вместе с группой.
+_REL_TOLERANCE_PCT = 2.0
+# Пороги жёсткости плана: план не выполняет две трети группы → жёсткий;
+# выполняют две трети → мягкий.
+_HIT_RATE_HARD = 33.3
+_HIT_RATE_SOFT = 66.7
 
 
 def _anomaly_threshold() -> float:
@@ -131,6 +147,110 @@ def _peer_status(zscore: float | None, metric_type: str | None) -> str | None:
     return better if _direction_better(zscore > 0, metric_type) else worse
 
 
+def _rel_status(rel_change_pct: float | None, metric_type: str | None) -> str | None:
+    """Вердикт личной динамики ОТНОСИТЕЛЬНО peer-группы (личное изменение минус
+    групповое, п.п.) с учётом направления: «падает вместе с группой» — это
+    на_уровне_группы, «падает против группы» — хуже_группы."""
+    better, neutral, worse = _REL_LABELS
+    if rel_change_pct is None:
+        return None
+    if abs(rel_change_pct) < _REL_TOLERANCE_PCT:
+        return neutral
+    return better if _direction_better(rel_change_pct > 0, metric_type) else worse
+
+
+def _plan_rigidity(hit_rate: float | None) -> str | None:
+    """Жёсткость плана по hit_rate группы (доля объектов, выполнивших план)."""
+    hard, normal, soft = _RIGIDITY_LABELS
+    if hit_rate is None:
+        return None
+    if hit_rate < _HIT_RATE_HARD:
+        return hard
+    if hit_rate > _HIT_RATE_SOFT:
+        return soft
+    return normal
+
+
+def _ym(date: Any) -> str | None:
+    """Ключ периода для джойна личных дат с dt агрегатов: год-месяц. Календарные
+    концы месяцев в двух источниках не совпадают день в день."""
+    if not isinstance(date, str) or len(date) < 7:
+        return None
+    return date[:7]
+
+
+def _norm_metric_name(name: Any) -> str:
+    return str(name or "").strip().casefold()
+
+
+def _level_order(agg_rows: list[dict], ref_level: str | None = None) -> list[str]:
+    """Уровни peer-агрегатов от узкой группы к широкой БЕЗ знания имён (имена
+    уровней инстанс-специфичны — ORG/TERR/OFFICE лишь пример): явный override →
+    минимальный положительный total_objects на текущем срезе (узкая группа =
+    ближайшие коллеги) → порядок появления в payload (MIN(node_uid))."""
+    info: dict[str, dict[str, Any]] = {}
+    for r in agg_rows:
+        level = r["level"]
+        if level is None:
+            continue
+        d = info.setdefault(level, {"first": r["node_uid"], "objs": None})
+        d["first"] = min(d["first"], r["node_uid"])
+        objs = r["total_objects"]
+        if r["is_current"] and objs is not None and objs > 0:
+            d["objs"] = objs if d["objs"] is None else min(d["objs"], objs)
+    order = sorted(
+        info,
+        key=lambda lv: (
+            info[lv]["objs"] is None,
+            info[lv]["objs"] if info[lv]["objs"] is not None else 0,
+            info[lv]["first"],
+        ),
+    )
+    if ref_level:
+        wanted = str(ref_level).strip()
+        for lv in order:
+            if lv.strip().casefold() == wanted.casefold():
+                order = [lv] + [x for x in order if x != lv]
+                break
+    return order
+
+
+def _pick_ref_level(store: SqliteStore, ref_level: str | None = None) -> str | None:
+    """Референсный уровень peer-агрегатов для колонок metric_analytics."""
+    agg_rows = [dict(r) for r in store.conn.execute("SELECT * FROM peer_aggregates")]
+    order = _level_order(agg_rows, ref_level)
+    return order[0] if order else None
+
+
+def _build_agg_lookup(
+    agg_rows: list[dict], ref_level: str | None = None
+) -> dict[str, dict[str, dict]]:
+    """metric_name(норм.) → {ym → строка агрегатов} по референсному уровню.
+
+    Уровень выбирается на метрику: первый по _level_order, где у метрики есть
+    строки (данные приходят неполными — часть метрик может быть только на
+    широком уровне). При коллизии ym приоритет у текущего среза (is_current)."""
+    order = _level_order(agg_rows, ref_level)
+    by_metric_level: dict[tuple[str, str], dict[str, dict]] = {}
+    for r in agg_rows:
+        name = _norm_metric_name(r["metric_name"])
+        ym = _ym(r["dt"])
+        if not name or ym is None or r["level"] is None:
+            continue
+        slot = by_metric_level.setdefault((name, r["level"]), {})
+        cur = slot.get(ym)
+        if cur is None or (not cur["is_current"] and r["is_current"]):
+            slot[ym] = r
+    lookup: dict[str, dict[str, dict]] = {}
+    for name in {key[0] for key in by_metric_level}:
+        for level in order:
+            slot = by_metric_level.get((name, level))
+            if slot:
+                lookup[name] = slot
+                break
+    return lookup
+
+
 def _round(value: Any) -> Any:
     return round(value, 4) if isinstance(value, float) else value
 
@@ -141,7 +261,7 @@ def _has_plan(plan: Any) -> bool:
     return plan is not None and plan != 0
 
 
-def compute_analytics(store: SqliteStore) -> int:
+def compute_analytics(store: SqliteStore, ref_level: str | None = None) -> int:
     conn = store.conn
     rows = [
         dict(r)
@@ -151,22 +271,48 @@ def compute_analytics(store: SqliteStore) -> int:
         )
     ]
 
+    # Peer-агрегаты (могут отсутствовать целиком или частично — тогда зависящие
+    # от них поля остаются None, режим v3). ref_level — явный override уровня
+    # (configurable.peer_ref_level); имена уровней инстанс-специфичны.
+    agg_lookup = _build_agg_lookup(
+        [dict(r) for r in conn.execute("SELECT * FROM peer_aggregates")], ref_level
+    )
+
+    def _agg_for(r: dict) -> dict | None:
+        ym = _ym(r["date"])
+        if ym is None:
+            return None
+        return agg_lookup.get(_norm_metric_name(r["metric_name"]), {}).get(ym)
+
     result: dict[int, dict[str, Any]] = {}
 
     for r in rows:
         plan_abs, plan_pct, plan_status = _deviation(
             r["fact"], r["plan"], r["metric_type"], _PLAN_LABELS
         )
-        # json_analyzer_v2: аналитика по бенчмарку НЕ строится (benchmark_* всегда
-        # None → бенчмарк-колонки выпадают из выдачи как пустые).
+        # Бенчмарк: поле benchmark в самих метриках не приходит (v2/v3 держали
+        # колонки пустыми); v4 считает его против top20_mean_fact peer-группы
+        # (средний факт топ-20% объектов) из серверных агрегатов, когда те есть.
+        agg = _agg_for(r)
+        bench_abs, bench_pct, bench_status = _deviation(
+            r["fact"],
+            agg["top20_mean_fact"] if agg else None,
+            r["metric_type"],
+            _BENCH_LABELS,
+        )
+        # Жёсткость плана — только у метрик с реальным планом и при пришедшем
+        # hit_rate (каждый вердикт гейтится на свои входы независимо).
+        group_hit_rate = (
+            agg["hit_rate"] if agg is not None and _has_plan(r["plan"]) else None
+        )
         result[r["metric_uid"]] = {
             "metric_uid": r["metric_uid"],
             "plan_dev_abs": plan_abs,
             "plan_dev_pct": plan_pct,
             "plan_status": plan_status,
-            "benchmark_dev_abs": None,
-            "benchmark_dev_pct": None,
-            "benchmark_status": None,
+            "benchmark_dev_abs": bench_abs,
+            "benchmark_dev_pct": bench_pct,
+            "benchmark_status": bench_status,
             "pop_change_abs": None,
             "pop_change_pct": None,
             "pop_status": None,
@@ -180,6 +326,11 @@ def compute_analytics(store: SqliteStore) -> int:
             "zscore": None,
             "peer_status": None,
             "is_anomaly": 0,
+            "group_change_pct": None,
+            "rel_change_pct": None,
+            "rel_status": None,
+            "group_hit_rate": group_hit_rate,
+            "plan_rigidity": _plan_rigidity(group_hit_rate),
         }
 
     series: dict[tuple, list[dict]] = defaultdict(list)
@@ -212,6 +363,28 @@ def compute_analytics(store: SqliteStore) -> int:
                 result[r["metric_uid"]]["pop_status"] = _pop_status(
                     change_pct, r["metric_type"]
                 )
+                # Детрендинг: личное изменение минус изменение peer-группы за
+                # те же периоды (тот же prev-бриджинг, что у pop). Нужны матчи
+                # агрегатов с mean_fact для ОБОИХ периодов — иначе None.
+                cur_agg, prev_agg = _agg_for(r), _agg_for(prev)
+                if (
+                    change_pct is not None
+                    and cur_agg is not None
+                    and prev_agg is not None
+                    and cur_agg["mean_fact"] is not None
+                    and prev_agg["mean_fact"] not in (None, 0)
+                ):
+                    group_pct = (
+                        (cur_agg["mean_fact"] - prev_agg["mean_fact"])
+                        / prev_agg["mean_fact"]
+                        * 100.0
+                    )
+                    rel_pct = change_pct - group_pct
+                    result[r["metric_uid"]]["group_change_pct"] = group_pct
+                    result[r["metric_uid"]]["rel_change_pct"] = rel_pct
+                    result[r["metric_uid"]]["rel_status"] = _rel_status(
+                        rel_pct, r["metric_type"]
+                    )
             prev = r
         trend = (
             _trend([r["fact"] for r in items if r["fact"] is not None])
@@ -856,12 +1029,254 @@ def apply_metric_kinds(store: SqliteStore, kinds: dict[str, str]) -> int:
         facts = [abs(r["fact"]) for r in rows if r["fact"] is not None]
         deadzone = (max(facts) * _TREND_TOLERANCE_PCT / 100.0) if facts else 0.0
         for r in rows:
+            # rel_*/group_change_pct — тоже относительные %: для знаковых/
+            # индексных метрик бессмысленны, обнуляем вместе с pop_change_pct.
             store.conn.execute(
                 "UPDATE metric_analytics SET pop_change_pct = NULL, "
-                "plan_dev_pct = NULL, benchmark_dev_pct = NULL, pop_status = ? "
+                "plan_dev_pct = NULL, benchmark_dev_pct = NULL, "
+                "group_change_pct = NULL, rel_change_pct = NULL, "
+                "rel_status = NULL, pop_status = ? "
                 "WHERE metric_uid = ?",
                 (_pop_status_from_abs(r["abs"], r["mt"], deadzone), r["uid"]),
             )
             affected += 1
     store.conn.commit()
     return affected
+
+
+# --------------------------------------------------------------------------- #
+# Peer-контекст: сравнение сотрудника с peer-группой (серверные rankings и
+# batch-агрегаты). Секции независимы — каждая присутствует, только если пришли
+# ИМЕННО её данные (уровни/history/поля срезов бывают неполными). Имена уровней
+# инстанс-специфичны и нигде не хардкодятся.
+# --------------------------------------------------------------------------- #
+
+
+def _agg_worsening(change_pct: float | None, metric_type: str | None) -> bool | None:
+    """Ухудшается ли групповое значение (направление из metric_type, мёртвая зона
+    как у тренда). None — изменение незначимо или не посчитано."""
+    if change_pct is None or abs(change_pct) < _TREND_TOLERANCE_PCT:
+        return None
+    return not _direction_better(change_pct > 0, metric_type)
+
+
+def build_peer_context(
+    store: SqliteStore,
+    metric: str,
+    person: Any | None = None,
+    ref_level: str | None = None,
+) -> dict[str, Any]:
+    """Сравнение сотрудника с peer-группой по одной метрике за один вызов.
+
+    Возвращает секции (каждая может отсутствовать при неполных данных):
+    dynamics — личный ряд против референсной группы (gap до топ-20%/медианы,
+    вердикты rel_status/plan_rigidity); levels — срезы по всем пришедшим
+    уровням + ранги сотрудника; localization — «системное/локальное» (широта
+    уровня по total_objects, не по имени); position_dynamics — изменение
+    percentile при ≥2 датированных точках rankings.
+    """
+    metric_type = store.metric_type_of(metric)
+    if metric_type is None:
+        return {"error": f"Метрика '{metric}' не найдена."}
+    person_key, person_fio = _focus_person(store, person)
+
+    # Имя метрики в агрегатах может отличаться регистром/пробелами от основного
+    # датасета, а LOWER() в SQLite не понижает кириллицу — нормализуем в Python.
+    target = _norm_metric_name(metric)
+    agg_rows = [
+        r
+        for r in (
+            dict(x)
+            for x in store.conn.execute(
+                "SELECT * FROM peer_aggregates ORDER BY node_uid, dt"
+            )
+        )
+        if _norm_metric_name(r["metric_name"]) == target
+    ]
+    rank_rows = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT r.level AS level, r.rank_pos AS rank_pos, "
+            "r.rank_total AS rank_total, r.rank_raw AS rank_raw, "
+            "r.percentile AS percentile, m.date AS date "
+            "FROM metric_rankings r JOIN metrics m ON m.metric_uid = r.metric_uid "
+            "WHERE m.metric_name = ? AND m.element IS NULL "
+            "AND (? IS NULL OR m.person_key = ?) "
+            "ORDER BY m.date, r.level",
+            (metric, person_key, person_key),
+        )
+    ]
+    if not agg_rows and not rank_rows:
+        return {
+            "metric": metric,
+            "person_fio": person_fio,
+            "note": "peer-данные не загружены",
+        }
+
+    out: dict[str, Any] = {
+        "metric": metric,
+        "metric_type": metric_type,
+        "person_fio": person_fio,
+    }
+
+    # --- dynamics: личный ряд против референсной группы --------------------- #
+    lookup = _build_agg_lookup(agg_rows, ref_level)
+    slot = lookup.get(_norm_metric_name(metric), {})
+    personal = [
+        dict(r)
+        for r in store.conn.execute(
+            "SELECT m.date AS date, m.fact AS fact, m.plan AS plan, m.ex AS ex, "
+            "m.measure_type AS measure_type, a.rel_change_pct AS rel_change_pct, "
+            "a.rel_status AS rel_status, a.group_change_pct AS group_change_pct, "
+            "a.plan_rigidity AS plan_rigidity, "
+            "a.benchmark_dev_abs AS benchmark_dev_abs, "
+            "a.benchmark_dev_pct AS benchmark_dev_pct, "
+            "a.benchmark_status AS benchmark_status "
+            "FROM metrics m LEFT JOIN metric_analytics a "
+            "ON a.metric_uid = m.metric_uid "
+            "WHERE m.metric_name = ? AND m.element IS NULL "
+            "AND (? IS NULL OR m.person_key = ?) ORDER BY m.date",
+            (metric, person_key, person_key),
+        )
+    ]
+    dynamics: list[dict[str, Any]] = []
+    if slot:
+        ref_row = next(iter(slot.values()))
+        out["ref_level"] = ref_row["level"]
+        for p in personal:
+            agg = slot.get(_ym(p["date"]))
+            if agg is None and p["fact"] is None:
+                continue
+            entry: dict[str, Any] = {
+                "date": p["date"],
+                "fact": p["fact"],
+                "plan": p["plan"],
+                "ex": p["ex"],
+                "measure_type": p["measure_type"],
+                "rel_change_pct": p["rel_change_pct"],
+                "rel_status": p["rel_status"],
+                "group_change_pct": p["group_change_pct"],
+                "plan_rigidity": p["plan_rigidity"],
+            }
+            if agg is not None:
+                entry.update(
+                    group_mean=agg["mean_fact"],
+                    group_median=agg["median"],
+                    group_top20=agg["top20_mean_fact"],
+                    group_hit_rate=agg["hit_rate"],
+                    group_mean_ex=agg["mean_ex"],
+                    gap_top20=(
+                        p["fact"] - agg["top20_mean_fact"]
+                        if p["fact"] is not None
+                        and agg["top20_mean_fact"] is not None
+                        else None
+                    ),
+                    gap_median=(
+                        p["fact"] - agg["median"]
+                        if p["fact"] is not None and agg["median"] is not None
+                        else None
+                    ),
+                )
+            dynamics.append(entry)
+    if dynamics:
+        out["dynamics"] = dynamics
+        gaps = [d.get("gap_top20") for d in dynamics if d.get("gap_top20") is not None]
+        if len(gaps) >= 2:
+            out["gap_top20_change"] = gaps[-1] - gaps[0]
+
+    # --- levels: все пришедшие уровни + ранги сотрудника --------------------- #
+    levels: list[dict[str, Any]] = []
+    latest_rank_date = max((r["date"] or "" for r in rank_rows), default="")
+    for level in _level_order(agg_rows):
+        rows = sorted(
+            (r for r in agg_rows if r["level"] == level), key=lambda r: r["dt"] or ""
+        )
+        if not rows:
+            continue
+        cur = rows[-1]
+        prev = rows[-2] if len(rows) >= 2 else None
+        change_pct = (
+            (cur["mean_fact"] - prev["mean_fact"]) / prev["mean_fact"] * 100.0
+            if prev is not None
+            and cur["mean_fact"] is not None
+            and prev["mean_fact"] not in (None, 0)
+            else None
+        )
+        rank = next(
+            (
+                r
+                for r in rank_rows
+                if r["level"] == level and (r["date"] or "") == latest_rank_date
+            ),
+            None,
+        )
+        levels.append(
+            {
+                "level": level,
+                "dt": cur["dt"],
+                "mean_fact": cur["mean_fact"],
+                "median": cur["median"],
+                "hit_rate": cur["hit_rate"],
+                "cv": cur["cv"],
+                "total_objects": cur["total_objects"],
+                "change_pct": change_pct,
+                "worsening": _agg_worsening(change_pct, metric_type),
+                "rank_raw": rank["rank_raw"] if rank else None,
+                "percentile": rank["percentile"] if rank else None,
+            }
+        )
+    # Уровни, где есть только rankings (агрегаты не пришли).
+    agg_levels = {lv["level"] for lv in levels}
+    for r in rank_rows:
+        if (r["date"] or "") != latest_rank_date or r["level"] in agg_levels:
+            continue
+        agg_levels.add(r["level"])
+        levels.append(
+            {"level": r["level"], "rank_raw": r["rank_raw"], "percentile": r["percentile"]}
+        )
+    if levels:
+        out["levels"] = levels
+
+    # --- localization: системное vs локальное -------------------------------- #
+    judged = [
+        lv
+        for lv in levels
+        if lv.get("worsening") is not None and lv.get("total_objects") is not None
+    ]
+    if len(judged) >= 2:
+        judged.sort(key=lambda lv: lv["total_objects"])  # от узкого к широкому
+        narrow, broad = judged[0], judged[-1]
+        if all(lv["worsening"] for lv in judged):
+            out["localization"] = (
+                "системное: групповое значение ухудшается на всех уровнях "
+                f"({', '.join(str(lv['level']) for lv in judged)})"
+            )
+        elif narrow["worsening"] and not broad["worsening"]:
+            out["localization"] = (
+                f"локальное: ухудшается узкая группа ({narrow['level']}), "
+                f"широкая ({broad['level']}) стабильна"
+            )
+
+    # --- position_dynamics: изменение percentile ----------------------------- #
+    position: list[dict[str, Any]] = []
+    by_level: dict[str, list[dict]] = {}
+    for r in rank_rows:
+        if r["percentile"] is not None and r["date"]:
+            by_level.setdefault(r["level"], []).append(r)
+    for level, rows in by_level.items():
+        dated = sorted({r["date"]: r for r in rows}.values(), key=lambda r: r["date"])
+        if len(dated) >= 2:
+            position.append(
+                {
+                    "level": level,
+                    "from_date": dated[0]["date"],
+                    "to_date": dated[-1]["date"],
+                    "from_percentile": dated[0]["percentile"],
+                    "to_percentile": dated[-1]["percentile"],
+                    "change": dated[-1]["percentile"] - dated[0]["percentile"],
+                }
+            )
+    if position:
+        out["position_dynamics"] = position
+
+    return out
