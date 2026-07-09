@@ -144,6 +144,44 @@ def test_unknown_metric_validated():
     assert "не найдена" in out
 
 
+def test_rank_single_employee_redirects_to_peer_context():
+    """Один сотрудник в датасете: rank не ранжирует (не из чего), а
+    детерминированно отправляет к peer_context — вывод «худший/лучший в
+    группе» из одной строки становится невозможным."""
+    store = _store([_node(CUR, 80)])
+    out = _tool(store, "rank").invoke({"metric": "Продажи", "date": CUR})
+    assert "один сотрудник" in out
+    assert "peer_context" in out
+    assert "|" not in out  # таблицы ранжирования нет
+
+
+def test_rank_team_still_works():
+    """Регрессия: на команде из 2+ сотрудников rank работает как раньше."""
+    data = {
+        "me": {"fio": "Босс", "metrics": []},
+        "employees": [
+            {"fio": "Иванов", "tabnum": 1, "metrics": [_node(CUR, 80)]},
+            {"fio": "Сидоров", "tabnum": 2, "metrics": [_node(CUR, 120)]},
+        ],
+    }
+    store = SqliteStore()
+    store.load(load_dataset_obj(data))
+    compute_analytics(store)
+    out = _tool(store, "rank").invoke({"metric": "Продажи", "date": CUR})
+    assert "Иванов" in out and "Сидоров" in out
+    assert "peer_context" not in out
+
+
+def test_docstrings_split_team_vs_peer_group():
+    """Докстринги (описания для модели) явно разводят два вида сравнения."""
+    store = _store([_node(CUR, 80)])
+    tools = {t.name: t for t in build_tools(store, EmbeddingIndex([]), lambda q: [0.0])}
+    assert "ВНУТРИ КОМАНДЫ" in tools["rank"].description
+    assert "peer_context" in tools["rank"].description
+    assert "БОЛЬШОЙ peer-группой" in tools["peer_context"].description
+    assert "rank" in tools["peer_context"].description
+
+
 def test_flat_columns_show_and_hide_peer_verdicts():
     """get_metric: vs_группы/жёсткость_плана видны при данных и скрыты без них."""
     with_peer = _store(RANKS_TWO_DATES, FULL_AGG)

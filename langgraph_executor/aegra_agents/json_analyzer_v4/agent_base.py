@@ -91,8 +91,15 @@ def format_facts(overview: dict[str, Any]) -> str:
             f"- Загружены peer-данные (рейтингов {rankings_rows}, строк "
             f"peer-агрегатов {agg_rows}) — для сравнения с большой peer-группой "
             "(на фоне организации/территории/офиса, реалистичность плана, место "
-            "в рейтинге) используй peer_context."
+            "в рейтинге) используй peer_context; rank сравнивает только внутри "
+            "команды из датасета."
         )
+        employees = sum(1 for p in people if not p.get("person_is_me"))
+        if employees < 2:
+            lines.append(
+                "- Сотрудник в датасете один: внутрикомандные rank/vs_коллеги "
+                "неинформативны, сравнение с коллегами — только peer_context."
+            )
     return "\n".join(lines)
 
 
