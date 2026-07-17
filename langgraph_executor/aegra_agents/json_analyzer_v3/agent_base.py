@@ -89,30 +89,36 @@ def format_facts(overview: dict[str, Any]) -> str:
 
 def _collect_tool_calls(
     messages: list[Any],
-) -> list[tuple[str, dict[str, Any], str | None]]:
-    """Сводит сообщения стадии 1 к (имя, аргументы, текст-результат) по каждому вызову.
+) -> list[tuple[str, dict[str, Any], str | None, str]]:
+    """Сводит сообщения стадии 1 к (имя, аргументы, текст-результат, мотивация).
 
     Единый источник для транскрипта и структурированных шагов трассы: результаты
     берутся из ToolMessage по tool_call_id, имена/аргументы — из tool_calls.
     Третий элемент — None, если по id результата нет (отличаем «нет» от «пусто»).
+    Четвёртый — текст AIMessage, в котором лежит tool_call (рассуждение модели
+    «зачем зову»; GigaChat пишет его не всегда — тогда пустая строка).
     """
     results: dict[str, str] = {}
     for msg in messages:
         if isinstance(msg, ToolMessage):
             results[msg.tool_call_id] = _text(msg)
 
-    calls: list[tuple[str, dict[str, Any], str | None]] = []
+    calls: list[tuple[str, dict[str, Any], str | None, str]] = []
     for msg in messages:
-        for call in getattr(msg, "tool_calls", None) or []:
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            continue
+        reasoning = " ".join(_text(msg).split())
+        for call in tool_calls:
             args = call.get("args") or {}
-            calls.append((call.get("name"), args, results.get(call.get("id"))))
+            calls.append((call.get("name"), args, results.get(call.get("id")), reasoning))
     return calls
 
 
 def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
     """Собирает из сообщений стадии 1 транскрипт «вызов инструмента -> результат»."""
     blocks: list[str] = []
-    for name, args, result in _collect_tool_calls(messages):
+    for name, args, result, _reasoning in _collect_tool_calls(messages):
         arg_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
         text = result if result is not None else "(результат отсутствует)"
         blocks.append(f"{len(blocks) + 1}. {name}({arg_str}) ->\n{text}")
@@ -120,25 +126,30 @@ def extract_tool_transcript(messages: list[Any]) -> tuple[str, int]:
 
 
 _STEP_SUMMARY_CAP = 280
+_STEP_REASONING_CAP = 200
 
 
 def extract_tool_steps(messages: list[Any]) -> list[dict[str, Any]]:
     """Структурированные шаги tool-loop для сквозной трассы (Блок A.4 ТЗ).
 
     Тот же источник, что у extract_tool_transcript (_collect_tool_calls), но на
-    выходе — список {"tool", "args", "result_summary"} со сжатой выжимкой
-    результата (полные выдачи в трассу не тянем — экономим контекст).
+    выходе — список {"tool", "args", "result_summary"[, "reasoning"]} со сжатой
+    выжимкой результата (полные выдачи в трассу не тянем — экономим контекст).
+    reasoning — текст рассуждения модели рядом с tool_call, если она его писала.
     """
     steps: list[dict[str, Any]] = []
-    for name, args, result in _collect_tool_calls(messages):
+    for name, args, result, reasoning in _collect_tool_calls(messages):
         summary = " ".join((result or "").split())
         if len(summary) > _STEP_SUMMARY_CAP:
             summary = summary[:_STEP_SUMMARY_CAP] + "…"
-        steps.append(
-            {
-                "tool": name,
-                "args": {k: v for k, v in args.items() if v not in (None, "")},
-                "result_summary": summary,
-            }
-        )
+        step: dict[str, Any] = {
+            "tool": name,
+            "args": {k: v for k, v in args.items() if v not in (None, "")},
+            "result_summary": summary,
+        }
+        if reasoning:
+            if len(reasoning) > _STEP_REASONING_CAP:
+                reasoning = reasoning[:_STEP_REASONING_CAP] + "…"
+            step["reasoning"] = reasoning
+        steps.append(step)
     return steps

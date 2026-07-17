@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 
@@ -25,6 +26,7 @@ from .prompts import (
     BUSINESS_SYSTEM_PROMPT,
     CLASSIFY_INSIGHTS_PROMPT,
     CONFIRM_PROMPT,
+    DESCRIBE_ANSWER_PROMPT,
     FORM_INSIGHTS_EMPTY,
     FORM_INSIGHTS_INTRO,
     FORM_INSIGHTS_OUTRO,
@@ -38,6 +40,8 @@ from .prompts import (
     WIKI_QUERIES_PROMPT,
 )
 from .state import OrchestratorState, TraceStep
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_DATASET = "metrics_for_agent_analyst"
 _DEFAULT_EASYRAG_TOP_K = 5
@@ -309,8 +313,9 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         new_trace = _append_trace(state, trace_steps)
 
         out_state = {
-            "messages": [_final_message(_with_description(
-                text, {"reasoning_trace": new_trace}, config
+            "messages": [_final_message(await _with_description(
+                text, {"reasoning_trace": new_trace}, config,
+                llm=llm, question=human,
             ))],
             "reasoning_trace": new_trace,
             "pending_options": _parse_continuation_options(text),
@@ -398,7 +403,7 @@ def make_route_node(llm: GigaChat):
 
 
 def make_respond_node(llm: GigaChat):
-    def respond(state: OrchestratorState, config: RunnableConfig) -> dict:
+    async def respond(state: OrchestratorState, config: RunnableConfig) -> dict:
         cfg = (config or {}).get("configurable") or {}
 
         # Вариант 3 выбран, но свой вопрос ещё не задан — приглашаем его задать,
@@ -432,7 +437,7 @@ def make_respond_node(llm: GigaChat):
         messages: list[Any] = [SystemMessage(content=system_text)]
         messages.extend(_history_for_llm(state.get("messages") or []))
 
-        ai = llm.invoke(messages)
+        ai = await asyncio.to_thread(llm.invoke, messages)
         text = ai.content if isinstance(ai.content, str) else str(ai.content)
 
         used = []
@@ -453,8 +458,9 @@ def make_respond_node(llm: GigaChat):
         # Парсим предложенные варианты продолжения (для разрешения выбора «2»).
         # Если их нет (короткий chat/прощание) — pending_options обнуляем.
         return {
-            "messages": [_final_message(_with_description(
-                text, {"reasoning_trace": new_trace}, config
+            "messages": [_final_message(await _with_description(
+                text, {"reasoning_trace": new_trace}, config,
+                llm=llm, question=_last_user_text(state),
             ))],
             "reasoning_trace": new_trace,
             "pending_options": _parse_continuation_options(text),
@@ -949,8 +955,8 @@ def make_form_insights_node(llm: GigaChat):
             ]},
         }])
         return {
-            "messages": [_final_message(_with_description(
-                text, {"reasoning_trace": new_trace}, config))],
+            "messages": [_final_message(await _with_description(
+                text, {"reasoning_trace": new_trace}, config, llm=llm))],
             "candidate_assignments": insights,
             "pending_confirmation": True,
             "reasoning_trace": new_trace,
@@ -973,7 +979,7 @@ def make_save_insights_node():
                 "summary": "Руководитель отменил сохранение — ничего не фиксирую.",
             }])
             return {
-                "messages": [_final_message(_with_description(
+                "messages": [_final_message(await _with_description(
                     SAVE_CANCEL_PROMPT, {"reasoning_trace": new_trace}, config))],
                 "candidate_assignments": [],
                 "pending_confirmation": False,
@@ -1032,7 +1038,7 @@ def make_save_insights_node():
 
         new_trace = _append_trace(state, [step])
         return {
-            "messages": [_final_message(_with_description(
+            "messages": [_final_message(await _with_description(
                 text, {"reasoning_trace": new_trace}, config))],
             "candidate_assignments": [],
             "pending_confirmation": False,
@@ -1253,13 +1259,78 @@ def _history_for_llm(messages: list[Any]) -> list[Any]:
     return out
 
 
-def _with_description(
-    text: str, state: OrchestratorState, config: RunnableConfig | None
+def _trace_for_description(trace: list[TraceStep]) -> str:
+    """Трасса одним текстом для LLM-описания: шаги по порядку, у tool_call — детали.
+
+    summary шага аналитика уже содержит `tool(args) → результат`; отдельно
+    добавляем только мотивацию вызова (reasoning), если модель её писала.
+    """
+    lines: list[str] = []
+    for i, step in enumerate(trace or [], 1):
+        summary = (step.get("summary") or "").strip()
+        if not summary:
+            continue
+        label = _KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "шаг")
+        lines.append(f"{i}. [{label}] {summary}")
+        if step.get("kind") == "tool_call":
+            reasoning = ((step.get("detail") or {}).get("reasoning") or "").strip()
+            if reasoning:
+                lines.append(f"   Мотивация вызова: {reasoning}")
+    return "\n".join(lines)
+
+
+async def _describe_trace_llm(
+    llm: Any, question: str, answer: str, trace: list[TraceStep]
 ) -> str:
-    """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true."""
+    """Развёрнутое описание хода анализа по трассе (describe_answer=true).
+
+    Любая ошибка LLM → "" — вызывающий откатится на детерминированный render_trace,
+    так что режим не может сломать ответ.
+    """
+    steps_text = _trace_for_description(trace)
+    if not steps_text:
+        return ""
+    parts = []
+    if (question or "").strip():
+        parts.append(f"Вопрос руководителя:\n{question.strip()}")
+    parts.append(f"Итоговый ответ:\n{answer}")
+    parts.append(f"Трасса (шаги анализа по порядку):\n{steps_text}")
+    try:
+        ai = await asyncio.to_thread(llm.invoke, [
+            SystemMessage(content=DESCRIBE_ANSWER_PROMPT),
+            HumanMessage(content="\n\n".join(parts)),
+        ])
+        content = ai.content if isinstance(ai.content, str) else str(ai.content)
+        return content.strip()
+    except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
+        logger.warning("describe_answer: LLM-описание трассы упало, фоллбэк на список",
+                       exc_info=True)
+        return ""
+
+
+async def _with_description(
+    text: str,
+    state: OrchestratorState,
+    config: RunnableConfig | None,
+    llm: Any = None,
+    question: str = "",
+) -> str:
+    """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true.
+
+    Основной путь — LLM-описание по трассе (какие инструменты, зачем, как
+    интерпретированы данные). Фоллбэк — детерминированный render_trace: когда llm
+    не передан, в трассе нет содержательных шагов (tool_call/kb_hit — служебные
+    ходы вроде отмены сохранения) или LLM-вызов упал/вернул пусто.
+    """
     if not _config_flag(config, "describe_answer", default=False):
         return text
-    section = render_trace(state.get("reasoning_trace") or [])
+    trace = state.get("reasoning_trace") or []
+    substantive = any(s.get("kind") in ("tool_call", "kb_hit") for s in trace)
+    if llm is not None and substantive:
+        narrative = await _describe_trace_llm(llm, question, text, trace)
+        if narrative:
+            return f"{text}\n\n---\n{_TRACE_SECTION_TITLE}\n\n{narrative}"
+    section = render_trace(trace)
     return f"{text}\n\n{section}" if section else text
 
 
