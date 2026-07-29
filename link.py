@@ -14,6 +14,9 @@ from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import (
 from langgraph_executor.aegra_agents.analytic_orchestrator_v3.graph import (
     graph as analytic_orchestrator_v3_graph,
 )
+from langgraph_executor.aegra_agents.analytic_orchestrator_v4.graph import (
+    graph as analytic_orchestrator_v4_graph,
+)
 from langgraph_executor.aegra_agents.doc_manager.graph import (
     graph as doc_manager_graph,
 )
@@ -41,6 +44,9 @@ from langgraph_executor.aegra_agents.json_analyzer_v3.graph import (
 from langgraph_executor.aegra_agents.json_analyzer_v4.graph import (
     graph as json_analyzer_v4_graph,
 )
+from langgraph_executor.aegra_agents.json_analyzer_v5.graph import (
+    graph as json_analyzer_v5_graph,
+)
 from langgraph_executor.aegra_agents.kb_chat.graph import (
     graph as kb_chat_graph,
 )
@@ -52,6 +58,7 @@ __all__ = [
     "analytic_orchestrator_graph",
     "analytic_orchestrator_v2_graph",
     "analytic_orchestrator_v3_graph",
+    "analytic_orchestrator_v4_graph",
     "doc_manager_graph",
     "easyrag_graph",
     "external_doc_loader_graph",
@@ -61,6 +68,7 @@ __all__ = [
     "json_analyzer_v2_graph",
     "json_analyzer_v3_graph",
     "json_analyzer_v4_graph",
+    "json_analyzer_v5_graph",
     "kb_chat_graph",
     "wiki_ingest_graph",
 ]

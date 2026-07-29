@@ -20,6 +20,9 @@ class SendAssignmentsComponent:
         insights:        Список наблюдений; каждое — dict с ключами
                          ``type`` / ``metric_id`` / ``metric_name`` / ``text``.
                          ``type`` ∈ {main_problem, problem, norm, achievement}.
+        source_type:     Тип сущности вызывающей системы, к которой привязан инсайт.
+        source_id:       Её идентификатор. Оба опциональны и попадают в payload,
+                         только когда заданы: старые оркестраторы их не передают.
     """
 
     def __init__(
@@ -29,15 +32,19 @@ class SendAssignmentsComponent:
         direction_key: str,
         thread_id: str,
         insights: list[dict[str, Any]],
+        source_type: str | None = None,
+        source_id: str | None = None,
     ) -> None:
         self.boss_tabnum = boss_tabnum
         self.employee_tabnum = employee_tabnum
         self.direction_key = direction_key
         self.thread_id = thread_id
         self.insights = insights
+        self.source_type = source_type
+        self.source_id = source_id
 
     def submit(self) -> dict[str, Any]:
-        return {
+        payload = {
             "title": "agent_analyst_insights",
             "content": {"insights": self.insights},
             "object_id": self.employee_tabnum,
@@ -45,3 +52,8 @@ class SendAssignmentsComponent:
             "session_id": self.thread_id,
             "subject_id": self.boss_tabnum,
         }
+        if self.source_type:
+            payload["source_type"] = self.source_type
+        if self.source_id:
+            payload["source_id"] = self.source_id
+        return payload
