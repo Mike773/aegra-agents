@@ -7,16 +7,21 @@
                date, calc_period, fact, plan, benchmark, [ex], [rr],
                [influent_percent], element, [rankings],
                child_metrics: [<metric>, ...]}
-    rankings = [{rank: "458 из 500", level: "ORG"|"TERR"|"OFFICE",
-                 percentile}, ...] — место сотрудника в peer-группе уровня.
+    rankings = [{rank: "458 из 500", level: <код уровня>, percentile}, ...] —
+                 место сотрудника в peer-группе уровня.
 
 Отдельный вход — batch-агрегаты peer-групп (``load_aggregates_obj``):
-    [{"dataset": {"level": "ORG"|"TERR"|"OFFICE", "metrics": [<agg_metric>]}}]
+    [{"dataset": {"level": <код уровня>, [level_name], "metrics": [<agg_metric>]}}]
     agg_metric = {metric_id, metric_name, aggregates: {dt, calc_period,
                   mean_fact, mean_plan, mean_ex, median, hit_rate,
                   top20_mean_fact, iqr, cv, total_objects,
                   history: [<те же поля за прошлые периоды>]},
                   children_metrics: [<agg_metric>, ...]}
+
+``level`` — служебный код группы сравнения (наборы кодов инстанс-специфичны),
+``level_name`` — её человеческое название («по офису»), единственный источник
+имени для выдачи. Поле опционально: без него группа описывается обезличенно,
+код в выдачу не попадает никогда.
 
 Названия конкретных метрик НЕ хардкодятся — обходим то, что есть в JSON.
 """
@@ -178,6 +183,7 @@ AGG_ROW_FIELDS: tuple[str, ...] = (
     "parent_node_uid",
     "depth",
     "level",
+    "level_name",
     "metric_id",
     "metric_name",
     "dt",
@@ -210,6 +216,7 @@ _AGG_VALUE_KEYS = (
 def _walk_aggregates(
     metrics: list[Any],
     level: Any,
+    level_name: Any,
     rows: list[dict[str, Any]],
     counter: list[int],
     parent_uid: int | None,
@@ -226,6 +233,7 @@ def _walk_aggregates(
             "parent_node_uid": parent_uid,
             "depth": depth,
             "level": level,
+            "level_name": level_name,
             "metric_id": node.get("metric_id"),
             "metric_name": node.get("metric_name"),
         }
@@ -247,7 +255,7 @@ def _walk_aggregates(
         # В этом payload дети приходят как "children_metrics" (в основном
         # датасете — "child_metrics"); принимаем оба на всякий случай.
         children = node.get("children_metrics") or node.get("child_metrics") or []
-        _walk_aggregates(children, level, rows, counter, uid, depth + 1)
+        _walk_aggregates(children, level, level_name, rows, counter, uid, depth + 1)
 
 
 def load_aggregates_obj(data: Any) -> list[dict[str, Any]]:
@@ -266,6 +274,7 @@ def load_aggregates_obj(data: Any) -> list[dict[str, Any]]:
         ds = entry.get("dataset") if isinstance(entry, dict) else None
         if isinstance(ds, dict):
             _walk_aggregates(
-                ds.get("metrics") or [], ds.get("level"), rows, counter, None, 1
+                ds.get("metrics") or [], ds.get("level"), ds.get("level_name"),
+                rows, counter, None, 1,
             )
     return rows

@@ -187,12 +187,11 @@ def _norm_metric_name(name: Any) -> str:
 def _level_order(agg_rows: list[dict], ref_level: str | None = None) -> list[str]:
     """Уровни peer-агрегатов от узкой группы к широкой.
 
-    Имена уровней инстанс-специфичны (ORG/TERR/OFFICE лишь пример), поэтому
-    приоритет такой: явный override (configurable.peer_ref_level) → порядок из
-    справочника уровней в конфиге сервиса (PEER_LEVELS, он задан «от узкой к
-    широкой») → эвристика для уровней вне справочника: минимальный положительный
-    total_objects на текущем срезе (узкая группа = ближайшие коллеги), затем
-    порядок появления в payload (MIN(node_uid))."""
+    Коды уровней инстанс-специфичны, поэтому приоритет такой: явный override
+    (configurable.peer_ref_level) → порядок из конфига сервиса (PEER_LEVELS, он
+    задан «от узкой к широкой») → эвристика для уровней вне конфига: минимальный
+    положительный total_objects на текущем срезе (узкая группа = ближайшие
+    коллеги), затем порядок появления в payload (MIN(node_uid))."""
     info: dict[str, dict[str, Any]] = {}
     for r in agg_rows:
         level = r["level"]
@@ -1154,10 +1153,20 @@ def build_peer_context(
             (metric, person_key, person_key),
         )
     ]
+    # Название группы приходит с данными (level_name), а не из конфига, и только в
+    # общих предагрегатах: в персональных rankings его нет. Карта строится по ВСЕЙ
+    # таблице агрегатов (не по срезу текущей метрики) — иначе для метрики без
+    # агрегатов или без этого уровня имя не нашлось бы.
+    _names = store.level_names()
+
+    def _level_name(level: Any) -> str | None:
+        return _names.get(str(level or "").strip().casefold())
+
     dynamics: list[dict[str, Any]] = []
     if slot:
         ref_row = next(iter(slot.values()))
-        out["ref_level"] = ref_row["level"]
+        # Код референсной группы наружу не отдаём — только её название, если есть.
+        out["ref_level_name"] = _level_name(ref_row["level"])
         for p in personal:
             agg = slot.get(_ym(p["date"]))
             if agg is None and p["fact"] is None:
@@ -1228,6 +1237,7 @@ def build_peer_context(
         levels.append(
             {
                 "level": level,
+                "level_name": _level_name(level),
                 "dt": cur["dt"],
                 "mean_fact": cur["mean_fact"],
                 "median": cur["median"],
@@ -1246,9 +1256,12 @@ def build_peer_context(
         if (r["date"] or "") != latest_rank_date or r["level"] in agg_levels:
             continue
         agg_levels.add(r["level"])
-        levels.append(
-            {"level": r["level"], "rank_raw": r["rank_raw"], "percentile": r["percentile"]}
-        )
+        levels.append({
+            "level": r["level"],
+            "level_name": _level_name(r["level"]),
+            "rank_raw": r["rank_raw"],
+            "percentile": r["percentile"],
+        })
     if levels:
         out["levels"] = levels
 
@@ -1261,15 +1274,25 @@ def build_peer_context(
     if len(judged) >= 2:
         judged.sort(key=lambda lv: lv["total_objects"])  # от узкого к широкому
         narrow, broad = judged[0], judged[-1]
+        # Группы называем именами из данных; названия нет — обходимся без него
+        # (код уровня в текст не подставляем никогда).
+        def _named(lv: dict[str, Any]) -> str:
+            name = (lv.get("level_name") or "").strip()
+            return f" ({name})" if name else ""
+
         if all(lv["worsening"] for lv in judged):
+            named = ", ".join(
+                str(lv["level_name"]).strip() for lv in judged
+                if (lv.get("level_name") or "").strip()
+            )
             out["localization"] = (
-                "системное: групповое значение ухудшается на всех уровнях "
-                f"({', '.join(str(lv['level']) for lv in judged)})"
+                "системное: групповое значение ухудшается во всех группах сравнения"
+                + (f" ({named})" if named else "")
             )
         elif narrow["worsening"] and not broad["worsening"]:
             out["localization"] = (
-                f"локальное: ухудшается узкая группа ({narrow['level']}), "
-                f"широкая ({broad['level']}) стабильна"
+                f"локальное: ухудшается узкая группа{_named(narrow)}, "
+                f"широкая{_named(broad)} стабильна"
             )
 
     # --- position_dynamics: изменение percentile ----------------------------- #
@@ -1284,6 +1307,7 @@ def build_peer_context(
             position.append(
                 {
                     "level": level,
+                    "level_name": _level_name(level),
                     "from_date": dated[0]["date"],
                     "to_date": dated[-1]["date"],
                     "from_percentile": dated[0]["percentile"],

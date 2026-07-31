@@ -11,9 +11,9 @@ class JsonAnalyzerState(TypedDict, total=False):
     # Вход: JSON-датасет (распарсенный dict или сырая строка) и вопрос.
     raw_json: str | dict | None
     question: str
-    # Вход (опционально): batch-агрегаты peer-групп по уровням ORG/TERR/OFFICE —
-    # список {"dataset": {"level", "metrics": [...]}} (распарсенный или строка).
-    # Нет агрегатов → поведение как у json_analyzer_v3.
+    # Вход (опционально): batch-агрегаты peer-групп — список
+    # {"dataset": {"level", "level_name", "metrics": [...]}} (распарсенный или
+    # строка). Нет агрегатов → поведение без peer-сравнения.
     raw_aggregates: Any
     # Изоляция pgvector-кэша эмбеддингов между направлениями.
     direction_key: str

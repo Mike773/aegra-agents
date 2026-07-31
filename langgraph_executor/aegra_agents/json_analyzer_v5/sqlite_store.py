@@ -91,7 +91,7 @@ class SqliteStore:
             -- которые считаются локально по загруженному датасету).
             CREATE TABLE metric_rankings (
                 metric_uid  INTEGER REFERENCES metrics(metric_uid),
-                level       TEXT,       -- ORG | TERR | OFFICE
+                level       TEXT,       -- служебный код группы сравнения
                 rank_pos    INTEGER,    -- 458 из «458 из 500»
                 rank_total  INTEGER,    -- 500
                 rank_raw    TEXT,       -- исходная строка как есть
@@ -104,7 +104,8 @@ class SqliteStore:
                 node_uid        INTEGER,
                 parent_node_uid INTEGER,
                 depth           INTEGER,
-                level           TEXT,      -- ORG | TERR | OFFICE
+                level           TEXT,      -- служебный код группы сравнения
+                level_name      TEXT,      -- её название для выдачи (может не прийти)
                 metric_id       TEXT,
                 metric_name     TEXT,
                 dt              TEXT,
@@ -223,6 +224,28 @@ class SqliteStore:
 
     def aggregates_row_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM peer_aggregates").fetchone()[0]
+
+    def level_names(self) -> dict[str, str]:
+        """Названия групп сравнения по коду уровня: {casefold(level): level_name}.
+
+        Название — свойство уровня, а не метрики, и приходит ТОЛЬКО в общих
+        предагрегатах: в персональных rankings его нет. Поэтому карта строится по
+        всей таблице, а не по строкам одной метрики — иначе у метрики без
+        агрегатов (или без этого уровня) группа осталась бы безымянной, хотя имя
+        лежит в том же пайлоаде у соседней метрики.
+
+        Ключ приводится к casefold: коды приходят из двух разных пайлоадов и
+        могут разойтись регистром. При повторе кода выигрывает первое непустое
+        имя (порядок по node_uid детерминирован).
+        """
+        names: dict[str, str] = {}
+        for row in self.conn.execute(
+            "SELECT level, level_name FROM peer_aggregates "
+            "WHERE level IS NOT NULL AND level_name IS NOT NULL "
+            "AND TRIM(level_name) <> '' ORDER BY node_uid"
+        ):
+            names.setdefault(str(row["level"]).strip().casefold(), row["level_name"])
+        return names
 
     @staticmethod
     def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:

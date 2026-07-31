@@ -30,9 +30,13 @@ def _slice(dt, **fields):
     return {"dt": dt, "calc_period": "Месяц", **fields}
 
 
+# Название группы приходит с данными (level_name); коды уровней в выдачу не идут.
+LEVEL_NAMES = {"УЗЕЛ": "по офису", "БАНК": "по всему банку", "КУСТ-7": "по кусту"}
+
+
 def _payload(*datasets):
     return [
-        {"dataset": {"level": lvl, "metrics": [
+        {"dataset": {"level": lvl, "level_name": LEVEL_NAMES.get(lvl), "metrics": [
             {"metric_id": "1", "metric_name": "Продажи", "aggregates": agg}
         ]}}
         for lvl, agg in datasets
@@ -83,9 +87,11 @@ def test_registered_and_full_render():
     assert "Разрыв с топ-20%" in out
     assert "жёсткий план" in out
     assert "Группы сравнения" in out
-    assert "УЗЕЛ" in out and "БАНК" in out  # имена уровней — как в данных
+    # Группы подписаны названиями из данных, служебных кодов в выдаче нет.
+    assert "по офису" in out and "по всему банку" in out
+    assert "УЗЕЛ" not in out and "БАНК" not in out
     assert "458 из 500" in out
-    assert "Позиция в рейтинге (БАНК)" in out and "96" in out and "8.4" in out
+    assert "Позиция в рейтинге (по всему банку)" in out and "96" in out and "8.4" in out
 
 
 def test_localization_needs_two_levels():
@@ -95,7 +101,8 @@ def test_localization_needs_two_levels():
                     "history": [_slice(PREV, mean_fact=1000)]}),
     )
     out = _tool(_store([_node(CUR, 80)], one_level)).invoke({"metric": "Продажи"})
-    assert "КУСТ-7" in out
+    assert "по кусту" in out
+    assert "КУСТ-7" not in out
     assert "Локализация" not in out
 
 
@@ -130,8 +137,10 @@ def test_position_dynamics_needs_two_points():
     assert "458 из 500" in out
     assert "Позиция в рейтинге" not in out
 
+    # Агрегатов нет — название группы взять неоткуда, пишем обезличенно.
     out2 = _tool(_store(RANKS_TWO_DATES)).invoke({"metric": "Продажи"})
-    assert "Позиция в рейтинге (БАНК)" in out2
+    assert "Позиция в рейтинге:" in out2
+    assert "БАНК" not in out2
 
 
 def test_no_peer_data_at_all():

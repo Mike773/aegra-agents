@@ -49,6 +49,8 @@ def _payload(levels=("ORG", "TERR", "OFFICE")):
         {
             "dataset": {
                 "level": lvl,
+                # Название группы для выдачи приходит вместе с данными.
+                "level_name": f"группа {lvl.lower()}",
                 "metrics": [
                     _metric(
                         "377722562",
@@ -84,7 +86,12 @@ def test_flatten_counts_and_fields():
     assert r["cv"] == 75.5
     assert r["total_objects"] == 496
     assert r["calc_period"] == "Месяц"
+    assert r["level_name"] == "группа org"
     assert {row["level"] for row in rows} == {"ORG", "TERR", "OFFICE"}
+    # Название уровня наследуется всем его деревом, включая детей.
+    assert {row["level_name"] for row in rows} == {
+        "группа org", "группа terr", "группа office"
+    }
 
 
 def test_children_get_parent_uid_and_depth():

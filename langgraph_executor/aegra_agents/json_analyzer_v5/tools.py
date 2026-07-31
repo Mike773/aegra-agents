@@ -15,7 +15,6 @@ from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
 
-from ..shared.peer_levels import level_title
 from . import analytics
 from .sqlite_store import SqliteStore
 from .store_cache import EmbeddingIndex
@@ -568,9 +567,10 @@ def _render_peer_context(result: dict[str, Any]) -> str:
     head = f"Peer-контекст метрики «{result.get('metric')}»"
     if result.get("person_fio"):
         head += f" — {result['person_fio']}"
-    if result.get("ref_level"):
-        # Название группы из конфига сервиса; уровня нет в справочнике — код как есть.
-        head += f" (сравнение с группой: {level_title(result['ref_level'])})"
+    # Название группы приходит с данными (level_name). Не пришло — сравнение
+    # описывается обезличенно: служебный код группы в выдачу не попадает.
+    if result.get("ref_level_name"):
+        head += f" (сравнение с группой: {result['ref_level_name']})"
     lines.append(head + ":")
 
     dynamics = result.get("dynamics") or []
@@ -613,7 +613,7 @@ def _render_peer_context(result: dict[str, Any]) -> str:
     levels = result.get("levels") or []
     if levels:
         cols = [
-            ("группа", lambda r: level_title(r.get("level"))),
+            ("группа", lambda r: r.get("level_name") or ""),
             ("период", lambda r: r.get("dt") or ""),
             ("среднее по группе", lambda r: _fmt_num(r.get("mean_fact"))),
             ("медиана", lambda r: _fmt_num(r.get("median"))),
@@ -633,8 +633,9 @@ def _render_peer_context(result: dict[str, Any]) -> str:
 
     for p in result.get("position_dynamics") or []:
         arrow = "вырос" if p["change"] > 0 else ("снизился" if p["change"] < 0 else "не изменился")
+        group = f" ({p['level_name']})" if p.get("level_name") else ""
         lines.append(
-            f"Позиция в рейтинге ({level_title(p['level'])}): процентиль {arrow} "
+            f"Позиция в рейтинге{group}: процентиль {arrow} "
             f"с {_fmt_num(p['from_percentile'])} ({p['from_date']}) до "
             f"{_fmt_num(p['to_percentile'])} ({p['to_date']})."
         )
