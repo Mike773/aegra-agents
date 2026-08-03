@@ -1,10 +1,10 @@
 """Структура графа бизнес-оркестратора (analytic_orchestrator_v2).
 
-Первый ход (load_data → wiki → первичный разбор) завершается ОДНИМ сообщением.
-Завершение анализа (post_insights) — отдельные листья form_insights/save_insights.
-Граф строится детерминированно с заглушкой llm (узлы ленивы), поэтому ни сети, ни
-GigaChat-кредов не нужно; фабрика клиента на уровне модуля требует креды — даём
-фиктивные.
+Первый ход (load_data → wiki → первичный разбор) завершается ОДНИМ сообщением, а
+хвостом хода auto_insight пишет стартовый инсайт. Фиксация по просьбе — лист
+save_insight; экрана подтверждения нет. Граф строится детерминированно с заглушкой
+llm (узлы ленивы), поэтому ни сети, ни GigaChat-кредов не нужно; фабрика клиента на
+уровне модуля требует креды — даём фиктивные.
 """
 from __future__ import annotations
 
@@ -25,11 +25,13 @@ def _edges():
     return {(e.source, e.target) for e in compiled.get_graph().edges}
 
 
-def test_first_turn_emits_single_message():
+def test_first_turn_tail_writes_start_insight():
     edges = _edges()
-    assert ("initial_analysis", "__end__") in edges
-    # Первый ход НЕ продолжается в авто-формирование выводов.
-    assert ("initial_analysis", "form_insights") not in edges
+    # Итог хода отдаёт initial_analysis, а auto_insight — «немой» хвост первого
+    # хода: пишет стартовый инсайт в сервис и закрывает ход.
+    assert ("initial_analysis", "auto_insight") in edges
+    assert ("auto_insight", "__end__") in edges
+    assert ("initial_analysis", "__end__") not in edges
 
 
 def test_first_turn_grounds_wiki_before_analysis():
@@ -39,13 +41,14 @@ def test_first_turn_grounds_wiki_before_analysis():
     assert ("load_data", "initial_analysis") not in edges
 
 
-def test_finish_branches_are_leaves():
+def test_save_insight_is_leaf_and_confirmation_removed():
     edges = _edges()
-    # Завершение анализа: форма и сохранение — отдельные листья хода.
-    assert ("route", "form_insights") in edges
-    assert ("route", "save_insights") in edges
-    assert ("form_insights", "__end__") in edges
-    assert ("save_insights", "__end__") in edges
+    assert ("route", "save_insight") in edges
+    assert ("save_insight", "__end__") in edges
+    # Экран подтверждения «Все верно?» убран целиком.
+    nodes_in_graph = {n for e in edges for n in e}
+    assert "form_insights" not in nodes_in_graph
+    assert "save_insights" not in nodes_in_graph
 
 
 def test_analytics_path_through_wiki_grounding():
@@ -59,17 +62,13 @@ def test_analytics_path_through_wiki_grounding():
 def test_after_route_intent_mapping():
     # Содержательный анализ.
     assert after_route({"intent": "analytics"}) == "call_json_analyzer"
-    assert after_route({"intent": "more_analysis"}) == "call_json_analyzer"
     assert after_route({"intent": "wiki"}) == "call_easyrag"
-    # Завершение: форма/переформа и сохранение/отмена.
-    assert after_route({"intent": "finish"}) == "form_insights"
-    assert after_route({"intent": "finish_reform"}) == "form_insights"
-    assert after_route({"intent": "finish_save"}) == "save_insights"
-    assert after_route({"intent": "finish_cancel"}) == "save_insights"
-    # Прочее — к респондеру.
-    assert after_route({"intent": "ask_question"}) == "respond"
+    # Явная просьба зафиксировать вывод.
+    assert after_route({"intent": "save_insight"}) == "save_insight"
+    # Прочее и неожиданное — к респондеру.
     assert after_route({"intent": "chat"}) == "respond"
     assert after_route({"intent": "done"}) == "respond"
+    assert after_route({"intent": "finish"}) == "respond"
 
 
 def test_metrics_excluded_from_output_channels():

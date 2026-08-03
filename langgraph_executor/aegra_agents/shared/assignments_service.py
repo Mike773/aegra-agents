@@ -8,6 +8,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+# Кто и как завёл вывод. Пока фиксированы для всех оркестраторов: инсайты пишет
+# только агент, а подтверждения у руководителя больше не спрашиваем (экран
+# «Все верно?» убран). Станут параметрами, когда появится ручное редактирование.
+_INSIGHT_AUTHOR = "agent"
+_INSIGHT_CONFIRMED = True
+
 
 class SendAssignmentsComponent:
     """Отправка списка поручений (insights) в сервис управления задачами.
@@ -23,6 +29,9 @@ class SendAssignmentsComponent:
         source_type:     Тип сущности вызывающей системы, к которой привязан инсайт.
         source_id:       Её идентификатор. Оба опциональны и попадают в payload,
                          только когда заданы: старые оркестраторы их не передают.
+
+    Поля ``author``/``confirmed`` в payload фиксированы (см. константы модуля) и
+    в конструктор не выносятся.
     """
 
     def __init__(
@@ -51,6 +60,8 @@ class SendAssignmentsComponent:
             "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
             "session_id": self.thread_id,
             "subject_id": self.boss_tabnum,
+            "author": _INSIGHT_AUTHOR,
+            "confirmed": _INSIGHT_CONFIRMED,
         }
         if self.source_type:
             payload["source_type"] = self.source_type

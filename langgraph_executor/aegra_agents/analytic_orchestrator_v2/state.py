@@ -7,17 +7,12 @@ from langgraph.graph.message import add_messages
 
 Intent = Literal[
     # Содержательные ветви.
-    "analytics",      # конкретный вопрос про метрики
-    "more_analysis",  # «2»/согласие на доп. анализ из варианта 2 блока продолжения
+    "analytics",      # конкретный вопрос про метрики (в т.ч. согласие углубиться в
+                      # направление, которое аналитик предложил в конце ответа)
     "wiki",           # методика/определения/нормативы
-    "ask_question",   # «3» — хочет задать свой вопрос, но ещё не сформулировал
+    "save_insight",   # «зафиксируй этот вывод» — записать инсайт в сервис
     "chat",
     "done",
-    # Завершение анализа (post_insights): форма → подтверждение → сохранение.
-    "finish",         # «1»/«завершить» — сформировать инсайты и показать на подтверждение
-    "finish_save",    # подтверждение «Все верно?» = да → сохранить
-    "finish_reform",  # правка → переформировать инсайты с учётом пожелания
-    "finish_cancel",  # передумал сохранять → отмена без записи
 ]
 
 
@@ -70,6 +65,12 @@ class OrchestratorOutput(TypedDict, total=False):
     metrics_error: str | None
     loaded: bool
 
+    # Внешняя привязка инсайтов: откуда пришёл запуск анализа (тип сущности и её
+    # идентификатор в вызывающей системе). Приходят в configurable. Есть оба —
+    # инсайты пишутся в сервис; нет — не пишутся вообще (см. auto_insight).
+    source_type: str | None
+    source_id: str | None
+
     intent: Intent | None
 
     # Результат вызова easyrag-подграфа (свежий, под последний вопрос пользователя).
@@ -94,23 +95,12 @@ class OrchestratorOutput(TypedDict, total=False):
     analytics_answer: str | None
     analytics_error: str | None
 
-    # Завершение анализа (post_insights). Инсайты сервиса: каждый элемент —
-    # {type, metric_id, metric_name, text}, type ∈
-    # {main_problem, problem, norm, achievement} (см. _parse_insights_json).
-    # candidate_assignments — последняя СФОРМИРОВАННАЯ корзина инсайтов
-    #   (post_insights action="form"), показанная руководителю на подтверждение.
-    # pending_confirmation — True, пока ждём ответ на «Все верно?»: в этом
-    #   состоянии роутер трактует реплику как confirm/edit/cancel, а не обычный
-    #   intent. Сбрасывается после сохранения/отмены.
-    # last_committed_assignments — что реально ушло в сервис в прошлый раз
-    #   (post_insights action="save").
-    candidate_assignments: list[dict]
-    pending_confirmation: bool
-    last_committed_assignments: list[dict]
-
-    # Три варианта из последнего блока «Что делаем дальше?» (распарсенные из ответа
-    # модели). Нужны, чтобы разрешить выбор «2» в конкретное направление анализа.
-    pending_options: list[str]
+    # Инсайты, реально ушедшие в сервис за диалог: каждый — {type, metric_id,
+    # metric_name, text}, type ∈ {main_problem, problem, norm, achievement}
+    # (см. _parse_insights_json). Экрана подтверждения нет: стартовый инсайт
+    # пишется автоматически (auto_insight), последующие — по явной просьбе
+    # руководителя (save_insight). Накапливается конкатенацией в узлах.
+    committed_insights: list[dict]
 
 
 class OrchestratorState(OrchestratorOutput, total=False):
@@ -123,6 +113,6 @@ class OrchestratorState(OrchestratorOutput, total=False):
     """
 
     # Полный JSON-датасет сотрудника. Грузится load_data на ходе 1, переживает
-    # ходы по loaded-гейту, нужен call_json_analyzer/extract_assignments/ground_wiki
+    # ходы по loaded-гейту, нужен call_json_analyzer/auto_insight/ground_wiki
     # как raw_json для json_analyzer. Наружу не отдаётся — большой и не нужен клиенту.
     metrics: Any

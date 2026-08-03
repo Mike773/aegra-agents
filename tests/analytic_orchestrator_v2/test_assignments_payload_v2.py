@@ -1,8 +1,9 @@
 """Юнит-тест структуры payload SendAssignmentsComponent.submit().
 
 Проверяем целевой формат сервиса инсайтов: title/content.insights + маппинг
-идентификаторов (object_id=сотрудник, subject_id=руководитель, session_id=thread)
-и наличие метки времени. Зависимостей от LLM/langgraph нет.
+идентификаторов (object_id=сотрудник, subject_id=руководитель, session_id=thread),
+наличие метки времени и фиксированные поля author/confirmed. Зависимостей от
+LLM/langgraph нет.
 """
 from __future__ import annotations
 
@@ -46,3 +47,27 @@ def test_submit_payload_shape_and_id_mapping():
     ]
     # timestamp формата dd.mm.yyyy HH:MM:SS.
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}", payload["timestamp"])
+    # Фиксированные поля: выводы пишет агент, подтверждение больше не спрашиваем.
+    assert payload["author"] == "agent"
+    assert payload["confirmed"] is True
+
+
+def test_submit_payload_carries_source_binding():
+    """source_type/source_id попадают в payload, только когда заданы."""
+    kwargs = dict(
+        boss_tabnum="832243",
+        employee_tabnum="0932433",
+        direction_key="dir-1",
+        thread_id="373737",
+        insights=[{"type": "norm", "metric_id": "1",
+                   "metric_name": "AHT", "text": "В плане."}],
+    )
+    bound = SendAssignmentsComponent(
+        **kwargs, source_type="meeting", source_id="mtg-77"
+    ).submit()
+    assert bound["source_type"] == "meeting"
+    assert bound["source_id"] == "mtg-77"
+
+    plain = SendAssignmentsComponent(**kwargs).submit()
+    assert "source_type" not in plain
+    assert "source_id" not in plain

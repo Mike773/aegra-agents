@@ -138,8 +138,8 @@ class UsageTracker(BaseCallbackHandler):
 
 async def main():
     # E2E_ORCHESTRATOR=v2 гоняет бизнес-оркестратор (analytic_orchestrator_v2):
-    # многоуровневый разбор по бизнес-методологии + блок «Что делаем дальше?» +
-    # завершение через post_insights. По умолчанию — прод-оркестратор.
+    # многоуровневый разбор по бизнес-методологии, аналитик json_analyzer_v3,
+    # инсайты по source_type/source_id. По умолчанию — прод-оркестратор.
     which = os.environ.get("E2E_ORCHESTRATOR", "").strip().lower()
     if which in {"v4", "4"}:
         # v4: аналитик json_analyzer_v5, предагрегаты peer-групп, инсайты по
@@ -167,7 +167,7 @@ async def main():
         "thread_id": "e2e-orch-1",
         "wiki_grounding_enabled": False,
     }
-    # Только для v4: привязка инсайтов, флаг предагрегатов и режим описания хода.
+    # Привязка инсайтов (v2 и v4), флаг предагрегатов (v4) и режим описания хода.
     if os.environ.get("E2E_SOURCE_ID"):
         configurable["source_type"] = os.environ.get("E2E_SOURCE_TYPE", "meeting")
         configurable["source_id"] = os.environ["E2E_SOURCE_ID"]

@@ -11,15 +11,15 @@ from ..json_analyzer_v3.graph import graph as json_analyzer_graph
 from ..shared.clients import create_gigachat_client
 from .nodes import (
     after_route,
+    make_auto_insight_node,
     make_call_easyrag_node,
     make_call_json_analyzer_node,
-    make_form_insights_node,
     make_ground_wiki_node,
     make_initial_analysis_node,
     make_load_data_node,
     make_respond_node,
     make_route_node,
-    make_save_insights_node,
+    make_save_insight_node,
     need_load,
 )
 from .state import OrchestratorOutput, OrchestratorState
@@ -46,9 +46,10 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g.add_node("ground_wiki_analytics", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("call_json_analyzer", make_call_json_analyzer_node(json_analyzer_graph))
     g.add_node("call_easyrag", make_call_easyrag_node(easyrag_graph))
-    # Завершение анализа (post_insights): форма → подтверждение → сохранение.
-    g.add_node("form_insights", make_form_insights_node(llm))
-    g.add_node("save_insights", make_save_insights_node())
+    # Инсайты: стартовый пишется автоматически после первичного разбора,
+    # остальные — по явной просьбе руководителя. Экрана подтверждения нет.
+    g.add_node("auto_insight", make_auto_insight_node(llm))
+    g.add_node("save_insight", make_save_insight_node(llm))
     g.add_node("respond", make_respond_node(llm))
 
     # Turn-based чат: один вызов графа = одно входящее сообщение → ответ → END.
@@ -61,14 +62,17 @@ def build_graph(llm: GigaChat, checkpointer=None):
         {"load_data": "load_data", "route": "route"},
     )
     # Первый ход: входящее сообщение — триггер. Грузим данные, делаем первичный
-    # многоуровневый разбор по бизнес-методологии и завершаем ход блоком «Что
-    # делаем дальше?». Контракт сообщений хода: рабочие узлы кладут короткие
+    # многоуровневый разбор по бизнес-методологии и завершаем ход предложением,
+    # что разобрать дальше. Контракт сообщений хода: рабочие узлы кладут короткие
     # «шаговые» сообщения (additional_kwargs.orchestrator_step), терминальный лист —
     # ИТОГОВЫЙ ответ (additional_kwargs.orchestrator_final, всегда последний).
     # Прогресс отключается флагом configurable.emit_progress_messages=false.
     g.add_edge("load_data", "ground_wiki_initial")
     g.add_edge("ground_wiki_initial", "initial_analysis")
-    g.add_edge("initial_analysis", END)
+    # Итог хода отдаёт initial_analysis; auto_insight — «хвост» первого хода:
+    # пишет стартовый инсайт в сервис и НЕ добавляет сообщений пользователю.
+    g.add_edge("initial_analysis", "auto_insight")
+    g.add_edge("auto_insight", END)
     # Последующие ходы: классифицируем реплику и ведём её по нужной ветви.
     g.add_conditional_edges(
         "route",
@@ -76,18 +80,14 @@ def build_graph(llm: GigaChat, checkpointer=None):
         {
             "call_json_analyzer": "call_json_analyzer",
             "call_easyrag": "call_easyrag",
-            "form_insights": "form_insights",
-            "save_insights": "save_insights",
+            "save_insight": "save_insight",
             "respond": "respond",
         },
     )
     g.add_edge("call_json_analyzer", "ground_wiki_analytics")
     g.add_edge("ground_wiki_analytics", "respond")
     g.add_edge("call_easyrag", "respond")
-    # form_insights показывает инсайты и ждёт «Все верно?» (следующим ходом);
-    # save_insights пишет в сервис и закрывает завершение. Оба — листья хода.
-    g.add_edge("form_insights", END)
-    g.add_edge("save_insights", END)
+    g.add_edge("save_insight", END)
     g.add_edge("respond", END)
 
     return g.compile(checkpointer=checkpointer)
