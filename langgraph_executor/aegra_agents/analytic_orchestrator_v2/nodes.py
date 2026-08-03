@@ -262,7 +262,9 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             SystemMessage(content="\n\n".join(parts)),
             HumanMessage(content=human),
         ])
-        text = ai.content if isinstance(ai.content, str) else str(ai.content)
+        # Ответ уходит в HTML-рендер, поэтому markdown из модели снимаем здесь
+        # (промпт его запрещает, но модель периодически срывается).
+        text = _to_html(ai.content if isinstance(ai.content, str) else str(ai.content))
 
         trace_steps.append({
             "stage": "initial",
@@ -349,7 +351,7 @@ def make_respond_node(llm: GigaChat):
         messages.extend(_history_for_llm(state.get("messages") or []))
 
         ai = llm.invoke(messages)
-        text = ai.content if isinstance(ai.content, str) else str(ai.content)
+        text = _to_html(ai.content if isinstance(ai.content, str) else str(ai.content))
 
         used = []
         if metrics_block:
@@ -1079,7 +1081,8 @@ def _question_with_dialogue_context(state: OrchestratorState, current_q: str) ->
         if isinstance(m, HumanMessage) and i + 1 < len(history) \
                 and isinstance(history[i + 1], AIMessage):
             q = _plain_text(m).strip()
-            a = _plain_text(history[i + 1]).strip()
+            # Ответы агента лежат в HTML — в промпт аналитика теги не нужны.
+            a = _strip_html(_plain_text(history[i + 1])).strip()
             if q and a:
                 pairs.append((q, a))
             i += 2
@@ -1106,6 +1109,138 @@ def _question_with_dialogue_context(state: OrchestratorState, current_q: str) ->
         "текущем вопросе (ссылки вроде «эти», «западающие», «те»):\n"
         f"{block}\n\nТекущий вопрос: {current_q}"
     )
+
+
+# --- Формат ответа: HTML вместо markdown -------------------------------------
+#
+# Вызывающая система рендерит ответ агента как HTML: markdown в нём показывается
+# «как есть» (**жирный** остаётся звёздочками), а обычный перенос строки просто
+# теряется — нужен <br>. Формат требует системный промпт, но модель периодически
+# срывается в markdown, поэтому итог хода приводим к HTML ДЕТЕРМИНИРОВАННО. Это
+# же место держит лимит на эмодзи: промпт про «не больше двух» модель нарушает
+# особенно охотно.
+_MAX_ANSWER_EMOJI = 2
+
+# Теги, которые пропускаем как разметку. Всё прочее «<» экранируем: без этого
+# «AHT < 300» при рендере съест кусок ответа как незакрытый тег.
+_ALLOWED_TAG_RE = re.compile(
+    r"</?(?:b|i|u|br|p|a|ul|ol|li|strong|em)\b[^>]*>", re.I
+)
+_BR_RE = re.compile(r"<br\s*/?>", re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+# Диапазоны эмодзи: пиктограммы/лица/объекты/флаги, символы и дингбаты, стрелки-
+# звёзды. Составные последовательности (ZWJ, вариационный селектор, keycap)
+# считаем ОДНИМ эмодзи — иначе «👩‍💻» съел бы весь лимит.
+_EMOJI_BASE = "\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF"
+_EMOJI_MOD = "\uFE0F\u20E3"  # вариационный селектор и keycap
+_EMOJI_RE = re.compile(
+    f"[{_EMOJI_BASE}][{_EMOJI_MOD}]*(?:\u200D[{_EMOJI_BASE}][{_EMOJI_MOD}]*)*"
+)
+
+_MD_FENCE_RE = re.compile(r"^\s*```[^\n]*$", re.M)
+_MD_RULE_RE = re.compile(r"^\s{0,3}([-*_])\1{2,}\s*$")
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*#*\s*$")
+_MD_BULLET_RE = re.compile(r"^\s{0,3}[-*•]\s+(.+)$")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__", re.S)
+_MD_ITALIC_RE = re.compile(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])")
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+
+def _escape_stray_lt(text: str) -> str:
+    """Экранирует «<», не открывающие разрешённый тег (сравнения вида «< 300»)."""
+    out: list[str] = []
+    pos = 0
+    for m in _ALLOWED_TAG_RE.finditer(text):
+        out.append(text[pos:m.start()].replace("<", "&lt;"))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(text[pos:].replace("<", "&lt;"))
+    return "".join(out)
+
+
+def _newlines_to_br(text: str) -> str:
+    """Переносы строк → <br> (пустая строка → <br><br>), без задвоения тегов."""
+    # Модель часто ставит и <br>, и перенос строки за ним — иначе получили бы
+    # лишний абзацный отступ там, где задумывался один перенос.
+    out = re.sub(r"(<br>)[ \t]*\n", r"\1", text)
+    out = re.sub(r"\n{2,}", "<br><br>", out)
+    out = out.replace("\n", "<br>")
+    return re.sub(r"(?:<br>[ \t]*){3,}", "<br><br>", out)
+
+
+def _cap_emoji(text: str, limit: int = _MAX_ANSWER_EMOJI) -> str:
+    """Оставляет не больше ``limit`` эмодзи, лишние вырезает."""
+    seen = 0
+
+    def _keep(m: re.Match) -> str:
+        nonlocal seen
+        seen += 1
+        return m.group(0) if seen <= limit else ""
+
+    capped = _EMOJI_RE.sub(_keep, text)
+    if seen <= limit:
+        return capped
+    # После вырезания остаются двойные пробелы и пробел перед знаком/переносом.
+    capped = re.sub(r"[ \t]{2,}", " ", capped)
+    capped = re.sub(r"[ \t]+(?=<br>|[,.;:!?)])", "", capped)
+    return capped
+
+
+def _to_html(text: str) -> str:
+    """Ответ модели → HTML-фрагмент: markdown снимаем, переносы строк — в <br>.
+
+    Промпт требует HTML, но полагаться только на него нельзя: GigaChat регулярно
+    возвращает markdown. Конвертируем то, что модель реально успевает выдать:
+    ```-ограждения, заголовки решётками, горизонтальные линии, маркеры списка,
+    **жирный**/*курсив*, markdown-ссылки. Уже готовый HTML проходит без потерь.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    raw = _MD_FENCE_RE.sub("", raw).strip()
+    # Экранируем ДО вставки собственных тегов, чтобы не побить их же.
+    raw = _escape_stray_lt(raw)
+    raw = _BR_RE.sub("<br>", raw)
+
+    lines: list[str] = []
+    for line in raw.splitlines():
+        s = line.rstrip()
+        if _MD_RULE_RE.match(s):
+            continue
+        heading = _MD_HEADING_RE.match(s)
+        if heading:
+            lines.append(f"<b>{heading.group(1)}</b>")
+            continue
+        bullet = _MD_BULLET_RE.match(s)
+        if bullet:
+            lines.append("• " + bullet.group(1))
+            continue
+        lines.append(s)
+
+    body = "\n".join(lines)
+    body = _MD_LINK_RE.sub(r'<a href="\2">\1</a>', body)
+    body = _MD_BOLD_RE.sub(lambda m: f"<b>{m.group(1) or m.group(2)}</b>", body)
+    body = _MD_ITALIC_RE.sub(r"<i>\1</i>", body)
+    body = _newlines_to_br(body)
+    # Пустые строки на краях (например, от снятого ```-ограждения) дали бы <br>
+    # в начале/конце — висящий отступ в рендере.
+    body = re.sub(r"^(?:<br>\s*)+|(?:\s*<br>)+$", "", body)
+    return _cap_emoji(body).strip()
+
+
+def _strip_html(text: str) -> str:
+    """HTML-ответ агента → плоский текст (для промптов аналитика и классификации).
+
+    Ответы агента оседают в истории уже в HTML. Подавать теги в json_analyzer и в
+    классификатор инсайтов незачем: разметка только зашумляет промпт и может
+    протечь в текст инсайта, который уходит в сервис.
+    """
+    plain = _BR_RE.sub("\n", text or "")
+    plain = _TAG_RE.sub("", plain)
+    return (
+        plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    ).strip()
 
 
 # --- Блок A/B: сквозная трасса рассуждения и режим describe_answer -----------
@@ -1155,23 +1290,31 @@ _KIND_LABELS = {
 
 
 # Заголовок раздела трассы — общий для рендера и для вырезания из истории,
-# чтобы они не разъезжались.
-_TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
+# чтобы они не разъезжались. Legacy — markdown-вариант из реплик, записанных до
+# перехода на HTML: они лежат в чекпойнтах уже идущих диалогов.
+_TRACE_SECTION_TITLE = "<b>Как я пришёл к выводу</b>"
+_TRACE_TITLE_LEGACY = "### Как я пришёл к выводу"
+# Хвост перед разделом трассы: отбивка (<br>/«---») и пробелы.
+_TRACE_TAIL_RE = re.compile(r"(?:\s|<br\s*/?>|-{3,})+$", re.I)
 
 
 def render_trace(trace: list[TraceStep]) -> str:
-    """Детерминированный markdown-раздел «Как я пришёл к выводу» из трассы.
+    """Детерминированный HTML-раздел «Как я пришёл к выводу» из трассы.
 
     Без LLM — строго по накопленным шагам, поэтому без галлюцинаций (Блок B.3.a).
+    Раздел клеится к ответу пользователю, поэтому он в том же формате: <b>/<br>,
+    без markdown. Текст шага может содержать «<» (аргументы инструментов) — его
+    экранируем, чтобы не поломать разметку.
     """
     steps = [s for s in (trace or []) if (s.get("summary") or "").strip()]
     if not steps:
         return ""
-    lines = ["---", _TRACE_SECTION_TITLE, ""]
+    parts = [_TRACE_SECTION_TITLE]
     for i, step in enumerate(steps, 1):
         label = _KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "Шаг")
-        lines.append(f"{i}. **{label}.** {step['summary'].strip()}")
-    return "\n".join(lines)
+        summary = step["summary"].strip().replace("<", "&lt;")
+        parts.append(f"{i}. <b>{label}.</b> {summary}")
+    return "<br>".join(parts)
 
 
 def _strip_trace_section(content: Any) -> Any:
@@ -1180,17 +1323,16 @@ def _strip_trace_section(content: Any) -> Any:
     `_with_description` клеит раздел прямо в content (его видит пользователь),
     и эта реплика оседает в истории. Если подавать её в LLM как есть, модель
     имитирует раздел и генерирует свою (галлюцинированную) копию. Поэтому при
-    подаче истории в LLM раздел вырезаем — вместе с предшествующим «---».
+    подаче истории в LLM раздел вырезаем — вместе с отбивкой перед ним. Ищем и
+    старый markdown-заголовок: в уже идущих диалогах история хранит его.
     """
     if not isinstance(content, str):
         return content
-    idx = content.find(_TRACE_SECTION_TITLE)
-    if idx == -1:
-        return content
-    prefix = content[:idx].rstrip()
-    if prefix.endswith("---"):
-        prefix = prefix[:-3].rstrip()
-    return prefix
+    for title in (_TRACE_SECTION_TITLE, _TRACE_TITLE_LEGACY):
+        idx = content.find(title)
+        if idx != -1:
+            return _TRACE_TAIL_RE.sub("", content[:idx])
+    return content
 
 
 def _history_for_llm(messages: list[Any]) -> list[Any]:
@@ -1218,7 +1360,7 @@ def _with_description(
     if not _config_flag(config, "describe_answer", default=False):
         return text
     section = render_trace(state.get("reasoning_trace") or [])
-    return f"{text}\n\n{section}" if section else text
+    return f"{text}<br><br>{section}" if section else text
 
 
 # --- Контракт сообщений хода: промежуточные шаги + итог последним -------------
@@ -1475,12 +1617,13 @@ def _gather_agent_answers(state: OrchestratorState) -> str:
     """Накопленные ИТОГОВЫЕ ответы агента в диалоге (без шагов и трассы).
 
     Источник фактов для классификации инсайтов: классифицируем то, что реально
-    обсуждалось. Шаговые сообщения (_STEP_KEY) и раздел трассы отбрасываем.
+    обсуждалось. Шаговые сообщения (_STEP_KEY) и раздел трассы отбрасываем, а
+    HTML-разметку снимаем — в текст инсайта теги протекать не должны.
     """
     answers: list[str] = []
     for m in state.get("messages") or []:
         if isinstance(m, AIMessage) and not _is_step(m):
-            txt = _strip_trace_section(_plain_text(m)).strip()
+            txt = _strip_html(_strip_trace_section(_plain_text(m))).strip()
             if txt:
                 answers.append(txt)
     return "\n\n".join(answers)
