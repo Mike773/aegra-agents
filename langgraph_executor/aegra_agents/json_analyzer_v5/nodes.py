@@ -3,6 +3,11 @@
 gather — async: доступ к LangGraph Store (кэш эмбеддингов) асинхронный, а
 блокирующий код (sqlite3, llm.invoke, tool-loop) уведён в asyncio.to_thread,
 чтобы не держать event loop. synthesize остаётся sync (в БД не ходит).
+
+synthesize отдаёт НЕ готовый ответ пользователю, а выжимку фактов с готовыми
+вердиктами: прозу по ней пишет вызывающий (BUSINESS_SYSTEM_PROMPT оркестратора).
+Так правила формулировок живут в одном месте, а числа доезжают до ответа не
+пересказом пересказа.
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import apply_metric_kinds, compute_analytics
 from .loader import load_aggregates_obj, load_dataset_obj
-from .prompts import SYNTHESIS_PROMPT
+from .prompts import FACTS_PROMPT
 from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
 from .sqlite_store import SqliteStore
@@ -283,11 +288,12 @@ def make_synthesize_node(llm: GigaChat):
 
         user_content = (
             f"Вопрос пользователя: {question}\n\n"
-            f"Данные, собранные инструментами из базы:\n{transcript}"
+            f"Данные, собранные инструментами из базы:\n{transcript}\n\n"
+            "Сожми эти данные в выжимку фактов по формату выше."
         )
         response = llm.invoke(
             [
-                SystemMessage(content=SYNTHESIS_PROMPT),
+                SystemMessage(content=FACTS_PROMPT),
                 HumanMessage(content=user_content),
             ]
         )
@@ -295,7 +301,7 @@ def make_synthesize_node(llm: GigaChat):
         if not completed:
             answer += (
                 "\n\n(Примечание: агент не уложился в лимит шагов сбора — "
-                "ответ собран по тем данным, что успели получить.)"
+                "выжимка собрана по тем данным, что успели получить.)"
             )
         return {"answer": answer, "messages": [AIMessage(content=answer)]}
 

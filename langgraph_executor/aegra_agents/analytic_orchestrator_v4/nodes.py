@@ -1458,12 +1458,12 @@ def _metrics_system_block(state: OrchestratorState) -> str | None:
     parts: list[str] = []
     summary = (state.get("metrics_summary") or "").strip()
     if summary:
-        parts.append("Опорный разбор метрик сотрудника (первичный):\n" + summary)
+        parts.append("Опорные факты по метрикам сотрудника (первичные):\n" + summary)
 
     answer = (state.get("analytics_answer") or "").strip()
     question = (state.get("analytics_question") or "").strip()
     if answer and question and not state.get("analytics_error"):
-        parts.append(f"Ответ аналитика на вопрос «{question}»:\n{answer}")
+        parts.append(f"Факты по метрикам под вопрос «{question}»:\n{answer}")
 
     if parts:
         return "\n\n".join(parts)
