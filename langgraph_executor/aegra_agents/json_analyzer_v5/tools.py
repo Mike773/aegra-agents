@@ -97,6 +97,37 @@ def _delta_cell(pct: Any, abs_: Any, unit: str | None) -> str:
     return ""
 
 
+# Вердикты, у которых нет величины отклонения: «в плане на 0.4 %» — бессмыслица.
+_NEUTRAL_VERDICTS = frozenset({
+    "в_плане", "на_уровне_бенчмарка", "на_уровне_коллег", "на_уровне_группы",
+    "стабильно",
+})
+
+
+def _verdict_delta(status: Any, pct: Any, abs_: Any, unit: str | None) -> str:
+    """Вердикт вместе со своей величиной ОДНОЙ фразой: «лучше плана на 27.72 %».
+
+    Раздельные «статус плана» и «отклонение от плана» модель склеивала неверно
+    двумя способами. Во-первых, голое число рядом с фактом читалось как ЗНАЧЕНИЕ
+    плана: «факт 22.99, отклонение 27.72» → «22.99 ниже плана 27.72», хотя метрика
+    план перевыполняет. Во-вторых, знак процента читался как «хорошо/плохо», хотя
+    он показывает направление ЗНАЧЕНИЯ (у 'обратной' метрики плюс — это хуже).
+
+    Поэтому величину даём по МОДУЛЮ: направление уже несёт слово-вердикт, а
+    отдельного числа, которое можно перетолковать, в выдаче не остаётся.
+    """
+    verdict = _verdict(status)
+    if not verdict:
+        return ""
+    if str(status) in _NEUTRAL_VERDICTS:
+        return verdict
+    if pct is not None:
+        return f"{verdict} на {_fmt_num(abs(pct))} %"
+    if abs_ is not None:
+        return f"{verdict} на {_fmt_num(abs(abs_), unit)}"
+    return verdict
+
+
 def _md_cell(value: Any) -> str:
     return str(value).replace("|", "/").replace("\n", " ") if value not in (None, "") else ""
 
@@ -154,17 +185,23 @@ def _flat_columns() -> list[tuple[str, Any]]:
         ("разрез", plain("element")),
         ("период", plain("date")),
         ("факт", fact_with_unit),
+        # План печатаем ЗНАЧЕНИЕМ рядом с фактом: без него модель достраивала план
+        # из процента отклонения и переворачивала вердикт.
+        ("план", lambda r: _fmt_num(r.get("plan"), _unit(r.get("measure_type")))),
         # ex/rr приходят в данных не всегда — пустая колонка отпадёт сама (_md_table).
         ("выполнение плана, %", lambda r: _pct(r.get("ex"))),
         ("run rate", lambda r: _fmt_num(r.get("rr"), _unit(r.get("measure_type")))),
-        ("статус плана", verdict("plan_status")),
-        ("отклонение от плана", lambda r: _delta_cell(
-            r.get("plan_dev_pct"), r.get("plan_dev_abs"), _unit(r.get("measure_type")))),
+        # Вердикт и его величина — ОДНОЙ ячейкой, разнести их обратно нельзя.
+        ("статус плана", lambda r: _verdict_delta(
+            r.get("plan_status"), r.get("plan_dev_pct"), r.get("plan_dev_abs"),
+            _unit(r.get("measure_type")))),
         ("жёсткость плана", verdict("plan_rigidity")),
-        ("статус к бенчмарку", verdict("benchmark_status")),
-        ("динамика", plain("pop_status")),
-        ("изменение к прошлому", lambda r: _delta_cell(
-            r.get("pop_change_pct"), r.get("pop_change_abs"), _unit(r.get("measure_type")))),
+        ("статус к бенчмарку", lambda r: _verdict_delta(
+            r.get("benchmark_status"), r.get("benchmark_dev_pct"),
+            r.get("benchmark_dev_abs"), _unit(r.get("measure_type")))),
+        ("динамика", lambda r: _verdict_delta(
+            r.get("pop_status"), r.get("pop_change_pct"), r.get("pop_change_abs"),
+            _unit(r.get("measure_type")))),
         ("против группы", rel_cell),
         ("тренд", plain("trend_status")),
         ("ранг в команде", rank_cell),
@@ -241,13 +278,16 @@ def _render_tree(result: dict[str, Any]) -> str:
         elif r.get("influent_percent_missing"):
             rel = r.get("inferred_relation")
             parts.append("влияние н/д" + (f" (связь: {rel})" if rel else ""))
+        if r.get("plan") is not None:
+            parts.append(f"план {_fmt_num(r['plan'], _unit(r.get('measure_type')))}")
         if r.get("plan_status"):
-            dev = _delta_cell(
-                r.get("plan_dev_pct"), r.get("plan_dev_abs"), _unit(r.get("measure_type"))
-            )
-            parts.append(f"план: {_verdict(r['plan_status'])}" + (f" ({dev})" if dev else ""))
+            parts.append(_verdict_delta(
+                r.get("plan_status"), r.get("plan_dev_pct"), r.get("plan_dev_abs"),
+                _unit(r.get("measure_type"))))
         if r.get("pop_status"):
-            parts.append(f"динамика: {r['pop_status']}")
+            parts.append("динамика " + _verdict_delta(
+                r.get("pop_status"), r.get("pop_change_pct"), r.get("pop_change_abs"),
+                _unit(r.get("measure_type"))))
         lines.append(f"{indent}- " + " | ".join(parts))
     return "\n".join(lines)
 
@@ -408,13 +448,18 @@ def _overview_headline(h: dict[str, Any]) -> str:
         parts.append(f"выполнение плана {_pct(h['ex'])}")
     if h.get("rr") is not None:
         parts.append(f"run rate {_fmt_num(h['rr'], unit)}")
+    if h.get("plan") is not None:
+        parts.append(f"план {_fmt_num(h.get('plan'), unit)}")
     if h.get("plan_status"):
-        dev = _delta_cell(h.get("plan_dev_pct"), h.get("plan_dev_abs"), unit)
-        parts.append(_verdict(h["plan_status"]) + (f" ({dev})" if dev else ""))
-    dyn = h.get("trend_status") or h.get("pop_status")
-    if dyn:
-        ch = _delta_cell(h.get("pop_change_pct"), h.get("pop_change_abs"), unit)
-        parts.append("динамика " + str(dyn) + (f" ({ch})" if ch else ""))
+        parts.append(_verdict_delta(
+            h.get("plan_status"), h.get("plan_dev_pct"), h.get("plan_dev_abs"), unit))
+    # Динамика и тренд — РАЗНЫЕ вердикты: величину изменения приклеиваем только к
+    # pop_status (она про период к периоду), тренд печатаем словом без числа.
+    if h.get("pop_status"):
+        parts.append("динамика " + _verdict_delta(
+            h.get("pop_status"), h.get("pop_change_pct"), h.get("pop_change_abs"), unit))
+    if h.get("trend_status"):
+        parts.append(f"тренд {h['trend_status']}")
     return ", ".join(parts)
 
 
@@ -429,17 +474,23 @@ def _overview_driver(d: dict[str, Any]) -> str:
         bits.append(_verdict(d["plan_status"]))
     if d.get("ex") is not None:
         bits.append(f"вып. {_pct(d['ex'])}")
-    dyn = d.get("trend_status") or d.get("pop_status")
-    if dyn:
-        bits.append(str(dyn))
-    # Для «больше всего изменилось» (share не задана) показываем величину Δ
-    # (процент, либо абсолют для знаковых/индексных метрик).
-    if d.get("share_pct") is None:
-        delta = _delta_cell(
-            d.get("pop_change_pct"), d.get("pop_change_abs"), _unit(d.get("measure_type"))
-        )
-        if delta:
-            bits.append(f"Δ {delta}")
+    # Величина изменения — внутри фразы вердикта («ухудшение на 61.61 %»), иначе
+    # знак Δ рядом со словом-вердиктом читается как «хорошо/плохо».
+    if d.get("pop_status"):
+        bits.append(_verdict_delta(
+            d.get("pop_status"), d.get("pop_change_pct"), d.get("pop_change_abs"),
+            _unit(d.get("measure_type"))))
+    elif d.get("trend_status"):
+        bits.append(str(d["trend_status"]))
+        # Тренд без вердикта динамики: величину дать негде, но для «больше всего
+        # изменилось» (share не задана) она и есть критерий ранжирования.
+        if d.get("share_pct") is None:
+            delta = _delta_cell(
+                d.get("pop_change_pct"), d.get("pop_change_abs"),
+                _unit(d.get("measure_type"))
+            )
+            if delta:
+                bits.append(f"Δ {delta}")
     return name + (f" ({', '.join(bits)})" if bits else "")
 
 
