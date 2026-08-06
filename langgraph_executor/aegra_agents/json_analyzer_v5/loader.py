@@ -6,7 +6,14 @@
     metric  = {id, metric_name, metric_description, metric_type, measure_type,
                date, calc_period, fact, plan, benchmark, [ex], [rr],
                [influent_percent], element, [rankings],
+               [star_received], [is_star_metric],
                child_metrics: [<metric>, ...]}
+
+``star_received`` — бинарный результат «метрика получена / не получена»; он
+ЗАМЕНЯЕТ ``fact``: числа у такой метрики нет вовсе (как и плана с бенчмарком).
+``is_star_metric`` — метрика влияет на получение звезды; НЕЗАВИСИМО от
+``star_received`` стоит и на обычных числовых метриках. Оба поля опциональны:
+их отсутствие (None) — не то же самое, что False, см. ``_normalize_flag``.
     rankings = [{rank: "458 из 500", level: <код уровня>, percentile}, ...] —
                  место сотрудника в peer-группе уровня.
 
@@ -54,6 +61,12 @@ ROW_FIELDS: tuple[str, ...] = (
     "rr",
     "influent_percent",
     "element",
+    # Бинарный результат «метрика получена / не получена». ЗАМЕНЯЕТ fact: числа у
+    # такой метрики нет. NULL = поля не было (обычная числовая метрика).
+    "star_received",
+    # Метрика влияет на получение звезды. Независима от star_received: бывает и на
+    # обычных числовых метриках (там влияние идёт через выполнение плана).
+    "is_star_metric",
 )
 
 
@@ -63,6 +76,45 @@ def _is_empty_fact(value: Any) -> bool:
     if value is None:
         return True
     return isinstance(value, str) and value.strip() == ""
+
+
+_TRUE_TOKENS = frozenset({"true", "1", "да", "yes", "y"})
+_FALSE_TOKENS = frozenset({"false", "0", "нет", "no", "n"})
+
+
+def _normalize_flag(value: Any) -> int | None:
+    """Тристейт булева поля → 1 / 0 / None.
+
+    None означает «поля не было» (или пришёл null) и НЕ равно False: на этом
+    различии держится обратная совместимость — датасет без звёздных полей обязан
+    вести себя ровно как раньше, поэтому «флага нет» нельзя схлопывать в 0.
+    Источники присылают bool, 0/1 и строки в разном регистре — как с metric_type.
+    """
+    if value is None:
+        return None
+    # bool — подкласс int, проверяем его первым, иначе True уйдёт в ветку чисел.
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, (int, float)):
+        return 1 if value else 0
+    if isinstance(value, str):
+        norm = value.strip().casefold()
+        if norm in _TRUE_TOKENS:
+            return 1
+        if norm in _FALSE_TOKENS:
+            return 0
+    return None
+
+
+def _has_binary_result(node: dict[str, Any]) -> bool:
+    """Бинарная («звёздная») метрика приходит БЕЗ числового факта: её результат
+    лежит в star_received. Такой лист нельзя выкидывать по правилу «нет факта —
+    нет строки», иначе метрика молча исчезнет из датасета.
+
+    Спасаем строку строго по star_received, а НЕ по is_star_metric: последний
+    стоит и на обычных числовых метриках, а числовой лист с пустым фактом — это
+    ровно тот случай, ради которого правило отбрасывания и написано."""
+    return _normalize_flag(node.get("star_received")) is not None
 
 
 def _normalize_metric_type(value: Any) -> Any:
@@ -98,7 +150,12 @@ def _walk(
         # предыдущий период), и сравнение период-к-периоду не считается. Отбрасываем
         # только ЛИСТ без факта — узел-агрегат с детьми сохраняем, чтобы не потерять
         # реальные разрезы под ним (на практике пустой факт всегда у листьев).
-        if not children and _is_empty_fact(node.get("fact")):
+        # Исключение — бинарная метрика: у неё факта нет по определению.
+        if (
+            not children
+            and _is_empty_fact(node.get("fact"))
+            and not _has_binary_result(node)
+        ):
             continue
         uid = counter[0]
         counter[0] += 1
@@ -128,6 +185,8 @@ def _walk(
                 "rr": node.get("rr"),
                 "influent_percent": node.get("influent_percent"),
                 "element": node.get("element"),
+                "star_received": _normalize_flag(node.get("star_received")),
+                "is_star_metric": _normalize_flag(node.get("is_star_metric")),
                 # Не в ROW_FIELDS: в таблицу metrics не идёт, SqliteStore.load
                 # разложит по отдельной metric_rankings.
                 "rankings": rankings if isinstance(rankings, list) else None,

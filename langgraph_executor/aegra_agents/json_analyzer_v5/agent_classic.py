@@ -18,7 +18,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from .agent_base import _text, format_facts
-from .prompts import SYSTEM_PROMPT_RULES
+from .prompts import STAR_RULES, SYSTEM_PROMPT_RULES
 
 # Цикл сбора (стадия 1) тащит на каждом шаге всю историю вызовов инструментов.
 # Кап — страховка от одной аномально «жирной» выдачи, а не лимит API: контекст
@@ -101,8 +101,12 @@ def _guard_tools(tools: list[Any], state: _RunState) -> None:
 
 
 def compose_system_prompt(overview: dict[str, Any]) -> str:
-    """Системный промпт стадии 1 + динамический «Состав датасета»."""
-    return SYSTEM_PROMPT_RULES + "\n\n" + format_facts(overview)
+    """Системный промпт стадии 1 + динамический «Состав датасета» (+ правила
+    звезды, если звёздные поля реально пришли — иначе промпт прежний)."""
+    parts = [SYSTEM_PROMPT_RULES, format_facts(overview)]
+    if (overview.get("star_binary_rows") or 0) or (overview.get("star_metric_rows") or 0):
+        parts.append(STAR_RULES)
+    return "\n\n".join(parts)
 
 
 @dataclass

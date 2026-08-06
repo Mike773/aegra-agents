@@ -36,6 +36,7 @@ from .prompts import (
     SAVE_INSIGHT_DONE,
     SAVE_INSIGHT_EMPTY,
     SAVE_INSIGHT_ERROR,
+    STAR_PROSE_BLOCK,
     SAVE_INSIGHT_NO_SOURCE,
     WIKI_QUERIES_PROMPT,
 )
@@ -297,6 +298,8 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
                 "Не приводи конкретных числовых значений по памяти; предложи "
                 "уточнить вопрос или повторить запрос — он будет пересчитан аналитиком."
             )
+        if _has_star_data(metrics):
+            parts.append(STAR_PROSE_BLOCK)
         parts.append(INITIAL_TASK_HINT)
 
         human = briefing or "Что происходит с показателями сотрудника?"
@@ -385,6 +388,10 @@ def make_respond_node(llm: GigaChat):
         easyrag_block = _easyrag_system_block(state)
         if easyrag_block:
             parts.append(easyrag_block)
+        # Правила про звезду нужны только вместе с фактами по метрикам: в чисто
+        # разговорный/wiki-ход их подмешивать незачем.
+        if metrics_block and _has_star_data(state.get("metrics")):
+            parts.append(STAR_PROSE_BLOCK)
         parts.append(RESPONDER_TASK_HINT)
         system_text = "\n\n".join(parts)
 
@@ -1534,6 +1541,23 @@ def _load_json(text: Any) -> Any:
         return json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
         return None
+
+
+def _has_star_data(metrics: Any) -> bool:
+    """Есть ли в датасете сотрудника звёздные поля (star_received/is_star_metric).
+
+    Считаем по СЫРОМУ датасету тем же каноническим парсером, что и остальные
+    сканы здесь, а НЕ по тексту выжимки: подпись раздела пишет модель, и она
+    может её перефразировать или опустить — тогда правила про звезду молча не
+    доехали бы до ответа. Любой сбой разбора → False (прежнее поведение).
+    """
+    try:
+        rows = load_dataset_obj(metrics)
+    except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
+        return False
+    return any(
+        r.get("star_received") is not None or r.get("is_star_metric") for r in rows
+    )
 
 
 def _collect_metric_catalog(metrics: Any) -> list[dict]:

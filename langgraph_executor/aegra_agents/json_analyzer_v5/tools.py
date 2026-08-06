@@ -185,6 +185,13 @@ def _flat_columns() -> list[tuple[str, Any]]:
         ("разрез", plain("element")),
         ("период", plain("date")),
         ("факт", fact_with_unit),
+        # Бинарная («звёздная») метрика: числа нет, результат — «да/нет». Колонка
+        # стоит на месте факта, который она заменяет, и отпадёт сама (_md_table),
+        # когда таких метрик в выдаче нет — ровно как ex/rr.
+        ("метрика получена", lambda r: (
+            "" if r.get("star_received") is None
+            else ("да" if r.get("star_received") else "нет")
+        )),
         # План печатаем ЗНАЧЕНИЕМ рядом с фактом: без него модель достраивала план
         # из процента отклонения и переворачивала вердикт.
         ("план", lambda r: _fmt_num(r.get("plan"), _unit(r.get("measure_type")))),
@@ -207,6 +214,7 @@ def _flat_columns() -> list[tuple[str, Any]]:
         ("ранг в команде", rank_cell),
         ("против коллег", verdict("peer_status")),
         ("аномалия", lambda r: "да" if r.get("is_anomaly") else ""),
+        ("влияет на звезду", lambda r: "да" if r.get("is_star_metric") else ""),
     ]
 
 
@@ -268,7 +276,15 @@ def _render_tree(result: dict[str, Any]) -> str:
         label = r.get("metric_name")
         if r.get("element"):
             label = f"{label} [{r['element']}]"
-        parts = [f"{label}: {_fmt_num(r.get('fact'), _unit(r.get('measure_type')))}"]
+        # У бинарной метрики числа нет: без этой ветки узел печатался бы как
+        # «Метрика: | план …» с пустым значением на месте факта.
+        if r.get("fact") is None and r.get("star_received") is not None:
+            head = f"{label}: " + ("получена" if r["star_received"] else "НЕ получена")
+        else:
+            head = f"{label}: {_fmt_num(r.get('fact'), _unit(r.get('measure_type')))}"
+        parts = [head]
+        if r.get("is_star_metric"):
+            parts.append("влияет на звезду")
         if r.get("ex") is not None:
             parts.append(f"выполнение плана {_pct(r['ex'])}")
         if r.get("rr") is not None:
@@ -302,7 +318,14 @@ def _render_schema(ov: dict[str, Any]) -> str:
         u = _unit(m.get("measure_type")) or "—"
         elems = m.get("elements") or []
         e = f" {{разрезы: {', '.join(elems)}}}" if elems else ""
-        mparts.append(f"{m['metric_name']} ({m.get('metric_type')}, {u}) [{tag}]{e}")
+        flags = ""
+        if m.get("is_binary"):
+            flags += ", бинарная"
+        if m.get("is_star_metric"):
+            flags += ", звезда"
+        mparts.append(
+            f"{m['metric_name']} ({m.get('metric_type')}, {u}) [{tag}{flags}]{e}"
+        )
     lines.append(f"- Метрики ({len(metrics)}): " + "; ".join(mparts))
     if ov.get("elements"):
         lines.append(f"- Разрезы (element): {', '.join(ov['elements'])}")
@@ -315,20 +338,35 @@ def _render_schema(ov: dict[str, Any]) -> str:
 def _render_describe(d: dict[str, Any]) -> str:
     if d.get("error"):
         return _render_error(d)
-    dir_hint = "меньше=лучше" if d.get("metric_type") == "обратная" else "больше=лучше"
-    out = (
-        f"Метрика «{d.get('metric_name')}»: "
-        f"{d.get('metric_description') or 'описание отсутствует'}\n"
-        f"Тип: {d.get('metric_type')} ({dir_hint}). "
-        f"Единица: {_unit(d.get('measure_type')) or '—'}. "
-        f"Период расчёта: {d.get('calc_period') or '—'}."
-    )
-    kind = d.get("kind")
-    if kind and kind != "уровень":
-        out += (
-            f"\nВид: {kind} — относительное %-сравнение неуместно; "
-            "оценивай по факту (уровню) и абсолютному изменению."
+    if d.get("is_binary"):
+        # Направление ('меньше=лучше') для бинарной метрики бессмысленно: у неё
+        # нет величины, которую можно было бы сравнивать.
+        out = (
+            f"Метрика «{d.get('metric_name')}»: "
+            f"{d.get('metric_description') or 'описание отсутствует'}\n"
+            "Вид: БИНАРНАЯ — числового значения нет, результат «метрика получена / "
+            "не получена». Плана, динамики, тренда и места среди коллег у неё не "
+            "существует."
         )
+    else:
+        dir_hint = (
+            "меньше=лучше" if d.get("metric_type") == "обратная" else "больше=лучше"
+        )
+        out = (
+            f"Метрика «{d.get('metric_name')}»: "
+            f"{d.get('metric_description') or 'описание отсутствует'}\n"
+            f"Тип: {d.get('metric_type')} ({dir_hint}). "
+            f"Единица: {_unit(d.get('measure_type')) or '—'}. "
+            f"Период расчёта: {d.get('calc_period') or '—'}."
+        )
+        kind = d.get("kind")
+        if kind and kind != "уровень":
+            out += (
+                f"\nВид: {kind} — относительное %-сравнение неуместно; "
+                "оценивай по факту (уровню) и абсолютному изменению."
+            )
+    if d.get("is_star_metric"):
+        out += "\nВлияет на получение звезды."
     return out
 
 
@@ -414,6 +452,8 @@ def _render_summary(s: dict[str, Any]) -> str:
             ("среднее", lambda r: _fmt_num(r.get("avg_fact"))),
             ("ниже плана, шт", lambda r: _fmt_num(r.get("below_plan"))),
             ("аномалий", lambda r: _fmt_num(r.get("anomalies"))),
+            # Пусто у всех обычных метрик — колонка отпадёт (_md_table).
+            ("звезда", lambda r: r.get("star") or ""),
         ]
         lines.append("Ключевые метрики на последнем периоде:")
         lines.append(_md_table(by_metric, cols))
@@ -460,6 +500,8 @@ def _overview_headline(h: dict[str, Any]) -> str:
             h.get("pop_status"), h.get("pop_change_pct"), h.get("pop_change_abs"), unit))
     if h.get("trend_status"):
         parts.append(f"тренд {h['trend_status']}")
+    if h.get("is_star_metric"):
+        parts.append("влияет на звезду")
     return ", ".join(parts)
 
 
@@ -562,6 +604,28 @@ def _render_overview(o: dict[str, Any]) -> str:
             lines.append(title)
             for h in items:
                 lines.append("- " + _overview_headline(h))
+
+    # Ключа star нет вовсе, когда звёздных полей во входе не было — на обычном
+    # датасете обзор выглядит ровно как раньше.
+    star = o.get("star")
+    if star:
+        lines.append("")
+        lines.append("Звезда:")
+        missed = star.get("missed") or []
+        received = star.get("received") or []
+        if missed:
+            lines.append("- НЕ получены: " + "; ".join(_star_label(s) for s in missed))
+        if received:
+            lines.append("- получены: " + "; ".join(_star_label(s) for s in received))
+        if missed or received:
+            lines.append(
+                "- звезда заработана: нет — не хватает показателей выше"
+                if missed else "- звезда заработана: да — получены все показатели"
+            )
+        # Пометку «влияет на звезду» несёт сам заголовок (_overview_headline) —
+        # второй раз в префиксе строки её не дублируем.
+        for h in star.get("numeric") or []:
+            lines.append("- " + _overview_headline(h))
 
     lines.append("")
     lines.append(
@@ -696,6 +760,51 @@ def _render_peer_context(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _star_label(r: dict[str, Any]) -> str:
+    """Имя звёздного показателя с разрезом: «Обучение [Продукт А]»."""
+    name = r.get("metric") or r.get("metric_name") or "—"
+    return f"{name} [{r['element']}]" if r.get("element") else str(name)
+
+
+def _render_star_status(result: dict[str, Any]) -> str:
+    """Звёздный срез: бинарные результаты словами + таблица числовых звёздных
+    метрик через общий _flat_columns (чтобы вердикты выглядели как везде)."""
+    if result.get("error"):
+        return _render_error(result)
+    binary = result.get("binary") or []
+    numeric = (result.get("numeric") or {}).get("rows") or []
+    if not binary and not numeric:
+        return "Звёздных показателей в датасете нет."
+
+    # Период подписываем явно: бинарный результат относится к одному периоду, и без
+    # подписи модель прочла бы его как «вообще».
+    head = "Звезда — статус показателей"
+    if binary and result.get("date"):
+        head += f" за период {result['date']}"
+    lines: list[str] = [head + ":"]
+    missed = [r for r in binary if not r.get("star_received")]
+    received = [r for r in binary if r.get("star_received")]
+    if missed:
+        lines.append("НЕ получены: " + "; ".join(_star_label(r) for r in missed))
+    if received:
+        lines.append("Получены: " + "; ".join(_star_label(r) for r in received))
+    if binary:
+        # Звезда — конъюнкция: хоть один не получен, и она не заработана.
+        lines.append(
+            "Звезда заработана: нет — не хватает показателей выше."
+            if missed else
+            "Звезда заработана: да — получены все бинарные показатели."
+        )
+    if numeric:
+        lines.append(
+            "Числовые метрики, влияющие на звезду (у них есть факт и план):"
+        )
+        table = _md_table(numeric, _flat_columns())
+        if table:
+            lines.append(table)
+    return "\n".join(lines)
+
+
 def _safe(render: Any, result: Any) -> str:
     """Рендер с безопасным fallback на JSON при любой ошибке/пустом выводе."""
     try:
@@ -718,7 +827,10 @@ def build_tools(
     """
 
     def _unknown_metric(metric: str) -> str | None:
-        if store.metric_type_of(metric) is not None:
+        # Существование проверяем по metric_exists, а НЕ по metric_type_of: у
+        # бинарной (звёздной) метрики metric_type может не прийти вовсе, и она
+        # была бы объявлена ненайденной, хотя лежит в базе.
+        if store.metric_exists(metric):
             return None
         return _render_error(
             {
@@ -992,7 +1104,9 @@ def build_tools(
         date = _blank_to_none(date)
         metric = _blank_to_none(metric)
         element = _blank_to_none(element)
-        if metric and store.metric_type_of(metric) is None:
+        # metric_exists, а не metric_type_of: у бинарной метрики metric_type может
+        # не прийти, и фильтр по ней молча сбрасывался бы.
+        if metric and not store.metric_exists(metric):
             metric = None
         return _safe(
             _render_rows, store.find_flags(kind, date=date, metric=metric, element=element)
@@ -1086,6 +1200,26 @@ def build_tools(
         edges = store.related_metrics(metric)
         return _safe(lambda e: _render_related(metric, e), edges)
 
+    def star_status(person: str | None = None, date: str | None = None) -> str:
+        """Статус ЗВЕЗДЫ сотрудника за ОДИН вызов: что для звезды уже получено, а
+        что нет. Часть звёздных показателей — БИНАРНЫЕ: числового значения у них
+        не существует, есть только результат «показатель получен» / «показатель НЕ
+        получен». Плана, процента выполнения, динамики, тренда и места среди
+        коллег у них НЕТ — не спрашивай их другими инструментами и не подставляй
+        им числа соседних метрик. Остальные звёздные показатели — обычные числовые
+        метрики с фактом и планом: они влияют на звезду через выполнение плана, и
+        по ним инструмент отдаёт полную аналитику. Звезда заработана, только если
+        получены ВСЕ бинарные показатели. Вызывай на вопросы «получена ли звезда»,
+        «что мешает звезде», «каких показателей не хватает до звезды», а на
+        обзорном вопросе — вместе с situation_overview. person — ФИО/табельный (по
+        умолчанию сотрудник набора); date — YYYY-MM-DD (по умолчанию все периоды)."""
+        person = _blank_to_none(person)
+        date = _blank_to_none(date)
+        unknown = _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(_render_star_status, store.star_status(person=person, date=date))
+
     specs = [
         (schema_overview, "schema_overview"),
         (resolve_entity, "resolve_entity"),
@@ -1105,7 +1239,22 @@ def build_tools(
         (related_metrics, "related_metrics"),
     ]
 
+    descriptions = {name: (func.__doc__ or "") for func, name in specs}
+    # Звёздный инструмент и виды флагов появляются в списке ТОЛЬКО когда звёздные
+    # поля реально пришли: иначе модель видела бы правила про звезду на датасете,
+    # где её нет, и пыталась бы их применить.
+    star = store.star_presence()
+    if star["star_binary_rows"] or star["star_metric_rows"]:
+        specs.append((star_status, "star_status"))
+        descriptions["star_status"] = star_status.__doc__ or ""
+        descriptions["find_flags"] += (
+            "\n'star_missed' — звёздные показатели, которые НЕ получены; "
+            "'star_received' — полученные; 'star_at_risk' — числовые звёздные "
+            "метрики хуже плана (что мешает звезде). Полную картину по звезде за "
+            "один вызов даёт star_status."
+        )
+
     return [
-        StructuredTool.from_function(func=func, name=name, description=func.__doc__)
+        StructuredTool.from_function(func=func, name=name, description=descriptions[name])
         for func, name in specs
     ]

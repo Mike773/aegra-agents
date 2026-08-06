@@ -470,7 +470,9 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
         row = conn.execute(
             "SELECT COUNT(m.fact) AS n, AVG(m.fact) AS avg_fact, "
             "SUM(CASE WHEN a.plan_status = 'хуже_плана' THEN 1 ELSE 0 END) AS below_plan, "
-            "SUM(COALESCE(a.is_anomaly, 0)) AS anomalies "
+            "SUM(COALESCE(a.is_anomaly, 0)) AS anomalies, "
+            "COUNT(m.star_received) AS star_rows, "
+            "SUM(COALESCE(m.star_received, 0)) AS star_received "
             "FROM metrics m JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
             "WHERE m.metric_name = ? AND m.date = ? AND m.element IS NULL",
             (m["metric_name"], latest),
@@ -484,6 +486,11 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
                 else None,
                 "below_plan": row["below_plan"],
                 "anomalies": row["anomalies"],
+                # None на обычной метрике — колонка отпадёт в рендере целиком.
+                # Иначе бинарная метрика висела бы в сводке с пустым средним.
+                "star": None if not row["star_rows"] else (
+                    "получена" if row["star_received"] else "не получена"
+                ),
             }
         )
 
@@ -746,7 +753,33 @@ def _node_header(row: dict[str, Any]) -> dict[str, Any]:
         "pop_status": row.get("pop_status"),
         "pop_change_pct": row.get("pop_change_pct"),
         "pop_change_abs": row.get("pop_change_abs"),
+        # Пометка «влияет на звезду» — None на обычном датасете, рендер её не печатает.
+        "is_star_metric": row.get("is_star_metric"),
     }
+
+
+def _star_section(
+    binary: list[dict[str, Any]], numeric: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Звёздная секция обзора: полученные/неполученные бинарные показатели плюс
+    шапки числовых метрик, влияющих на звезду. Пустой словарь = звёздных данных
+    нет, и вызывающий не кладёт ключ в результат вовсе."""
+    star: dict[str, Any] = {}
+    if binary:
+        star["received"] = [
+            {"metric": r.get("metric_name"), "element": r.get("element")}
+            for r in binary if r.get("star_received")
+        ]
+        star["missed"] = [
+            {"metric": r.get("metric_name"), "element": r.get("element")}
+            for r in binary if not r.get("star_received")
+        ]
+    star_numeric = [r for r in numeric if r.get("is_star_metric")]
+    if star_numeric:
+        star["numeric"] = [
+            _node_header(r) for r in star_numeric[:_OVERVIEW_MAX_HEADLINES]
+        ]
+    return star
 
 
 def _build_node(
@@ -836,7 +869,7 @@ def build_situation_overview(
         for r in store.conn.execute(
             "SELECT m.metric_uid, m.parent_uid, m.depth, m.metric_name, "
             "m.metric_type, m.measure_type, m.element, m.fact, m.ex, m.rr, "
-            "m.influent_percent, "
+            "m.influent_percent, m.star_received, m.is_star_metric, "
             "a.plan_status, a.plan_dev_pct, a.plan_dev_abs, a.benchmark_status, "
             "a.trend_status, a.pop_status, a.pop_change_pct, a.pop_change_abs "
             "FROM metrics m LEFT JOIN metric_analytics a "
@@ -858,11 +891,18 @@ def build_situation_overview(
             "note": "Нет данных по сотруднику на этот период.",
         }
 
+    # Бинарные («звёздные») метрики выносим из числовых зон ДО построения зон: у
+    # них нет ни факта, ни вердиктов, и _zone_of молча положил бы их в «стабильно»
+    # строкой с пустым значением. Их место — отдельная секция star.
+    binary = [r for r in rows if r.get("star_received") is not None]
+    rows = [r for r in rows if r.get("star_received") is None]
+    star = _star_section(binary, rows)
+
     # Зоны и вердикты читаются из metric_analytics; без неё все статусы NULL и любая
     # метрика молча попала бы в «стабильно». Честно сообщаем, что аналитика не
     # посчитана, вместо ложной классификации (в проде compute_analytics всегда есть).
     if store.analytics_row_count() == 0:
-        return {
+        out = {
             "person_fio": fio,
             "person_key": pkey,
             "date": cur_date,
@@ -873,6 +913,10 @@ def build_situation_overview(
             "stable": [],
             "note": "Аналитика не посчитана (compute_analytics) — зоны недоступны.",
         }
+        # Бинарным показателям аналитика не нужна — их статус известен и без неё.
+        if star:
+            out["star"] = star
+        return out
 
     children: dict[Any, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
@@ -902,7 +946,7 @@ def build_situation_overview(
     stable = [_node_header(r) for r in buckets["stable"][:_OVERVIEW_MAX_HEADLINES]]
     single_level = not any(children.get(r.get("metric_uid")) for r in roots)
 
-    return {
+    out = {
         "person_fio": fio,
         "person_key": pkey,
         "date": cur_date,
@@ -912,6 +956,11 @@ def build_situation_overview(
         "positives": positives,
         "stable": stable,
     }
+    # Ключа нет вовсе, когда звёздных полей не было: обзор обычного датасета
+    # остаётся байт-в-байт прежним.
+    if star:
+        out["star"] = star
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -934,9 +983,18 @@ def rank_elements(
     """Ранжирует element-строки метрики одного человека за период по факту с учётом
     направления (прямая: выше=лучше, обратная: ниже=лучше). Возвращает ranked-список
     (лучшее→худшее). План/бенчмарк не используются."""
-    mt = store.metric_type_of(metric)
-    if mt is None:
+    # Существование — по metric_exists: у бинарной метрики metric_type может не
+    # прийти, и она была бы объявлена ненайденной. metric_type нужен только для
+    # направления сравнения.
+    if not store.metric_exists(metric):
         return {"error": f"Метрика '{metric}' не найдена."}
+    if store.is_binary_metric(metric):
+        return {
+            "error": f"Метрика «{metric}» бинарная: числового значения у неё нет, "
+            "сравнивать разрезы нечем.",
+            "hint": "статус получения смотри в star_status",
+        }
+    mt = store.metric_type_of(metric)
     pkey, fio = _focus_person(store, person)
     if pkey is None:
         return {"error": "В датасете нет людей."}
@@ -1089,9 +1147,11 @@ def build_peer_context(
     уровня по total_objects, не по имени); position_dynamics — изменение
     percentile при ≥2 датированных точках rankings.
     """
-    metric_type = store.metric_type_of(metric)
-    if metric_type is None:
+    # Существование — по metric_exists (у бинарной метрики metric_type может не
+    # прийти); metric_type остаётся только для направления вердиктов.
+    if not store.metric_exists(metric):
         return {"error": f"Метрика '{metric}' не найдена."}
+    metric_type = store.metric_type_of(metric)
     person_key, person_fio = _focus_person(store, person)
 
     # Имя метрики в агрегатах может отличаться регистром/пробелами от основного
