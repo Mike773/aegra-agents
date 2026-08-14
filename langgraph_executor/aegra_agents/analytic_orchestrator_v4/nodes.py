@@ -183,7 +183,12 @@ def make_load_data_node():
             "employee_tabnum": employee,
             "position": position,
             "direction_key": direction_key,
-            "metrics": metrics,
+            # Нормализуем форму на входе в стейт: компонент на проде может отдать
+            # JSON строкой — тогда dict-потребители (_org_structure_block,
+            # _describe_sources_block, _strip_rankings, _has_star_data) молча
+            # теряют данные, хотя аналитик строку парсит. Непарсящееся значение
+            # оставляем как есть (прежнее поведение, ошибку отдаст аналитик).
+            "metrics": _metrics_obj(metrics) or metrics,
             "metrics_error": error,
             "aggregates": aggregates,
             "aggregates_error": agg_error,
@@ -197,6 +202,26 @@ def make_load_data_node():
     return load_data
 
 
+def _metrics_obj(metrics: Any) -> dict | None:
+    """Датасет метрик как dict — та же толерантность к форме, что у аналитика
+    (_parse_raw_json в json_analyzer_v5): прод может отдать JSON строкой, и
+    аналитик её парсит. Потребители в оркестраторе, требующие строго dict,
+    без этой нормализации молча решают, что данных нет, хотя разбор метрик
+    в ответе есть. Не-dict и непарсящаяся строка → None."""
+    if isinstance(metrics, dict):
+        return metrics
+    if isinstance(metrics, str):
+        text = metrics.strip()
+        if not text:
+            return None
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
 def _org_structure_block(state: OrchestratorState) -> str | None:
     """Краткий блок «кого анализируем» из датасета (me/employees) + позиция.
 
@@ -205,8 +230,8 @@ def _org_structure_block(state: OrchestratorState) -> str | None:
     чтобы модель писала «у Иванова…», а не безлично. Источник внутренних названий
     пользователю не раскрывается (об этом сказано в системном промпте).
     """
-    metrics = state.get("metrics")
-    if not isinstance(metrics, dict):
+    metrics = _metrics_obj(state.get("metrics"))
+    if metrics is None:
         return None
     lines: list[str] = []
     me = metrics.get("me") or {}
@@ -1440,8 +1465,10 @@ def _describe_sources_block(state: OrchestratorState) -> str:
     LLM — числа и имена не искажаются.
     """
     lines: list[str] = []
-    metrics = state.get("metrics")
-    if isinstance(metrics, dict):
+    # Толерантный парсинг (dict или JSON-строка): нормализация в load_data не
+    # спасает треды, где строка уже легла в чекпоинт до неё.
+    metrics = _metrics_obj(state.get("metrics"))
+    if metrics is not None:
         org_parts: list[str] = []
         me = metrics.get("me") or {}
         boss_fio = str((me.get("fio") if isinstance(me, dict) else "") or "").strip()

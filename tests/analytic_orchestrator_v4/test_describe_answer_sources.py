@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
@@ -16,6 +17,7 @@ from langgraph_executor.aegra_agents.analytic_orchestrator_v4.nodes import (
     _describe_sources_block,
     _memory_source_line,
     _metrics_source_line,
+    _org_structure_block,
     _wiki_source_line,
     _with_description,
     render_trace,
@@ -76,6 +78,22 @@ def test_sources_block_org_and_position():
     assert "руководитель — Иванов Иван Иванович" in block
     assert "в фокусе анализа — Петров Никита Сергеевич (позиция: Оператор)" in block
     assert block.startswith("**Исходные данные:**")
+
+
+def test_sources_block_accepts_json_string_dataset():
+    # Прод может отдать датасет JSON-строкой (аналитик её парсит) — опись
+    # источников обязана видеть те же данные, а не писать «не загружены».
+    block = _describe_sources_block({
+        "metrics": json.dumps(_METRICS, ensure_ascii=False),
+        "position": "Оператор",
+    })
+    assert "не загружены" not in block
+    assert "Петров Никита Сергеевич" in block
+    assert "всего уникальных метрик — 3" in block
+    # Тот же кейс для блока «кого анализируем» в системном промпте.
+    org = _org_structure_block({"metrics": json.dumps(_METRICS, ensure_ascii=False)})
+    assert org is not None
+    assert "Иванов Иван Иванович" in org
 
 
 def test_sources_block_without_dataset():
