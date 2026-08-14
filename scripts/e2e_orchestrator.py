@@ -163,9 +163,13 @@ async def main():
     configurable = {
         "boss_tabnum": "1000",
         "employee_tabnum": "2000",
-        "position": "оператор",
+        # Позиция задаёт direction_key wiki-поиска: страницы в базе лежат по
+        # направлениям, E2E_POSITION позволяет прогнать под наполненное.
+        "position": os.environ.get("E2E_POSITION", "оператор"),
         "thread_id": "e2e-orch-1",
-        "wiki_grounding_enabled": False,
+        # По умолчанию wiki-grounding выключен (фокус прогона — json_analyzer);
+        # E2E_WIKI=1 включает настоящий вызов easyrag (нужна база wiki_rag).
+        "wiki_grounding_enabled": bool(os.environ.get("E2E_WIKI")),
     }
     # Только для v4: привязка инсайтов, флаг предагрегатов и режим описания хода.
     if os.environ.get("E2E_SOURCE_ID"):

@@ -321,7 +321,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
 
         out_state = {
             "messages": [_final_message(await _with_description(
-                text, {"reasoning_trace": new_trace}, config,
+                text, {**state, "reasoning_trace": new_trace}, config,
                 llm=llm, question=human,
             ))],
             "reasoning_trace": new_trace,
@@ -424,7 +424,7 @@ def make_respond_node(llm: GigaChat):
         new_trace = _append_trace(state, [decision])
         return {
             "messages": [_final_message(await _with_description(
-                text, {"reasoning_trace": new_trace}, config,
+                text, {**state, "reasoning_trace": new_trace}, config,
                 llm=llm, question=_last_user_text(state),
             ))],
             "reasoning_trace": new_trace,
@@ -1040,7 +1040,7 @@ def make_save_insight_node(llm: GigaChat):
             return {
                 "messages": [_final_message(await _with_description(
                     SAVE_INSIGHT_ERROR.format(err=err),
-                    {"reasoning_trace": new_trace}, config))],
+                    {**state, "reasoning_trace": new_trace}, config))],
                 "reasoning_trace": new_trace,
             }
 
@@ -1058,7 +1058,7 @@ def make_save_insight_node(llm: GigaChat):
         return {
             "messages": [_final_message(await _with_description(
                 SAVE_INSIGHT_DONE.format(names=names or "по обсуждённым показателям"),
-                {"reasoning_trace": new_trace}, config))],
+                {**state, "reasoning_trace": new_trace}, config))],
             "committed_insights": (state.get("committed_insights") or []) + insights,
             "reasoning_trace": new_trace,
         }
@@ -1220,19 +1220,24 @@ _KIND_LABELS = {
 _TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
 
 
-def render_trace(trace: list[TraceStep]) -> str:
+def render_trace(trace: list[TraceStep], preamble: str = "") -> str:
     """Детерминированный markdown-раздел «Как я пришёл к выводу» из трассы.
 
     Без LLM — строго по накопленным шагам, поэтому без галлюцинаций (Блок B.3.a).
+    ``preamble`` (блок «Исходные данные») вставляется после заголовка раздела;
+    раздел рендерится и при пустой трассе, если preamble непустой.
     """
     steps = [s for s in (trace or []) if (s.get("summary") or "").strip()]
-    if not steps:
+    if not steps and not preamble:
         return ""
     lines = ["---", _TRACE_SECTION_TITLE, ""]
+    if preamble:
+        lines.append(preamble)
+        lines.append("")
     for i, step in enumerate(steps, 1):
         label = _KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "Шаг")
         lines.append(f"{i}. **{label}.** {step['summary'].strip()}")
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip()
 
 
 def _strip_trace_section(content: Any) -> Any:
@@ -1321,6 +1326,145 @@ async def _describe_trace_llm(
         return ""
 
 
+# Превью содержательной долгосрочной памяти и запроса к wiki в блоке
+# «Исходные данные» (полные тексты там не нужны — это опись источников).
+_SOURCES_MEMORY_PREVIEW = 200
+_SOURCES_QUERY_PREVIEW = 120
+
+
+def _metrics_source_line(metrics: Any) -> str:
+    """Строка «- Метрики: …» для блока источников: уникальные, верхнеуровневые, периоды.
+
+    Тот же канонический ``load_dataset_obj``, что и остальные сканы датасета:
+    уникальность — по ``metric_id`` (метрика повторяется в разрезах по element и
+    по периодам), верхнеуровневые — корневые строки без parent_uid.
+    """
+    try:
+        rows = load_dataset_obj(metrics)
+    except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
+        rows = []
+    if not rows:
+        return "- Метрики: датасет пуст."
+    seen_ids: set[str] = set()
+    top_names: list[str] = []
+    periods: dict[str, set[str]] = {}
+    for r in rows:
+        mid = str(r.get("metric_id") or "").strip()
+        if mid:
+            seen_ids.add(mid)
+        if not r.get("parent_uid"):
+            name = str(r.get("metric_name") or "").strip()
+            if name and name not in top_names:
+                top_names.append(name)
+        date = str(r.get("date") or "").strip()
+        if date:
+            periods.setdefault(str(r.get("calc_period") or "период"), set()).add(date)
+    parts = [f"всего уникальных метрик — {len(seen_ids)}"]
+    if top_names:
+        parts.append("верхнеуровневые: " + ", ".join(top_names))
+    if periods:
+        per_strs = []
+        for period, dates in sorted(periods.items()):
+            ds = sorted(dates)
+            span = ds[0] if len(ds) == 1 else f"{ds[0]} … {ds[-1]}"
+            per_strs.append(f"{period} — {len(ds)} ({span})")
+        parts.append("периоды: " + "; ".join(per_strs))
+    return "- Метрики: " + "; ".join(parts) + "."
+
+
+def _wiki_source_line(state: OrchestratorState) -> str:
+    """Строка «- Wiki: …» для блока источников: что реально пришло из easyrag.
+
+    Поля easyrag_* сбрасываются в начале каждого хода (route), поэтому строка
+    отражает текущий ход, а не накопленную историю.
+    """
+    snippets = state.get("easyrag_snippets") or []
+    if snippets:
+        # Только названия «страница / раздел», без similarity и тел фрагментов:
+        # блок для пользователя, технические оценки ему не нужны.
+        refs = []
+        for s in snippets[:5]:
+            page = s.get("page_title") or s.get("slug") or "-"
+            title = s.get("section_title") or s.get("anchor") or "-"
+            refs.append(f"«{page} / {title}»")
+        return f"- Wiki: найдено фрагментов — {len(snippets)}: " + ", ".join(refs) + "."
+    if state.get("easyrag_error"):
+        # Текст исключения пользователю не показываем — он остаётся в
+        # easyrag_error и в трассе для диагностики.
+        return "- Wiki: не удалось получить данные из базы знаний."
+    query = (state.get("easyrag_query") or "").strip()
+    if not query:
+        return "- Wiki: не запрашивалась на этом ходе."
+    if len(query) > _SOURCES_QUERY_PREVIEW:
+        query = query[:_SOURCES_QUERY_PREVIEW] + "…"
+    stubs = state.get("easyrag_stub_pages") or []
+    if stubs:
+        names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stubs)
+        return (
+            f"- Wiki: по запросу «{query}» найдены только пустые "
+            f"страницы-заглушки: {names}."
+        )
+    return f"- Wiki: по запросу «{query}» ничего не найдено."
+
+
+def _memory_source_line(state: OrchestratorState) -> str:
+    """Строка «- Долгосрочная память: …»: тот же фильтр «…отсутствует», что и
+    в _memory_system_block, но пустая память здесь показывается явно."""
+    if state.get("memory_error"):
+        # Как и с wiki: текст ошибки — в memory_error, пользователю только факт.
+        return "- Долгосрочная память: не удалось загрузить."
+    ctx = (state.get("memory_context") or "").strip()
+    if ctx and "отсутствует" not in ctx.lower():
+        preview = ctx.replace("\n", " ")
+        if len(preview) > _SOURCES_MEMORY_PREVIEW:
+            preview = preview[:_SOURCES_MEMORY_PREVIEW] + "…"
+        return f"- Долгосрочная память: {preview}"
+    return (
+        "- Долгосрочная память: отсутствует "
+        "(сохранённого контекста прошлых диалогов нет)."
+    )
+
+
+def _describe_sources_block(state: OrchestratorState) -> str:
+    """Детерминированный подблок «Исходные данные» раздела describe_answer.
+
+    Фактура шагов пайплайна берётся из ПЕРСИСТЕНТНОГО стейта, а не из трассы:
+    трасса per-turn, и шаги загрузки первого хода (оргструктура, метрики,
+    память) на последующих ходах в неё уже не попадают. Точные значения без
+    LLM — числа и имена не искажаются.
+    """
+    lines: list[str] = []
+    metrics = state.get("metrics")
+    if isinstance(metrics, dict):
+        org_parts: list[str] = []
+        me = metrics.get("me") or {}
+        boss_fio = str((me.get("fio") if isinstance(me, dict) else "") or "").strip()
+        if boss_fio:
+            org_parts.append(f"руководитель — {boss_fio}")
+        names = [
+            str(e.get("fio") or "").strip()
+            for e in (metrics.get("employees") or [])
+            if isinstance(e, dict) and str(e.get("fio") or "").strip()
+        ]
+        if names:
+            position = str(state.get("position") or "").strip()
+            pos = f" (позиция: {position})" if position else ""
+            org_parts.append("в фокусе анализа — " + ", ".join(names) + pos)
+        if org_parts:
+            lines.append("- Оргструктура: " + "; ".join(org_parts) + ".")
+        else:
+            lines.append("- Оргструктура: в датасете нет ФИО.")
+        lines.append(_metrics_source_line(metrics))
+    else:
+        err = state.get("metrics_error")
+        suffix = f" ({err})" if err else ""
+        lines.append(f"- Оргструктура: данные не загружены{suffix}.")
+        lines.append("- Метрики: не загружены.")
+    lines.append(_wiki_source_line(state))
+    lines.append(_memory_source_line(state))
+    return "**Исходные данные:**\n" + "\n".join(lines)
+
+
 async def _with_description(
     text: str,
     state: OrchestratorState,
@@ -1330,20 +1474,25 @@ async def _with_description(
 ) -> str:
     """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true.
 
-    Основной путь — LLM-описание по трассе (какие инструменты, зачем, как
-    интерпретированы данные). Фоллбэк — детерминированный render_trace: когда llm
-    не передан, в трассе нет содержательных шагов (tool_call/kb_hit — служебные
-    ходы вроде отмены сохранения) или LLM-вызов упал/вернул пусто.
+    Раздел открывается детерминированным подблоком «Исходные данные»
+    (_describe_sources_block: оргструктура, метрики, wiki, память из стейта),
+    дальше — ход анализа. Основной путь — LLM-описание по трассе (какие
+    инструменты, зачем, как интерпретированы данные). Фоллбэк — детерминированный
+    render_trace: когда llm не передан, в трассе нет содержательных шагов
+    (tool_call/kb_hit — служебные ходы вроде отмены сохранения) или LLM-вызов
+    упал/вернул пусто.
     """
     if not _config_flag(config, "describe_answer", default=False):
         return text
+    sources = _describe_sources_block(state)
     trace = state.get("reasoning_trace") or []
     substantive = any(s.get("kind") in ("tool_call", "kb_hit") for s in trace)
     if llm is not None and substantive:
         narrative = await _describe_trace_llm(llm, question, text, trace)
         if narrative:
-            return f"{text}\n\n---\n{_TRACE_SECTION_TITLE}\n\n{narrative}"
-    section = render_trace(trace)
+            body = f"{sources}\n\n{narrative}" if sources else narrative
+            return f"{text}\n\n---\n{_TRACE_SECTION_TITLE}\n\n{body}"
+    section = render_trace(trace, preamble=sources)
     return f"{text}\n\n{section}" if section else text
 
 
