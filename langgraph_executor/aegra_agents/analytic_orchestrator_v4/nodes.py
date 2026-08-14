@@ -287,6 +287,9 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         wiki_block = _easyrag_system_block(state)
         if wiki_block:
             parts.append(wiki_block)
+        memory_block = _memory_system_block(state)
+        if memory_block:
+            parts.append(memory_block)
         if analysis:
             parts.append("Данные по метрикам сотрудника (собраны из полного набора):\n" + analysis)
         else:
@@ -382,6 +385,9 @@ def make_respond_node(llm: GigaChat):
         org_block = _org_structure_block(state)
         if org_block:
             parts.append(org_block)
+        memory_block = _memory_system_block(state)
+        if memory_block:
+            parts.append(memory_block)
         metrics_block = _metrics_system_block(state)
         if metrics_block:
             parts.append(metrics_block)
@@ -1518,6 +1524,18 @@ def _easyrag_system_block(state: OrchestratorState) -> str | None:
             body = body[:_EASYRAG_SNIPPET_PREVIEW] + "…"
         lines.append(f"- [{page} / {title}{sim_str}]: {body}")
     return "\n".join(lines)
+
+
+def _memory_system_block(state: OrchestratorState) -> str | None:
+    # Долгосрочная память: контекст предыдущих диалогов, если он загружен и
+    # непустой («…отсутствует» — маркер пустой памяти, в промпт не подмешиваем).
+    memory_context = state.get("memory_context")
+    if memory_context and "отсутствует" not in memory_context.lower():
+        return (
+            "=== Контекст предыдущих диалогов (долгосрочная память) ===\n"
+            f"{memory_context}"
+        )
+    return None
 
 
 def _strip_code_fence(text: str) -> str:

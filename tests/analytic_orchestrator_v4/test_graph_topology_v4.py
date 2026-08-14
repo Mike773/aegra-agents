@@ -38,8 +38,11 @@ def test_first_turn_ends_with_auto_insight():
 
 def test_first_turn_grounds_wiki_before_analysis():
     edges = _edges()
-    assert ("load_data", "ground_wiki_initial") in edges
+    # Между загрузкой данных и wiki-grounding — загрузка долгосрочной памяти.
+    assert ("load_data", "load_memory") in edges
+    assert ("load_memory", "ground_wiki_initial") in edges
     assert ("ground_wiki_initial", "initial_analysis") in edges
+    assert ("load_data", "ground_wiki_initial") not in edges
     assert ("load_data", "initial_analysis") not in edges
 
 
@@ -47,9 +50,10 @@ def test_confirmation_flow_removed():
     nodes = {n for e in _edges() for n in e}
     assert "form_insights" not in nodes
     assert "save_insights" not in nodes
-    # Вместо него — фиксация по явной просьбе, лист хода.
+    # Вместо него — фиксация по явной просьбе; ход завершается через save_memory.
     assert ("route", "save_insight") in _edges()
-    assert ("save_insight", "__end__") in _edges()
+    assert ("save_insight", "save_memory") in _edges()
+    assert ("save_insight", "__end__") not in _edges()
 
 
 def test_analytics_path_through_wiki_grounding():
@@ -58,6 +62,16 @@ def test_analytics_path_through_wiki_grounding():
     assert ("ground_wiki_analytics", "respond") in edges
     assert ("call_json_analyzer", "respond") not in edges
     assert ("call_easyrag", "respond") in edges
+
+
+def test_memory_wiring():
+    edges = _edges()
+    # respond/save_insight завершают ход сохранением долгосрочной памяти…
+    assert ("respond", "save_memory") in edges
+    assert ("save_memory", "__end__") in edges
+    assert ("respond", "__end__") not in edges
+    # …а хвост первого хода (auto_insight) идёт в END напрямую.
+    assert ("auto_insight", "__end__") in edges
 
 
 def test_after_route_intent_mapping():

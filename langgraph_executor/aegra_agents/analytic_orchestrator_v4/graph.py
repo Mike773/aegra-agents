@@ -8,6 +8,7 @@ from ..easyrag.graph import graph as easyrag_graph
 # и персональные rankings, поля ex (% выполнения плана) и rr (RunRate) в выдаче
 # инструментов; без аналитики по бенчмарку, pop-сравнения только у метрик с планом.
 from ..json_analyzer_v5.graph import graph as json_analyzer_graph
+from ..long_term_memory.nodes import make_load_memory_node, make_save_memory_node
 from ..shared.clients import create_gigachat_client
 from .nodes import (
     after_route,
@@ -52,6 +53,11 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g.add_node("save_insight", make_save_insight_node(llm))
     g.add_node("respond", make_respond_node(llm))
 
+    # Долгосрочная память (пока заглушка long_term_memory): загрузка контекста
+    # прошлых диалогов на первом ходе и сохранение итогов в конце хода.
+    g.add_node("load_memory", make_load_memory_node(llm))
+    g.add_node("save_memory", make_save_memory_node())
+
     # Turn-based чат: один вызов графа = одно входящее сообщение → ответ → END.
     # Состояние между ходами держит per-thread чекпоинтер aegra (по thread_id),
     # поэтому никаких interrupt() — следующая реплика приходит обычным входом
@@ -67,7 +73,8 @@ def build_graph(llm: GigaChat, checkpointer=None):
     # «шаговые» сообщения (additional_kwargs.orchestrator_step), терминальный лист —
     # ИТОГОВЫЙ ответ (additional_kwargs.orchestrator_final, всегда последний).
     # Прогресс отключается флагом configurable.emit_progress_messages=false.
-    g.add_edge("load_data", "ground_wiki_initial")
+    g.add_edge("load_data", "load_memory")
+    g.add_edge("load_memory", "ground_wiki_initial")
     g.add_edge("ground_wiki_initial", "initial_analysis")
     # Итог хода отдаёт initial_analysis; auto_insight — «хвост» первого хода:
     # пишет стартовый инсайт в сервис и НЕ добавляет сообщений пользователю.
@@ -87,8 +94,10 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g.add_edge("call_json_analyzer", "ground_wiki_analytics")
     g.add_edge("ground_wiki_analytics", "respond")
     g.add_edge("call_easyrag", "respond")
-    g.add_edge("save_insight", END)
-    g.add_edge("respond", END)
+    # Ходы save_insight/respond завершаются сохранением долгосрочной памяти.
+    g.add_edge("save_insight", "save_memory")
+    g.add_edge("respond", "save_memory")
+    g.add_edge("save_memory", END)
 
     return g.compile(checkpointer=checkpointer)
 

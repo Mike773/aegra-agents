@@ -96,6 +96,13 @@ class OrchestratorOutput(TypedDict, total=False):
     analytics_answer: str | None
     analytics_error: str | None
 
+    # Долгосрочная память: загруженный контекст и флаги сохранения.
+    memory_context: str | None
+    memory_error: str | None
+    memory_saved: bool | None
+    memory_save_error: str | None
+    memory_loaded: bool
+
     # Инсайты, реально ушедшие в сервис за диалог: каждый — {type, metric_id,
     # metric_name, text}, type ∈ {main_problem, problem, norm, achievement}
     # (см. _parse_insights_json). Экрана подтверждения нет: стартовый инсайт
