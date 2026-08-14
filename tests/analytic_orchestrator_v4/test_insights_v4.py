@@ -196,10 +196,15 @@ def test_save_insight_submits_and_answers(monkeypatch):
     assert len(out["committed_insights"]) == 1
 
 
+# Тесты ниже сверяют текст ответа ДОСЛОВНО — выключаем дефолтную HTML-конвертацию
+# (answer_html), она проверяется отдельно в test_answer_html.py.
+_NO_HTML = {"configurable": {"answer_html": False}}
+
+
 def test_save_insight_without_source_explains(monkeypatch):
     calls = _fake_service(monkeypatch)
     node = make_save_insight_node(FakeLLM(_insights_json()))
-    out = asyncio.run(node(_state(source_id=None), {}))
+    out = asyncio.run(node(_state(source_id=None), _NO_HTML))
     assert calls == []
     assert out["messages"][-1].content == SAVE_INSIGHT_NO_SOURCE
 
@@ -207,7 +212,7 @@ def test_save_insight_without_source_explains(monkeypatch):
 def test_save_insight_nothing_to_save(monkeypatch):
     calls = _fake_service(monkeypatch)
     node = make_save_insight_node(FakeLLM(json.dumps({"insights": []})))
-    out = asyncio.run(node(_state(), {}))
+    out = asyncio.run(node(_state(), _NO_HTML))
     assert calls == []
     assert out["messages"][-1].content == SAVE_INSIGHT_EMPTY
 
@@ -218,7 +223,7 @@ def test_save_insight_skips_already_committed(monkeypatch):
     node = make_save_insight_node(FakeLLM(_insights_json()))
     committed = [{"type": "main_problem", "metric_name": "Производительность",
                   "metric_id": "90022908", "text": "..."}]
-    out = asyncio.run(node(_state(committed_insights=committed), {}))
+    out = asyncio.run(node(_state(committed_insights=committed), _NO_HTML))
     assert calls == []
     assert out["messages"][-1].content == SAVE_INSIGHT_EMPTY
 

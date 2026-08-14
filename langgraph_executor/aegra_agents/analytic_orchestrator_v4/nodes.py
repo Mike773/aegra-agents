@@ -6,6 +6,8 @@ import logging
 import re
 from typing import Any
 
+import markdown2
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_gigachat import GigaChat
@@ -246,7 +248,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
                 "summary": state.get("metrics_error") or "Метрики не загружены.",
             }
             return {
-                "messages": [_final_message(LOAD_ERROR_PROMPT)],
+                "messages": [_final_message(LOAD_ERROR_PROMPT, config)],
                 "reasoning_trace": _append_trace(state, [step]),
             }
 
@@ -323,7 +325,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             "messages": [_final_message(await _with_description(
                 text, {**state, "reasoning_trace": new_trace}, config,
                 llm=llm, question=human,
-            ))],
+            ), config)],
             "reasoning_trace": new_trace,
         }
         # Опорный широкий разбор — единственное sticky-поле первого хода, ставится
@@ -426,7 +428,7 @@ def make_respond_node(llm: GigaChat):
             "messages": [_final_message(await _with_description(
                 text, {**state, "reasoning_trace": new_trace}, config,
                 llm=llm, question=_last_user_text(state),
-            ))],
+            ), config)],
             "reasoning_trace": new_trace,
         }
 
@@ -1003,7 +1005,7 @@ def make_save_insight_node(llm: GigaChat):
                 "summary": "Просьба зафиксировать вывод, но привязка не задана.",
             }])
             return {
-                "messages": [_final_message(SAVE_INSIGHT_NO_SOURCE)],
+                "messages": [_final_message(SAVE_INSIGHT_NO_SOURCE, config)],
                 "reasoning_trace": new_trace,
             }
 
@@ -1027,7 +1029,7 @@ def make_save_insight_node(llm: GigaChat):
                 "summary": "Нечего фиксировать — в разборе нет оформленного вывода.",
             }])
             return {
-                "messages": [_final_message(SAVE_INSIGHT_EMPTY)],
+                "messages": [_final_message(SAVE_INSIGHT_EMPTY, config)],
                 "reasoning_trace": new_trace,
             }
 
@@ -1040,7 +1042,7 @@ def make_save_insight_node(llm: GigaChat):
             return {
                 "messages": [_final_message(await _with_description(
                     SAVE_INSIGHT_ERROR.format(err=err),
-                    {**state, "reasoning_trace": new_trace}, config))],
+                    {**state, "reasoning_trace": new_trace}, config), config)],
                 "reasoning_trace": new_trace,
             }
 
@@ -1058,7 +1060,7 @@ def make_save_insight_node(llm: GigaChat):
         return {
             "messages": [_final_message(await _with_description(
                 SAVE_INSIGHT_DONE.format(names=names or "по обсуждённым показателям"),
-                {**state, "reasoning_trace": new_trace}, config))],
+                {**state, "reasoning_trace": new_trace}, config), config)],
             "committed_insights": (state.get("committed_insights") or []) + insights,
             "reasoning_trace": new_trace,
         }
@@ -1271,7 +1273,11 @@ def _history_for_llm(messages: list[Any]) -> list[Any]:
         if _is_step(m):
             continue
         if isinstance(m, AIMessage):
-            out.append(AIMessage(content=_strip_trace_section(m.content)))
+            # При answer_html content — HTML; в LLM подаём исходный markdown.
+            src = (m.additional_kwargs or {}).get(_MARKDOWN_KEY)
+            out.append(AIMessage(content=_strip_trace_section(
+                src if isinstance(src, str) else m.content
+            )))
         else:
             out.append(m)
     return out
@@ -1523,9 +1529,32 @@ def _is_step(m: Any) -> bool:
     return bool(getattr(m, "additional_kwargs", None) and m.additional_kwargs.get(_STEP_KEY))
 
 
-def _final_message(text: str) -> AIMessage:
-    """Итоговое сообщение хода — помечаем флагом, чтобы потребитель брал его явно."""
-    return AIMessage(content=text, additional_kwargs={_FINAL_KEY: True})
+# Исходный markdown итогового ответа при answer_html=true: content сообщения —
+# уже HTML, а историю для LLM собираем из этого ключа (_history_for_llm), чтобы
+# модель не видела HTML-разметку и не начала её имитировать.
+_MARKDOWN_KEY = "orchestrator_markdown"
+
+
+def _render_answer_html(text: str) -> str:
+    """Markdown итогового ответа → HTML. Детерминированно, через markdown2 —
+    БЕЗ LLM (модель разметку не пишет и испортить её не может)."""
+    return markdown2.markdown(
+        text, extras=["tables", "fenced-code-blocks", "cuddled-lists"]
+    ).strip()
+
+
+def _final_message(text: str, config: RunnableConfig | None) -> AIMessage:
+    """Итоговое сообщение хода — помечаем флагом, чтобы потребитель брал его явно.
+
+    По умолчанию (answer_html=true) content — HTML из markdown2; исходный
+    markdown сохраняется в additional_kwargs[_MARKDOWN_KEY]. answer_html=false
+    возвращает прежнее поведение: content — сырой markdown.
+    """
+    kwargs: dict = {_FINAL_KEY: True}
+    if _config_flag(config, "answer_html", default=True):
+        kwargs[_MARKDOWN_KEY] = text
+        text = _render_answer_html(text)
+    return AIMessage(content=text, additional_kwargs=kwargs)
 
 
 def _strip_rankings(metrics: Any) -> Any:
