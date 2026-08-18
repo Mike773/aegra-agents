@@ -26,7 +26,7 @@ from ..shared.clients import create_gigachat_embeddings
 from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import apply_metric_kinds, compute_analytics
-from .loader import load_aggregates_obj, load_dataset_obj
+from .loader import load_aggregates_obj, load_dataset_obj, load_person_aggregates_obj
 from .prompts import FACTS_PROMPT, STAR_FACTS_BLOCK
 from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
@@ -59,15 +59,20 @@ def _prepare_store(
     rows: list[dict[str, Any]],
     agg_rows: list[dict[str, Any]] | None = None,
     ref_level: str | None = None,
+    person_pairs: list[dict[str, Any]] | None = None,
 ) -> SqliteStore:
     """Блокирующая подготовка: in-memory SQLite + производная аналитика.
 
     ref_level — явный референсный уровень peer-агрегатов (имена уровней
-    инстанс-специфичны); не задан — эвристика по total_objects в analytics."""
+    инстанс-специфичны); не задан — эвристика по total_objects в analytics.
+    person_pairs — связь «персона → её предагрегаты»; грузится ДО
+    compute_analytics: расчёт берёт для человека только его группы сравнения."""
     store = SqliteStore()
     store.load(rows)
     if agg_rows:
         store.load_aggregates(agg_rows)
+    if person_pairs:
+        store.load_person_aggregates(person_pairs)
     compute_analytics(store, ref_level=ref_level)
     return store
 
@@ -196,9 +201,12 @@ def make_gather_node(llm: GigaChat):
 
         rows = load_dataset_obj(raw_obj)
         agg_rows = _parse_aggregates(state.get("raw_aggregates"))
+        person_pairs = load_person_aggregates_obj(raw_obj)
         cfg = (config or {}).get("configurable") or {}
         ref_level = (str(cfg.get("peer_ref_level") or "").strip()) or None
-        store = await asyncio.to_thread(_prepare_store, rows, agg_rows, ref_level)
+        store = await asyncio.to_thread(
+            _prepare_store, rows, agg_rows, ref_level, person_pairs
+        )
 
         # Кэш эмбеддингов — в LangGraph Store (подключение aegra). Доступ async,
         # сам подсчёт недостающих эмбеддингов (GigaChat) — внутри в to_thread.

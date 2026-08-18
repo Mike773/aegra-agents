@@ -196,29 +196,53 @@ def _walk(
             _walk(children, person, rows, counter, uid, depth + 1)
 
 
-def load_dataset_obj(data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Разворачивает уже распарсенный JSON-объект в плоский список строк."""
+def _people(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Персоны датасета (me + employees) с каноническим ключом ``_key``.
+
+    Ключ — для ВНУТРЕННЕЙ идентичности: табельный (как текст), иначе ФИО, иначе
+    индекс. Нужен, т.к. на проде tabnum может приходить null — тогда без фолбэка
+    разные люди схлопывались бы по NULL person_tabnum."""
     people: list[dict[str, Any]] = []
     me = data.get("me")
     if me is not None:
-        me = {**me, "_is_me": True}
-        people.append(me)
+        people.append({**me, "_is_me": True})
     for emp in data.get("employees", []) or []:
         people.append({**emp, "_is_me": False})
 
-    # Канонический ключ человека для ВНУТРЕННЕЙ идентичности: табельный (как текст),
-    # иначе ФИО, иначе индекс. Нужен, т.к. на проде tabnum может приходить null —
-    # тогда без фолбэка разные люди схлопывались бы по NULL person_tabnum.
     for i, person in enumerate(people):
         tab = person.get("tabnum")
         fio = person.get("fio")
         person["_key"] = str(tab) if tab is not None else (fio if fio else f"person{i}")
+    return people
 
+
+def load_dataset_obj(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Разворачивает уже распарсенный JSON-объект в плоский список строк."""
     rows: list[dict[str, Any]] = []
     counter = [1]
-    for person in people:
+    for person in _people(data):
         _walk(person.get("metrics", []) or [], person, rows, counter, None, 1)
     return rows
+
+
+def load_person_aggregates_obj(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Связь «персона → её предагрегаты» из индивидуального датасета.
+
+    ``aggregates_ids`` лежит у персоны рядом с ``metrics``; ключи персон те же,
+    что в строках ``load_dataset_obj`` (person_key). Пары уникальны. Старый
+    формат без поля → ``[]`` — привязка опциональна."""
+    pairs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for person in _people(data):
+        for agg_id in person.get("aggregates_ids") or []:
+            if agg_id is None:
+                continue
+            text = str(agg_id).strip()
+            if not text or (person["_key"], text) in seen:
+                continue
+            seen.add((person["_key"], text))
+            pairs.append({"person_key": person["_key"], "aggregate_id": text})
+    return pairs
 
 
 _RANK_RE = re.compile(r"(\d+)\D+(\d+)")
@@ -243,6 +267,7 @@ AGG_ROW_FIELDS: tuple[str, ...] = (
     "depth",
     "level",
     "level_name",
+    "aggregate_id",
     "metric_id",
     "metric_name",
     "dt",
@@ -276,6 +301,7 @@ def _walk_aggregates(
     metrics: list[Any],
     level: Any,
     level_name: Any,
+    aggregate_id: Any,
     rows: list[dict[str, Any]],
     counter: list[int],
     parent_uid: int | None,
@@ -293,6 +319,7 @@ def _walk_aggregates(
             "depth": depth,
             "level": level,
             "level_name": level_name,
+            "aggregate_id": aggregate_id,
             "metric_id": node.get("metric_id"),
             "metric_name": node.get("metric_name"),
         }
@@ -314,16 +341,20 @@ def _walk_aggregates(
         # В этом payload дети приходят как "children_metrics" (в основном
         # датасете — "child_metrics"); принимаем оба на всякий случай.
         children = node.get("children_metrics") or node.get("child_metrics") or []
-        _walk_aggregates(children, level, level_name, rows, counter, uid, depth + 1)
+        _walk_aggregates(
+            children, level, level_name, aggregate_id, rows, counter, uid, depth + 1
+        )
 
 
 def load_aggregates_obj(data: Any) -> list[dict[str, Any]]:
     """Разворачивает batch-агрегаты peer-групп в плоские строки.
 
     Вход: список ``{"dataset": {"level", "metrics": [...]}}`` (см. докстринг
-    модуля). Все срезы одного узла метрики (текущий ``aggregates`` +
-    записи ``history``) делят ``node_uid``; текущий помечен ``is_current=1``.
-    Битый или пустой вход → ``[]`` — агрегаты опциональны и не фатальны.
+    модуля); запись может нести пометку ``aggregate_id`` — id предагрегата,
+    которым её загрузили (оркестратор помечает при по-штучной загрузке). Все
+    срезы одного узла метрики (текущий ``aggregates`` + записи ``history``)
+    делят ``node_uid``; текущий помечен ``is_current=1``. Битый или пустой
+    вход → ``[]`` — агрегаты опциональны и не фатальны.
     """
     rows: list[dict[str, Any]] = []
     counter = [1]
@@ -334,6 +365,6 @@ def load_aggregates_obj(data: Any) -> list[dict[str, Any]]:
         if isinstance(ds, dict):
             _walk_aggregates(
                 ds.get("metrics") or [], ds.get("level"), ds.get("level_name"),
-                rows, counter, None, 1,
+                entry.get("aggregate_id"), rows, counter, None, 1,
             )
     return rows

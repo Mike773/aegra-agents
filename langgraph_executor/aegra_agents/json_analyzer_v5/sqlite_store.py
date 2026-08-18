@@ -112,6 +112,9 @@ class SqliteStore:
                 depth           INTEGER,
                 level           TEXT,      -- служебный код группы сравнения
                 level_name      TEXT,      -- её название для выдачи (может не прийти)
+                -- id предагрегата, которым запись загрузили (NULL у старой
+                -- формы «все сразу» — такая строка видна всем персонам).
+                aggregate_id    TEXT,
                 metric_id       TEXT,
                 metric_name     TEXT,
                 dt              TEXT,
@@ -126,6 +129,14 @@ class SqliteStore:
                 iqr             REAL,
                 cv              REAL,
                 total_objects   INTEGER
+            );
+
+            -- Связь «персона → её предагрегаты»: у персоны в датасете лежит
+            -- aggregates_ids. По ней аналитика берёт для человека только его
+            -- группы сравнения; пустая таблица = привязки нет (старый формат).
+            CREATE TABLE person_aggregates (
+                person_key   TEXT,
+                aggregate_id TEXT
             );
 
             CREATE TABLE metric_analytics (
@@ -222,10 +233,31 @@ class SqliteStore:
         placeholders = ", ".join("?" for _ in AGG_ROW_FIELDS)
         self.conn.executemany(
             f"INSERT INTO peer_aggregates ({cols}) VALUES ({placeholders})",
-            [tuple(r[f] for f in AGG_ROW_FIELDS) for r in rows],
+            # .get, а не [f]: у строк старой формы (и собранных вручную в
+            # тестах) поля aggregate_id может не быть — это не повод падать.
+            [tuple(r.get(f) for f in AGG_ROW_FIELDS) for r in rows],
         )
         self.conn.commit()
         return len(rows)
+
+    def load_person_aggregates(self, pairs: list[dict[str, Any]]) -> int:
+        """Загрузить связь «персона → предагрегат» (loader.load_person_aggregates_obj)."""
+        self.conn.executemany(
+            "INSERT INTO person_aggregates (person_key, aggregate_id) VALUES (?, ?)",
+            [(p.get("person_key"), p.get("aggregate_id")) for p in pairs],
+        )
+        self.conn.commit()
+        return len(pairs)
+
+    def person_aggregate_ids(self) -> dict[str, set[str]]:
+        """Карта person_key → множество его aggregate_id; пусто = привязки нет."""
+        out: dict[str, set[str]] = {}
+        for row in self.conn.execute(
+            "SELECT person_key, aggregate_id FROM person_aggregates "
+            "WHERE person_key IS NOT NULL AND aggregate_id IS NOT NULL"
+        ):
+            out.setdefault(row["person_key"], set()).add(row["aggregate_id"])
+        return out
 
     def rankings_row_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM metric_rankings").fetchone()[0]

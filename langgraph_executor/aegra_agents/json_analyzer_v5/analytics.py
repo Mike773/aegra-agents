@@ -230,6 +230,26 @@ def _pick_ref_level(store: SqliteStore, ref_level: str | None = None) -> str | N
     return order[0] if order else None
 
 
+def _agg_rows_for_person(
+    agg_rows: list[dict],
+    person_key: Any,
+    person_ids: dict[str, set[str]],
+) -> list[dict]:
+    """Строки агрегатов, видимые персоне.
+
+    Предагрегаты индивидуальны: строка с aggregate_id видна только персонам, у
+    которых этот id есть в связке person_aggregates. Строка без aggregate_id
+    (старая форма «все сразу») видна всем; персона без связки (или пустая
+    связка целиком) видит всё — полная обратная совместимость."""
+    ids = person_ids.get(str(person_key)) if person_key is not None else None
+    if not ids:
+        return agg_rows
+    return [
+        r for r in agg_rows
+        if r.get("aggregate_id") is None or str(r["aggregate_id"]) in ids
+    ]
+
+
 def _build_agg_lookup(
     agg_rows: list[dict], ref_level: str | None = None
 ) -> dict[str, dict[str, dict]]:
@@ -282,15 +302,30 @@ def compute_analytics(store: SqliteStore, ref_level: str | None = None) -> int:
     # Peer-агрегаты (могут отсутствовать целиком или частично — тогда зависящие
     # от них поля остаются None, режим v3). ref_level — явный override уровня
     # (configurable.peer_ref_level); имена уровней инстанс-специфичны.
-    agg_lookup = _build_agg_lookup(
-        [dict(r) for r in conn.execute("SELECT * FROM peer_aggregates")], ref_level
-    )
+    # Предагрегаты индивидуальны: lookup строится на срезе строк, видимых
+    # персоне (_agg_rows_for_person). Кэш по набору её aggregate_id — персоны
+    # с одинаковыми предагрегатами делят один lookup, без пересборки на каждого.
+    all_agg_rows = [dict(r) for r in conn.execute("SELECT * FROM peer_aggregates")]
+    person_ids = store.person_aggregate_ids()
+    lookup_cache: dict[frozenset[str], dict[str, dict[str, dict]]] = {}
+
+    def _lookup_for(person_key: Any) -> dict[str, dict[str, dict]]:
+        ids = person_ids.get(str(person_key)) if person_key is not None else None
+        cache_key = frozenset(ids or ())
+        cached = lookup_cache.get(cache_key)
+        if cached is None:
+            cached = _build_agg_lookup(
+                _agg_rows_for_person(all_agg_rows, person_key, person_ids), ref_level
+            )
+            lookup_cache[cache_key] = cached
+        return cached
 
     def _agg_for(r: dict) -> dict | None:
         ym = _ym(r["date"])
         if ym is None:
             return None
-        return agg_lookup.get(_norm_metric_name(r["metric_name"]), {}).get(ym)
+        lookup = _lookup_for(r["person_key"])
+        return lookup.get(_norm_metric_name(r["metric_name"]), {}).get(ym)
 
     result: dict[int, dict[str, Any]] = {}
 
@@ -1156,17 +1191,24 @@ def build_peer_context(
 
     # Имя метрики в агрегатах может отличаться регистром/пробелами от основного
     # датасета, а LOWER() в SQLite не понижает кириллицу — нормализуем в Python.
+    # Срез — только агрегаты фокусного человека (личный ряд и rankings ниже уже
+    # фильтруются по person_key): предагрегаты индивидуальны, и у коллеги с той
+    # же метрикой может быть другая группа сравнения.
     target = _norm_metric_name(metric)
-    agg_rows = [
-        r
-        for r in (
-            dict(x)
-            for x in store.conn.execute(
-                "SELECT * FROM peer_aggregates ORDER BY node_uid, dt"
+    agg_rows = _agg_rows_for_person(
+        [
+            r
+            for r in (
+                dict(x)
+                for x in store.conn.execute(
+                    "SELECT * FROM peer_aggregates ORDER BY node_uid, dt"
+                )
             )
-        )
-        if _norm_metric_name(r["metric_name"]) == target
-    ]
+            if _norm_metric_name(r["metric_name"]) == target
+        ],
+        person_key,
+        store.person_aggregate_ids(),
+    )
     rank_rows = [
         dict(r)
         for r in store.conn.execute(

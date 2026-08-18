@@ -42,13 +42,38 @@ _LEVEL_PROFILES = (
 )
 
 
-def _peer_aggregates_for_sample(data):
-    """Демо-предагрегаты peer-групп ПОД ИМЕНА МЕТРИК сэмпла.
+def _sample_agg_id(m):
+    """Демо-id предагрегата корневой метрики (в проде — вида «182_m_777»)."""
+    return f"agg_{m.get('id') or m['metric_name']}"
+
+
+def _inject_aggregates_ids(data):
+    """Кладёт персонам aggregates_ids рядом с metrics, как прод-компонент.
+
+    Сэмплы samples_v2 — старой формы, без этого поля; файлы не редактируем,
+    инъектируем на лету по корневым метрикам персоны. Без поля load_data v4
+    не сделает ни одного вызова предагрегатов.
+    """
+    for person in [data.get("me"), *(data.get("employees") or [])]:
+        if not isinstance(person, dict):
+            continue
+        ids = []
+        for m in person.get("metrics") or []:
+            if m.get("metric_name") and isinstance(m.get("fact"), (int, float)):
+                agg_id = _sample_agg_id(m)
+                if agg_id not in ids:
+                    ids.append(agg_id)
+        person["aggregates_ids"] = ids
+
+
+def _peer_aggregates_by_id(data):
+    """Демо-предагрегаты peer-групп ПОД ИМЕНА МЕТРИК сэмпла, по aggregate_id.
 
     Штатная заглушка отдаёт метрику «Метрика тест», которой в сэмпле нет, — тогда
     peer_context ничего не находит и сравнение с коллегами в ответе не проверишь.
     Здесь берём корневые метрики сэмпла и строим по ним группы с фактом чуть выше
-    личного, историю за два прошлых периода и топ-20% заметно выше.
+    личного, историю за два прошлых периода и топ-20% заметно выше. Индекс — по
+    aggregate_id: предагрегаты загружаются индивидуально, по одному id на вызов.
     """
     people = [p for p in [data.get("me"), *(data.get("employees") or [])] if p]
     seen, roots = set(), []
@@ -61,46 +86,55 @@ def _peer_aggregates_for_sample(data):
             seen.add(name)
             roots.append(m)
 
-    def _metrics_for(level_mult, hit_rate, objects):
-        out = []
-        for m in roots:
-            fact = m["fact"]
+    def _metric_entry(m, level_mult, hit_rate, objects):
+        fact = m["fact"]
 
-            def _slice(dt, mult, m=m, fact=fact):
-                scale = level_mult * mult
-                return {
-                    "dt": dt, "calc_period": m.get("calc_period") or "Месяц",
-                    "mean_fact": round(fact * 1.1 * scale, 2),
-                    "mean_plan": round((m.get("plan") or fact) * 1.0, 2),
-                    "mean_ex": 98.0, "median": round(fact * 1.05 * scale, 2),
-                    "hit_rate": hit_rate,
-                    "top20_mean_fact": round(fact * 1.4 * scale, 2),
-                    "iqr": round(abs(fact) * 0.3, 2), "cv": 42.0,
-                    "total_objects": objects,
-                }
+        def _slice(dt, mult):
+            scale = level_mult * mult
+            return {
+                "dt": dt, "calc_period": m.get("calc_period") or "Месяц",
+                "mean_fact": round(fact * 1.1 * scale, 2),
+                "mean_plan": round((m.get("plan") or fact) * 1.0, 2),
+                "mean_ex": 98.0, "median": round(fact * 1.05 * scale, 2),
+                "hit_rate": hit_rate,
+                "top20_mean_fact": round(fact * 1.4 * scale, 2),
+                "iqr": round(abs(fact) * 0.3, 2), "cv": 42.0,
+                "total_objects": objects,
+            }
 
-            out.append({
-                "metric_id": str(m.get("id") or m["metric_name"]),
-                "metric_name": m["metric_name"],
-                "aggregates": {
-                    **_slice(m.get("date") or "2026-07-30", 1.0),
-                    "history": [
-                        _slice("2026-05-31", 1.08), _slice("2026-04-30", 1.12),
-                    ],
-                },
-            })
-        return out
+        return {
+            "metric_id": str(m.get("id") or m["metric_name"]),
+            "metric_name": m["metric_name"],
+            "aggregates": {
+                **_slice(m.get("date") or "2026-07-30", 1.0),
+                "history": [
+                    _slice("2026-05-31", 1.08), _slice("2026-04-30", 1.12),
+                ],
+            },
+        }
 
-    return [
-        {"dataset": {"level": lvl, "level_name": name,
-                     "metrics": _metrics_for(mult, hit, objs)}}
-        for lvl, name, mult, hit, objs in _LEVEL_PROFILES
-    ]
+    return {
+        _sample_agg_id(m): [
+            {"dataset": {"level": lvl, "level_name": name,
+                         "metrics": [_metric_entry(m, mult, hit, objs)]}}
+            for lvl, name, mult, hit, objs in _LEVEL_PROFILES
+        ]
+        for m in roots
+    }
 
 
-_AGGS = _peer_aggregates_for_sample(_DATA)
+_inject_aggregates_ids(_DATA)
+_AGGS_BY_ID = _peer_aggregates_by_id(_DATA)
+
+
+def _aggs_for_filters(self):
+    """Ответ на индивидуальный запрос: object_id из filters → записи этого id."""
+    flt = self.filters[0] if isinstance(self.filters, list) and self.filters else {}
+    return _AGGS_BY_ID.get(str(flt.get("object_id")), [])
+
+
 agent_dataset.GetBatchAgentAggregateDatasetByFiltersComponent.build_json_output = (
-    lambda self: _AGGS
+    _aggs_for_filters
 )
 
 
