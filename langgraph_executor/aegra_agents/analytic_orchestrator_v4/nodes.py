@@ -26,6 +26,16 @@ from ..shared.agent_dataset import (
 from ..shared.assignments_service import SendAssignmentsComponent
 from ..shared.offload import run_blocking
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
+from .employee_profile import (
+    _resolve_store as _resolve_profile_store,
+    build_profile,
+    cache_value,
+    load_cached_profile,
+    profile_namespace,
+    render_diagnosis_fallback,
+    render_profile_block,
+    save_profile,
+)
 from .prompts import (
     ANALYZER_INITIAL_TASK,
     BUSINESS_SYSTEM_PROMPT,
@@ -362,6 +372,9 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
         memory_block = _memory_system_block(state)
         if memory_block:
             parts.append(memory_block)
+        profile_block = _profile_system_block(state)
+        if profile_block:
+            parts.append(profile_block)
         if analysis:
             parts.append("Данные по метрикам сотрудника (собраны из полного набора):\n" + analysis)
         else:
@@ -460,6 +473,9 @@ def make_respond_node(llm: GigaChat):
         memory_block = _memory_system_block(state)
         if memory_block:
             parts.append(memory_block)
+        profile_block = _profile_system_block(state)
+        if profile_block:
+            parts.append(profile_block)
         metrics_block = _metrics_system_block(state)
         if metrics_block:
             parts.append(metrics_block)
@@ -1136,6 +1152,157 @@ def make_save_insight_node(llm: GigaChat):
         }
 
     return save_insight
+
+
+def make_employee_diagnosis_node(llm: GigaChat):
+    """Опорный профиль сотрудника: список проблем и достижений по когортной
+    методологии (детерминированный диагност + один LLM-вызов формулировок).
+
+    Первый запуск относительно source_id строит профиль и кладёт его в LangGraph
+    Store; повторные запуски (новый тред, тот же source_id) читают готовый список
+    и не пересчитывают. Без source-привязки профиль строится только для стейта
+    (кешировать некуда — ключа нет). Любой сбой изолирован: ход продолжается,
+    в худшем случае диалог живёт без опорного блока, как раньше.
+    """
+
+    async def employee_diagnosis(state: OrchestratorState, config: RunnableConfig) -> dict:
+        if not _config_flag(config, "employee_diagnosis_enabled", default=True):
+            return {}
+        if state.get("metrics") is None or state.get("metrics_error"):
+            return {"reasoning_trace": _append_trace(state, [{
+                "stage": "diagnosis", "kind": "decision",
+                "summary": "Диагностика по когорте пропущена: данные не загружены.",
+            }])}
+        employee = (state.get("employee_tabnum") or "").strip()
+        if not employee:
+            return {"reasoning_trace": _append_trace(state, [{
+                "stage": "diagnosis", "kind": "decision",
+                "summary": "Диагностика по когорте пропущена: не задан employee_tabnum.",
+            }])}
+
+        cfg = (config or {}).get("configurable") or {}
+        lg_store = _resolve_profile_store()
+        ns: tuple[str, ...] | None = None
+        if _has_source(state):
+            ns = profile_namespace(
+                (state.get("source_type") or "").strip(),
+                (state.get("source_id") or "").strip(),
+            )
+            if not _config_flag(config, "refresh_employee_diagnosis", default=False):
+                cached = await load_cached_profile(lg_store, ns, employee)
+                if cached is not None:
+                    diag = cached.get("diagnosis") or {}
+                    top = (diag.get("top_problem") or {}).get("metric_name")
+                    return {
+                        "employee_profile": cached["profile"],
+                        "employee_profile_cached": True,
+                        "reasoning_trace": _append_trace(state, [{
+                            "stage": "diagnosis", "kind": "decision",
+                            "summary": (
+                                "Взял готовый список проблем и достижений из кеша "
+                                "по source_id"
+                                + (f" (главная зона — «{top}»)." if top else ".")
+                            ),
+                            "detail": {
+                                "cached": True,
+                                "source_type": state.get("source_type"),
+                                "source_id": state.get("source_id"),
+                            },
+                        }]),
+                        **_step_update(
+                            config, "🧭 Использую сохранённую диагностику сотрудника"
+                        ),
+                    }
+
+        profile, diagnosis, err = await build_profile(
+            llm,
+            metrics=state.get("metrics"),
+            aggregates=state.get("aggregates"),
+            employee_tabnum=employee,
+            ref_level=cfg.get("peer_ref_level"),
+        )
+
+        steps: list[TraceStep] = []
+        out: dict[str, Any] = {"employee_profile_cached": False}
+        if diagnosis is not None:
+            steps.append({
+                "stage": "diagnosis", "kind": "derived_metric",
+                "summary": (
+                    "Диагностика против когорты: статус "
+                    f"«{diagnosis.get('overall_status')}», уверенность "
+                    f"«{(diagnosis.get('confidence') or {}).get('level')}»."
+                ),
+                "detail": {
+                    "top_problem": (diagnosis.get("top_problem") or {}).get("metric_name"),
+                    "top_achievement": (
+                        diagnosis.get("top_achievement") or {}
+                    ).get("metric_name"),
+                    "metrics_diagnosed": len(diagnosis.get("metrics") or []),
+                },
+            })
+        if profile is not None:
+            out["employee_profile"] = profile
+            if ns is not None:
+                await save_profile(lg_store, ns, employee, cache_value(
+                    employee_tabnum=employee,
+                    diagnosis=diagnosis or {},
+                    profile=profile,
+                ))
+                steps.append({
+                    "stage": "diagnosis", "kind": "decision",
+                    "summary": (
+                        "Построил список проблем и достижений и закешировал его "
+                        "по source_id."
+                    ),
+                    "detail": {
+                        "source_type": state.get("source_type"),
+                        "source_id": state.get("source_id"),
+                    },
+                })
+            else:
+                steps.append({
+                    "stage": "diagnosis", "kind": "decision",
+                    "summary": (
+                        "Построил список проблем и достижений (без кеша: "
+                        "привязка source_type/source_id не задана)."
+                    ),
+                })
+            out.update(_step_update(
+                config, "🧭 Продиагностировал показатели сотрудника на фоне коллег"
+            ))
+        else:
+            out["employee_profile_error"] = err
+            if diagnosis is not None:
+                # Диагноз есть, формулировки не собрались: диалог получает
+                # детерминированный фолбэк, кеш НЕ пишем (транзиент LLM не
+                # должен зафиксироваться как «профиль» навсегда).
+                out["employee_diagnosis_brief"] = render_diagnosis_fallback(diagnosis)
+                steps.append({
+                    "stage": "diagnosis", "kind": "error",
+                    "summary": (
+                        f"Формулировки профиля не собрались ({err}) — использую "
+                        "автоматические метки, кеш не пишу."
+                    ),
+                })
+            else:
+                steps.append({
+                    "stage": "diagnosis", "kind": "error",
+                    "summary": f"Диагностика по когорте недоступна: {err}",
+                })
+        out["reasoning_trace"] = _append_trace(state, steps)
+        return out
+
+    return employee_diagnosis
+
+
+def _profile_system_block(state: OrchestratorState) -> str | None:
+    """Опорный список проблем/достижений для системного контекста: профиль с
+    формулировками, иначе детерминированный фолбэк из меток диагноста."""
+    profile = state.get("employee_profile")
+    if isinstance(profile, dict):
+        return render_profile_block(profile)
+    brief = (state.get("employee_diagnosis_brief") or "").strip()
+    return brief or None
 
 
 def need_load(state: OrchestratorState) -> str:

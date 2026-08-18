@@ -38,10 +38,14 @@ def test_first_turn_ends_with_auto_insight():
 
 def test_first_turn_grounds_wiki_before_analysis():
     edges = _edges()
-    # Между загрузкой данных и wiki-grounding — загрузка долгосрочной памяти.
+    # Порядок первого хода: данные → память → диагностика по когорте → wiki →
+    # первичный разбор. Диагностика идёт до wiki, чтобы initial_analysis получил
+    # опорный список проблем/достижений уже в первом ответе.
     assert ("load_data", "load_memory") in edges
-    assert ("load_memory", "ground_wiki_initial") in edges
+    assert ("load_memory", "employee_diagnosis") in edges
+    assert ("employee_diagnosis", "ground_wiki_initial") in edges
     assert ("ground_wiki_initial", "initial_analysis") in edges
+    assert ("load_memory", "ground_wiki_initial") not in edges
     assert ("load_data", "ground_wiki_initial") not in edges
     assert ("load_data", "initial_analysis") not in edges
 
