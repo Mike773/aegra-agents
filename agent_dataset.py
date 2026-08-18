@@ -113,28 +113,20 @@ def convert_dataset(raw: dict[str, Any]) -> dict[str, Any]:
     return metrics_out
 
 
-def collect_aggregates_ids(metrics: list[dict[str, Any]]) -> list[str]:
-    """Уникальные aggregates_ids по дереву сырых метрик (children_metrics),
-    порядок первого появления. convert_metric это поле отбрасывает, поэтому
-    собираем его ДО конвертации и отдаём списком на уровне персоны."""
+def normalize_aggregates_ids(ids: list[Any] | None) -> list[str]:
+    """Чистит aggregates_ids с верхнего уровня датасета персоны: строки без
+    пробелов, дедуп с сохранением порядка первого появления. Поле приходит из
+    _process_person рядом с metrics, в самих метриках его нет."""
     out: list[str] = []
     seen: set[str] = set()
-
-    def _walk(nodes: list[dict[str, Any]]) -> None:
-        for node in nodes or []:
-            if not isinstance(node, dict):
-                continue
-            for agg_id in node.get("aggregates_ids") or []:
-                if agg_id is None:
-                    continue
-                text = str(agg_id).strip()
-                if not text or text in seen:
-                    continue
-                seen.add(text)
-                out.append(text)
-            _walk(node.get("children_metrics") or [])
-
-    _walk(metrics)
+    for agg_id in ids or []:
+        if agg_id is None:
+            continue
+        text = str(agg_id).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
     return out
 
 class GetBatchAgentAggregateDatasetByFiltersComponent:
@@ -472,9 +464,9 @@ class GetBatchAgentDatasetByFiltersComponent:
                 }
 
                 me_output.update(me_dataset)
-                # ids предагрегатов — из СЫРЫХ метрик, до замены конвертированными.
-                me_output["aggregates_ids"] = collect_aggregates_ids(
-                    me_output.get("metrics") or []
+                # ids предагрегатов пришли с датасетом на верхнем уровне.
+                me_output["aggregates_ids"] = normalize_aggregates_ids(
+                    me_output.get("aggregates_ids")
                 )
                 me_output["metrics"] = convert_dataset(me_output)
                 output["me"] = me_output
@@ -491,8 +483,8 @@ class GetBatchAgentDatasetByFiltersComponent:
                         "post": emp.get("postName"),
                     }
                     emp_output.update(emp_dataset)
-                    emp_output["aggregates_ids"] = collect_aggregates_ids(
-                        emp_output.get("metrics") or []
+                    emp_output["aggregates_ids"] = normalize_aggregates_ids(
+                        emp_output.get("aggregates_ids")
                     )
                     emp_output["metrics"] = convert_dataset(emp_output)
                     employees_output.append(emp_output)

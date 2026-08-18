@@ -1,9 +1,9 @@
 """Промовая реализация agent_dataset.py (корень репо): aggregates_ids.
 
-Структура данных поменялась: у сырой метрики есть aggregates_ids — массив id
-предагрегатов, которые надо загрузить индивидуально. convert_metric поле
-отбрасывает, поэтому build_json_output собирает его ДО конвертации и отдаёт
-уникальным списком на уровне персоны (рядом с metrics).
+Структура данных: _process_person возвращает датасет персоны, где
+aggregates_ids — массив id предагрегатов — лежит на верхнем уровне, рядом с
+metrics (в самих метриках поля нет). build_json_output нормализует список
+(дедуп, строки) и отдаёт у персоны рядом со сконвертированными metrics.
 
 Файл в корне — прод-код с импортом промового `settings`, которого в репо нет:
 подставляем модуль-заглушку до импорта.
@@ -24,7 +24,7 @@ sys.modules.setdefault("settings", _settings_stub)
 import agent_dataset  # noqa: E402
 
 
-def _raw_metric(metric_id, agg_ids, children=None):
+def _raw_metric(metric_id, children=None):
     return {
         "metric_id": metric_id,
         "metric_name": f"Метрика {metric_id}",
@@ -32,24 +32,16 @@ def _raw_metric(metric_id, agg_ids, children=None):
         "calc_period": "Месяц",
         "fact": 10,
         "plan": 12,
-        "aggregates_ids": agg_ids,
         "children_metrics": children or [],
     }
 
 
-def test_collect_aggregates_ids_walks_tree_and_dedupes():
-    metrics = [
-        _raw_metric("1", ["182_m_777", "182_m_888"], children=[
-            # Дочерний повторяет id родителя и добавляет свой.
-            _raw_metric("2", ["182_m_888", "182_m_999"]),
-        ]),
-        _raw_metric("3", None),          # поля нет/None — не падаем
-        _raw_metric("4", [None, " ", 5]),  # мусор чистим, числа приводим к str
-    ]
-    assert agent_dataset.collect_aggregates_ids(metrics) == [
-        "182_m_777", "182_m_888", "182_m_999", "5",
-    ]
-    assert agent_dataset.collect_aggregates_ids([]) == []
+def test_normalize_aggregates_ids_dedupes_and_cleans():
+    assert agent_dataset.normalize_aggregates_ids(
+        ["182_m_777", "182_m_888", "182_m_777", None, " ", 5, "182_m_888"]
+    ) == ["182_m_777", "182_m_888", "5"]
+    assert agent_dataset.normalize_aggregates_ids([]) == []
+    assert agent_dataset.normalize_aggregates_ids(None) == []
 
 
 def test_build_json_output_returns_ids_at_person_level(monkeypatch):
@@ -64,12 +56,17 @@ def test_build_json_output_returns_ids_at_person_level(monkeypatch):
             "addFiltersObjects": [{"object_type": "USER", "object_id": "2"}],
         }],
     }
+    # aggregates_ids — на верхнем уровне датасета, рядом с metrics; дубли и
+    # мусор в списке чистятся при выдаче.
     datasets = {
-        "me": {"metrics": [_raw_metric("1", ["182_m_777", "182_m_777"])]},
-        "111": {"metrics": [
-            _raw_metric("1", ["182_m_777"]),
-            _raw_metric("2", ["182_m_888"]),
-        ]},
+        "me": {
+            "metrics": [_raw_metric("1")],
+            "aggregates_ids": ["182_m_777", "182_m_777", None, " "],
+        },
+        "111": {
+            "metrics": [_raw_metric("1"), _raw_metric("2")],
+            "aggregates_ids": ["182_m_777", "182_m_888"],
+        },
     }
     monkeypatch.setattr(
         agent_dataset.GetBatchAgentDatasetByFiltersComponent,
@@ -89,3 +86,24 @@ def test_build_json_output_returns_ids_at_person_level(monkeypatch):
     assert me_metric["metric_name"] == "Метрика 1"
     assert me_metric["fact"] == 10
     assert "aggregates_ids" not in me_metric
+
+
+def test_build_json_output_without_ids_field_gives_empty_list(monkeypatch):
+    # Датасет без aggregates_ids (старый инстанс) — пустой список, не падение.
+    input_data = {
+        "me": {
+            "title": "Босс Борис",
+            "addFiltersObjects": [{"object_type": "USER", "object_id": "1"}],
+        },
+    }
+    monkeypatch.setattr(
+        agent_dataset.GetBatchAgentDatasetByFiltersComponent,
+        "_process_person",
+        lambda self, client, person_id, filters: {"metrics": [_raw_metric("1")]},
+    )
+    out = json.loads(
+        agent_dataset.GetBatchAgentDatasetByFiltersComponent(
+            "metrics_for_agent_analyst", json.dumps(input_data)
+        ).build_json_output()
+    )
+    assert out["me"]["aggregates_ids"] == []
