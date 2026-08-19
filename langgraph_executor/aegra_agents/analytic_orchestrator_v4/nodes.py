@@ -41,6 +41,7 @@ from .prompts import (
     BUSINESS_SYSTEM_PROMPT,
     CLASSIFY_INSIGHTS_PROMPT,
     DESCRIBE_ANSWER_PROMPT,
+    FIRST_ANSWER_FORMAT_PROMPT,
     INITIAL_TASK_HINT,
     LOAD_ERROR_PROMPT,
     RESPONDER_TASK_HINT,
@@ -396,6 +397,37 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             HumanMessage(content=human),
         ])
         text = ai.content if isinstance(ai.content, str) else str(ai.content)
+
+        # Форма первого ответа: рассказ с главной проблемой и приглашением
+        # продолжить. Промпт сам решает по запросу руководителя, задан ли там
+        # формат, — тогда черновик возвращается дословно. Сбой не фатален:
+        # остаёмся на черновике. Только первый ход — respond это не касается.
+        if text.strip() and _config_flag(config, "format_first_answer", default=True):
+            try:
+                formatted = await asyncio.to_thread(llm.invoke, [
+                    SystemMessage(content=FIRST_ANSWER_FORMAT_PROMPT),
+                    HumanMessage(content=(
+                        f"Запрос руководителя:\n{human}\n\n"
+                        f"Черновой ответ аналитика:\n{text}"
+                    )),
+                ])
+                new_text = formatted.content if isinstance(
+                    formatted.content, str) else str(formatted.content)
+                if new_text.strip():
+                    text = new_text
+                    trace_steps.append({
+                        "stage": "initial",
+                        "kind": "decision",
+                        "summary": "Привёл первый ответ к форме рассказа "
+                                   "(главная проблема + приглашение продолжить).",
+                    })
+            except Exception as exc:  # noqa: BLE001 — форма опциональна
+                logger.warning("Переформатирование первого ответа упало: %s", exc)
+                trace_steps.append({
+                    "stage": "initial",
+                    "kind": "error",
+                    "summary": f"Не удалось привести ответ к форме рассказа: {exc}",
+                })
 
         trace_steps.append({
             "stage": "initial",

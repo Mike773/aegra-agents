@@ -113,7 +113,9 @@ def _initial_system_text(metrics):
         "direction_key": "оператор",
         "briefing": "разбери метрики",
     }
-    asyncio.run(node(state, {"configurable": {}}))
+    # format_first_answer выключен: тест целится в системный промпт ОТВЕТА, а
+    # CapturingLLM запоминает последний SystemMessage (им стал бы промпт формы).
+    asyncio.run(node(state, {"configurable": {"format_first_answer": False}}))
     return llm.system_text
 
 
