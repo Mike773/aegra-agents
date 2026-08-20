@@ -36,11 +36,8 @@ from .prompts import (
     LOAD_ERROR_PROMPT,
     RESPONDER_TASK_HINT,
     ROUTER_PROMPT,
-    SAVE_INSIGHT_DONE,
-    SAVE_INSIGHT_EMPTY,
-    SAVE_INSIGHT_ERROR,
+    SAVE_INSIGHT_AUTO_FIXED,
     STAR_PROSE_BLOCK,
-    SAVE_INSIGHT_NO_SOURCE,
     WIKI_QUERIES_PROMPT,
 )
 from .state import OrchestratorState, TraceStep
@@ -935,7 +932,7 @@ def _name_matches_query(names: list[str], q_words: set[str]) -> bool:
 
 
 async def _classify_insights(
-    llm: GigaChat, metrics: Any, source_text: str, wish: str = ""
+    llm: GigaChat, metrics: Any, source_text: str
 ) -> list[dict]:
     """Разбор аналитика → структурированные инсайты сервиса.
 
@@ -949,8 +946,6 @@ async def _classify_insights(
         f"Каталог метрик (id — название):\n{_format_metric_catalog(catalog)}",
         f"Разбор аналитика:\n{source_text}",
     ]
-    if wish:
-        ctx.append(f"Что именно просил зафиксировать руководитель:\n{wish}")
     try:
         ai = await asyncio.to_thread(llm.invoke, [
             SystemMessage(content=CLASSIFY_INSIGHTS_PROMPT),
@@ -962,10 +957,13 @@ async def _classify_insights(
         return []
 
 
-async def _submit_insights(
-    state: OrchestratorState, config: RunnableConfig | None, insights: list[dict]
+async def _submit_insight(
+    state: OrchestratorState, config: RunnableConfig | None, ins: dict
 ) -> str | None:
-    """Отправка инсайтов в сервис. Возвращает текст ошибки либо None при успехе."""
+    """Отправка ОДНОГО главного инсайта (content.insight — объект, контракт v4).
+
+    Возвращает текст ошибки либо None при успехе.
+    """
     cfg = (config or {}).get("configurable") or {}
     # thread_id — id треда aegra из /threads, сервер инжектит его в configurable.
     thread_id = str(cfg.get("thread_id") or "").strip()
@@ -976,7 +974,7 @@ async def _submit_insights(
             employee_tabnum=(state.get("employee_tabnum") or "").strip(),
             direction_key=(state.get("direction_key") or "").strip(),
             thread_id=thread_id,
-            insights=insights,
+            insight=ins,
             source_type=state.get("source_type"),
             source_id=state.get("source_id"),
         ).submit()
@@ -995,33 +993,6 @@ def _has_source(state: OrchestratorState) -> bool:
     """Инсайты пишем, только когда пришли ОБА параметра привязки."""
     return bool((state.get("source_type") or "").strip()
                 and (state.get("source_id") or "").strip())
-
-
-def _insight_key(ins: dict) -> str:
-    """Ключ дедупликации — МЕТРИКА, без учёта типа вывода.
-
-    Классификация по одному и тому же разбору выдаёт одну метрику дважды с
-    разными типами (и «достижение», и «проблема») — в сервисе это выглядело бы
-    как противоречивые выводы. Одна метрика за диалог = один вывод.
-    """
-    return str(ins.get("metric_name") or ins.get("text") or "").strip().casefold()
-
-
-def _drop_committed(insights: list[dict], committed: list[dict] | None) -> list[dict]:
-    """Убирает выводы по метрикам, уже ушедшим в сервис за этот диалог.
-
-    Классификация идёт по тексту разбора и на повторной просьбе снова выдаёт
-    стартовую главную проблему — без отсева она задваивалась бы в сервисе.
-    """
-    seen = {_insight_key(c) for c in (committed or [])}
-    out: list[dict] = []
-    for ins in insights:
-        key = _insight_key(ins)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(ins)
-    return out
 
 
 def _first_insight(insights: list[dict]) -> dict | None:
@@ -1068,14 +1039,13 @@ def make_auto_insight_node(llm: GigaChat):
                 "summary": "Из первичного разбора не выделился инсайт для фиксации.",
             }])}
 
-        err = await _submit_insights(state, config, [chosen])
+        err = await _submit_insight(state, config, chosen)
         if err:
             return {"reasoning_trace": _append_trace(state, [{
                 "stage": "assignments", "kind": "error",
                 "summary": f"Не удалось создать стартовый инсайт: {err}",
             }])}
         return {
-            "committed_insights": (state.get("committed_insights") or []) + [chosen],
             "reasoning_trace": _append_trace(state, [{
                 "stage": "assignments", "kind": "decision",
                 "summary": (
@@ -1095,77 +1065,23 @@ def make_auto_insight_node(llm: GigaChat):
 
 
 def make_save_insight_node(llm: GigaChat):
-    """Фиксация вывода по явной просьбе руководителя («запиши этот вывод»).
+    """Явная просьба «запиши этот вывод»: ручной фиксации больше нет.
 
-    Экрана «Все верно?» нет: классифицируем ПОСЛЕДНИЙ разбор («этот вывод» — то,
-    что только что обсудили), отбрасываем уже записанное за диалог и отправляем.
-    Без source_type/source_id писать некуда — говорим об этом прямо.
+    Главный инсайт уходит в сервис один раз — автоматически на первом ходе
+    треда (auto_insight). Узел лишь объясняет это руководителю: без LLM и без
+    обращения к сервису. llm в сигнатуре — для симметрии фабрик графа. Маршрут
+    интента save_insight сохранён.
     """
+    del llm  # намеренно не используется
 
     async def save_insight(state: OrchestratorState, config: RunnableConfig) -> dict:
-        if not _has_source(state):
-            new_trace = _append_trace(state, [{
-                "stage": "assignments", "kind": "decision",
-                "summary": "Просьба зафиксировать вывод, но привязка не задана.",
-            }])
-            return {
-                "messages": [_final_message(SAVE_INSIGHT_NO_SOURCE, config)],
-                "reasoning_trace": new_trace,
-            }
-
-        # «Этот вывод» — свежий разбор под последний вопрос; его нет (просьба
-        # пришла сразу после первичного разбора) — берём опорный разбор/диалог.
-        source_text = (
-            (state.get("analytics_answer") or "").strip()
-            or _gather_agent_answers(state)
-            or (state.get("metrics_summary") or "").strip()
-        )
-        insights = _enforce_single_main_problem(
-            await _classify_insights(
-                llm, state.get("metrics"), source_text,
-                wish=_last_user_text(state).strip(),
-            )
-        )
-        insights = _drop_committed(insights, state.get("committed_insights"))
-        if not insights:
-            new_trace = _append_trace(state, [{
-                "stage": "assignments", "kind": "decision",
-                "summary": "Нечего фиксировать — в разборе нет оформленного вывода.",
-            }])
-            return {
-                "messages": [_final_message(SAVE_INSIGHT_EMPTY, config)],
-                "reasoning_trace": new_trace,
-            }
-
-        err = await _submit_insights(state, config, insights)
-        if err:
-            new_trace = _append_trace(state, [{
-                "stage": "assignments", "kind": "error",
-                "summary": f"Ошибка сохранения инсайтов: {err}",
-            }])
-            return {
-                "messages": [_final_message(await _with_description(
-                    SAVE_INSIGHT_ERROR.format(err=err),
-                    {**state, "reasoning_trace": new_trace}, config), config)],
-                "reasoning_trace": new_trace,
-            }
-
-        names = ", ".join(
-            (i.get("metric_name") or "").strip() for i in insights if i.get("metric_name")
-        )
         new_trace = _append_trace(state, [{
             "stage": "assignments", "kind": "decision",
-            "summary": f"Зафиксировал выводов: {len(insights)}.",
-            "detail": {"insights": [
-                {"type": i.get("type"), "metric_name": i.get("metric_name")}
-                for i in insights
-            ]},
+            "summary": "Просьба зафиксировать вывод: главный инсайт уже "
+                       "фиксируется автоматически, повторно не отправляю.",
         }])
         return {
-            "messages": [_final_message(await _with_description(
-                SAVE_INSIGHT_DONE.format(names=names or "по обсуждённым показателям"),
-                {**state, "reasoning_trace": new_trace}, config), config)],
-            "committed_insights": (state.get("committed_insights") or []) + insights,
+            "messages": [_final_message(SAVE_INSIGHT_AUTO_FIXED, config)],
             "reasoning_trace": new_trace,
         }
 
@@ -1962,21 +1878,6 @@ def _resolve_insight_metric(
         return matched["id"], matched["metric_name"]
 
     return metric_id, metric_name
-
-
-def _gather_agent_answers(state: OrchestratorState) -> str:
-    """Накопленные ИТОГОВЫЕ ответы агента в диалоге (без шагов и трассы).
-
-    Источник фактов для классификации инсайтов: классифицируем то, что реально
-    обсуждалось. Шаговые сообщения (_STEP_KEY) и раздел трассы отбрасываем.
-    """
-    answers: list[str] = []
-    for m in state.get("messages") or []:
-        if isinstance(m, AIMessage) and not _is_step(m):
-            txt = _strip_trace_section(_plain_text(m)).strip()
-            if txt:
-                answers.append(txt)
-    return "\n\n".join(answers)
 
 
 def _enforce_single_main_problem(insights: list[dict]) -> list[dict]:

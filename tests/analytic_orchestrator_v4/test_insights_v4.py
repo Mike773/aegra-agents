@@ -1,5 +1,9 @@
-"""Инсайты analytic_orchestrator_v4: привязка source_type/source_id, стартовая
-запись без подтверждения и фиксация по явной просьбе.
+"""Инсайты analytic_orchestrator_v4: один главный инсайт объектом content.insight.
+
+В сервис пишет только auto_insight на первом ходе треда — один главный инсайт
+(параметр insight, в payload — объект content.insight). Ручная фиксация
+save_insight ничего не отправляет: отвечает, что главный вывод уже зафиксирован
+автоматически. Заглушка сервиса двухрежимная: легаси-массив v1–v3 не тронут.
 
 Импортируем только nodes.py (не graph.py) — GigaChat-креды/сеть не нужны.
 Фейк-LLM возвращает заранее заданный .content; внешний сервис инсайтов подменяем
@@ -24,8 +28,10 @@ from langgraph_executor.aegra_agents.analytic_orchestrator_v4.nodes import (
     make_save_insight_node,
 )
 from langgraph_executor.aegra_agents.analytic_orchestrator_v4.prompts import (
-    SAVE_INSIGHT_EMPTY,
-    SAVE_INSIGHT_NO_SOURCE,
+    SAVE_INSIGHT_AUTO_FIXED,
+)
+from langgraph_executor.aegra_agents.shared.assignments_service import (
+    SendAssignmentsComponent,
 )
 
 
@@ -103,9 +109,9 @@ def _fake_service(monkeypatch):
     return _Capture.calls
 
 
-# --- Стартовый инсайт -------------------------------------------------------
+# --- Стартовый инсайт (единственная запись в сервис за тред) -----------------
 
-def test_auto_insight_submits_main_problem_with_source(monkeypatch):
+def test_auto_insight_submits_single_main_insight(monkeypatch):
     calls = _fake_service(monkeypatch)
     node = make_auto_insight_node(FakeLLM(_insights_json()))
     out = asyncio.run(node(_state(), {"configurable": {"thread_id": "t-1"}}))
@@ -117,10 +123,12 @@ def test_auto_insight_submits_main_problem_with_source(monkeypatch):
     assert call["thread_id"] == "t-1"
     assert call["boss_tabnum"] == "999"
     assert call["employee_tabnum"] == "12345"
-    # Ровно один инсайт — главная проблема.
-    assert len(call["insights"]) == 1
-    assert call["insights"][0]["type"] == "main_problem"
-    assert out["committed_insights"][0]["metric_name"] == "Производительность"
+    # ОДИН главный инсайт объектом, легаси-массив не передаётся.
+    assert call["insight"]["type"] == "main_problem"
+    assert call["insight"]["metric_name"] == "Производительность"
+    assert "insights" not in call
+    # Дедуп-механики больше нет — узел не копит committed_insights.
+    assert "committed_insights" not in out
     # Пользователю узел ничего не пишет — итог хода отдал initial_analysis.
     assert "messages" not in out
 
@@ -131,7 +139,7 @@ def test_auto_insight_falls_back_to_norm(monkeypatch):
     node = make_auto_insight_node(FakeLLM(_insights_json(kind="norm")))
     asyncio.run(node(_state(), {}))
     assert len(calls) == 1
-    assert calls[0]["insights"][0]["type"] == "norm"
+    assert calls[0]["insight"]["type"] == "norm"
 
 
 def test_auto_insight_without_source_writes_nothing(monkeypatch):
@@ -139,7 +147,6 @@ def test_auto_insight_without_source_writes_nothing(monkeypatch):
     node = make_auto_insight_node(FakeLLM(_insights_json()))
     out = asyncio.run(node(_state(source_type=None, source_id=None), {}))
     assert calls == []
-    assert "committed_insights" not in out
     assert out["reasoning_trace"][-1]["kind"] == "decision"
 
 
@@ -168,7 +175,7 @@ def test_auto_insight_skipped_when_analysis_failed(monkeypatch):
     ])
     out = asyncio.run(node(state, {}))
     assert calls == []
-    assert "committed_insights" not in out
+    assert out["reasoning_trace"][-1]["kind"] == "decision"
 
 
 def test_auto_insight_classification_failure_is_not_fatal(monkeypatch):
@@ -179,76 +186,67 @@ def test_auto_insight_classification_failure_is_not_fatal(monkeypatch):
     assert out["reasoning_trace"][-1]["kind"] == "decision"
 
 
-# --- Фиксация по явной просьбе ---------------------------------------------
+# --- Явная просьба «зафиксируй вывод»: ручной записи больше нет --------------
 
-def test_save_insight_submits_and_answers(monkeypatch):
+# Сверяем текст ответа ДОСЛОВНО — выключаем дефолтную HTML-конвертацию
+# (answer_html), она проверяется отдельно в test_answer_html.py.
+_NO_HTML = {"configurable": {"answer_html": False}}
+
+
+def test_save_insight_answers_auto_fixed_and_sends_nothing(monkeypatch):
     calls = _fake_service(monkeypatch)
-    node = make_save_insight_node(FakeLLM(_insights_json(kind="problem")))
+    llm = FakeLLM(_insights_json(kind="problem"))
+    node = make_save_insight_node(llm)
     state = _state(messages=[
         HumanMessage("что происходит?"),
         AIMessage("Производительность 12 при плане 18 — область развития."),
         HumanMessage("зафиксируй этот вывод"),
     ])
-    out = asyncio.run(node(state, {"configurable": {"thread_id": "t-2"}}))
-    assert len(calls) == 1
-    assert calls[0]["source_id"] == "mtg-77"
-    assert "Производительность" in out["messages"][-1].content
-    assert len(out["committed_insights"]) == 1
+    out = asyncio.run(node(state, _NO_HTML))
+    assert calls == []
+    # Без LLM: узел только объясняет, что главный вывод уходит автоматически.
+    assert llm.calls == []
+    assert out["messages"][-1].content == SAVE_INSIGHT_AUTO_FIXED
+    assert "committed_insights" not in out
 
 
-# Тесты ниже сверяют текст ответа ДОСЛОВНО — выключаем дефолтную HTML-конвертацию
-# (answer_html), она проверяется отдельно в test_answer_html.py.
-_NO_HTML = {"configurable": {"answer_html": False}}
-
-
-def test_save_insight_without_source_explains(monkeypatch):
+def test_save_insight_answers_same_without_source(monkeypatch):
+    """Ответ одинаковый и без привязки — узел в сервис не ходит вовсе."""
     calls = _fake_service(monkeypatch)
     node = make_save_insight_node(FakeLLM(_insights_json()))
     out = asyncio.run(node(_state(source_id=None), _NO_HTML))
     assert calls == []
-    assert out["messages"][-1].content == SAVE_INSIGHT_NO_SOURCE
+    assert out["messages"][-1].content == SAVE_INSIGHT_AUTO_FIXED
 
 
-def test_save_insight_nothing_to_save(monkeypatch):
-    calls = _fake_service(monkeypatch)
-    node = make_save_insight_node(FakeLLM(json.dumps({"insights": []})))
-    out = asyncio.run(node(_state(), _NO_HTML))
-    assert calls == []
-    assert out["messages"][-1].content == SAVE_INSIGHT_EMPTY
+# --- Заглушка сервиса: двухрежимный payload ----------------------------------
+
+def test_service_stub_insight_object_mode():
+    payload = SendAssignmentsComponent(
+        boss_tabnum="999", employee_tabnum="12345", direction_key="dir-1",
+        thread_id="t-1",
+        insight={"type": "main_problem", "metric_id": "90022908",
+                 "metric_name": "Производительность", "text": "..."},
+        source_type="meeting", source_id="mtg-77",
+    ).submit()
+    assert payload["content"] == {"insight": {
+        "type": "main_problem", "metric_id": "90022908",
+        "metric_name": "Производительность", "text": "...",
+    }}
+    assert "insights" not in payload["content"]
+    assert payload["source_type"] == "meeting"
+    assert payload["source_id"] == "mtg-77"
 
 
-def test_save_insight_skips_already_committed(monkeypatch):
-    """Повторная классификация снова выдаёт стартовый инсайт — не дублируем."""
-    calls = _fake_service(monkeypatch)
-    node = make_save_insight_node(FakeLLM(_insights_json()))
-    committed = [{"type": "main_problem", "metric_name": "Производительность",
-                  "metric_id": "90022908", "text": "..."}]
-    out = asyncio.run(node(_state(committed_insights=committed), _NO_HTML))
-    assert calls == []
-    assert out["messages"][-1].content == SAVE_INSIGHT_EMPTY
-
-
-def test_save_insight_one_verdict_per_metric(monkeypatch):
-    """Одна метрика за диалог = один вывод: противоречивых дублей быть не должно."""
-    calls = _fake_service(monkeypatch)
-    llm = FakeLLM(json.dumps({"insights": [
-        {"type": "achievement", "metric_id": "1", "metric_name": "Доля переводов",
-         "text": "Улучшилась на 61.6%."},
-        {"type": "problem", "metric_id": "1", "metric_name": "Доля переводов",
-         "text": "По переводам в рублях всплеск."},
-        {"type": "norm", "metric_id": "2", "metric_name": "AHT", "text": "В плане."},
-    ]}))
-    asyncio.run(make_save_insight_node(llm)(_state(), {}))
-    sent = calls[0]["insights"]
-    assert [i["metric_name"] for i in sent] == ["Доля переводов", "AHT"]
-    assert sent[0]["type"] == "achievement"  # оставляем первый вердикт
-
-
-def test_save_insight_prefers_last_analytics_answer(monkeypatch):
-    """«Этот вывод» — свежий разбор под последний вопрос, а не весь диалог."""
-    _fake_service(monkeypatch)
-    llm = FakeLLM(_insights_json(kind="problem"))
-    node = make_save_insight_node(llm)
-    asyncio.run(node(_state(analytics_answer="AHT 269.7 сек — в плане."), {}))
-    prompt = llm.calls[0][-1].content
-    assert "AHT 269.7 сек" in prompt
+def test_service_stub_legacy_list_mode():
+    """v1–v3 передают insights-массив — payload прежний."""
+    payload = SendAssignmentsComponent(
+        boss_tabnum="999", employee_tabnum="12345", direction_key="dir-1",
+        thread_id="t-1",
+        insights=[{"type": "problem", "metric_id": "1",
+                   "metric_name": "AHT", "text": "..."}],
+    ).submit()
+    assert payload["content"] == {"insights": [{
+        "type": "problem", "metric_id": "1", "metric_name": "AHT", "text": "...",
+    }]}
+    assert "insight" not in payload["content"]
