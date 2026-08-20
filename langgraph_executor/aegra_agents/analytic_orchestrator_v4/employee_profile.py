@@ -39,9 +39,7 @@ from .prompts import EMPLOYEE_PROFILE_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# v2: в кеше сводка диагноза вместо полного (без пометричных metrics/binary_metrics);
-# старые записи v1 отбраковываются version-чеком и пересчитываются.
-PROFILE_VERSION = 2
+PROFILE_VERSION = 1
 _NAMESPACE_ROOT = ("analytic_orchestrator_v4", "employee_profile")
 # Сколько второстепенных сигналов кладём в проекцию для LLM и в рендер блока.
 _SECONDARY_CAP = 5
@@ -295,29 +293,18 @@ async def build_profile(
     return profile, diagnosis, None
 
 
-# В кеш идёт только сводка диагноза — проблемы/достижения и обвязка. Пометричную
-# диагностику (metrics, binary_metrics) не храним: единственный потребитель
-# кешированного диагноза — трасса и фолбэк, им хватает сводки.
-_DIAGNOSIS_CACHE_KEYS = (
-    "version", "person", "ref_level_name", "confidence", "overall_status",
-    "top_problem", "top_achievement", "secondary_signals",
-)
-
-
 def cache_value(
     *, employee_tabnum: str, diagnosis: dict, profile: dict
 ) -> dict[str, Any]:
-    """Значение кеша: версия, отпечаток данных, формулировки и сводка диагноза
-    (только проблемы и достижения, без пометричных объектов)."""
+    """Значение кеша: версия, отпечаток данных, полный диагноз (для отладки и
+    будущих потребителей) и формулировки."""
     return {
         "version": PROFILE_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "employee_tabnum": employee_tabnum,
         "person_fio": (diagnosis.get("person") or {}).get("fio"),
         "dataset_fingerprint": diagnosis.get("dataset_fingerprint"),
-        "diagnosis": {
-            k: diagnosis.get(k) for k in _DIAGNOSIS_CACHE_KEYS if k in diagnosis
-        },
+        "diagnosis": diagnosis,
         "profile": profile,
     }
 

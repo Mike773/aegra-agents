@@ -144,11 +144,6 @@ def test_first_run_builds_and_caches(monkeypatch):
     assert cached.value["profile"]["status"] == "зона риска"
     assert cached.value["diagnosis"]["person"]["fio"] == "Иванов Иван"
     assert cached.value["dataset_fingerprint"]
-    # Пометричную диагностику в кеше не храним — только сводку
-    # (проблемы/достижения и обвязку).
-    assert "metrics" not in cached.value["diagnosis"]
-    assert "binary_metrics" not in cached.value["diagnosis"]
-    assert cached.value["diagnosis"]["top_problem"]
     assert any("закешировал" in s.get("summary", "")
                for s in out["reasoning_trace"])
 
