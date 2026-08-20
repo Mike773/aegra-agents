@@ -18,7 +18,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from .agent_base import _text, format_facts
-from .prompts import STAR_RULES, SYSTEM_PROMPT_RULES
+from .prompts import STAR_RULES, SYSTEM_PROMPT_RULES, WIKI_CONTEXT_BLOCK
 
 # Цикл сбора (стадия 1) тащит на каждом шаге всю историю вызовов инструментов.
 # Кап — страховка от одной аномально «жирной» выдачи, а не лимит API: контекст
@@ -100,12 +100,17 @@ def _guard_tools(tools: list[Any], state: _RunState) -> None:
         tool._guarded = True
 
 
-def compose_system_prompt(overview: dict[str, Any]) -> str:
+def compose_system_prompt(
+    overview: dict[str, Any], wiki_context: str | None = None
+) -> str:
     """Системный промпт стадии 1 + динамический «Состав датасета» (+ правила
-    звезды, если звёздные поля реально пришли — иначе промпт прежний)."""
+    звезды, если звёздные поля реально пришли; + справочный wiki-контекст от
+    оркестратора — иначе промпт прежний)."""
     parts = [SYSTEM_PROMPT_RULES, format_facts(overview)]
     if (overview.get("star_binary_rows") or 0) or (overview.get("star_metric_rows") or 0):
         parts.append(STAR_RULES)
+    if (wiki_context or "").strip():
+        parts.append(WIKI_CONTEXT_BLOCK.format(wiki=wiki_context.strip()))
     return "\n\n".join(parts)
 
 
@@ -116,10 +121,14 @@ class ClassicStrategy:
     state: _RunState = field(default_factory=_RunState)
 
     def build(
-        self, model: Any, tools: list[Any], overview: dict[str, Any]
+        self,
+        model: Any,
+        tools: list[Any],
+        overview: dict[str, Any],
+        wiki_context: str | None = None,
     ) -> Any:
         _guard_tools(tools, self.state)
-        system_prompt = compose_system_prompt(overview)
+        system_prompt = compose_system_prompt(overview, wiki_context)
         agent = create_agent(model=model, tools=tools, system_prompt=system_prompt)
         return agent.with_config({"recursion_limit": _RECURSION_LIMIT})
 

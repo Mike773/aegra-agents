@@ -56,11 +56,13 @@ def test_confirmation_flow_removed():
     assert ("save_insight", "__end__") not in _edges()
 
 
-def test_analytics_path_through_wiki_grounding():
+def test_analytics_path_grounds_wiki_before_analyzer():
     edges = _edges()
-    assert ("call_json_analyzer", "ground_wiki_analytics") in edges
-    assert ("ground_wiki_analytics", "respond") in edges
-    assert ("call_json_analyzer", "respond") not in edges
+    # Wiki добывается ДО аналитика — сниппеты уходят ему на вход (wiki_context).
+    assert ("ground_wiki_analytics", "call_json_analyzer") in edges
+    assert ("call_json_analyzer", "respond") in edges
+    assert ("call_json_analyzer", "ground_wiki_analytics") not in edges
+    assert ("ground_wiki_analytics", "respond") not in edges
     assert ("call_easyrag", "respond") in edges
 
 

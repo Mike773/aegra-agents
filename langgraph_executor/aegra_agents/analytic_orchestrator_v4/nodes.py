@@ -339,6 +339,7 @@ def make_initial_analysis_node(llm: GigaChat, json_analyzer_graph: Any):
             json_analyzer_graph, metrics, question, direction_key,
             aggregates=state.get("aggregates"),
             use_aggregates=_config_flag(config, "use_peer_aggregates", default=True),
+            wiki_context=_wiki_snippets_text(state),
         )
 
         trace_steps: list[TraceStep] = [{
@@ -570,6 +571,7 @@ def make_call_json_analyzer_node(json_analyzer_graph: Any):
             json_analyzer_graph, metrics, enriched_q, direction_key,
             aggregates=state.get("aggregates"),
             use_aggregates=_config_flag(config, "use_peer_aggregates", default=True),
+            wiki_context=_wiki_snippets_text(state),
         )
         if err and metrics is None:
             err = state.get("metrics_error") or err
@@ -1700,6 +1702,7 @@ async def _run_analyzer(
     direction_key: str,
     aggregates: Any = None,
     use_aggregates: bool = True,
+    wiki_context: str | None = None,
 ) -> tuple[str | None, list[dict], str | None]:
     """Единая обёртка над json_analyzer-подграфом.
 
@@ -1707,6 +1710,8 @@ async def _run_analyzer(
     входов answer=None, error заполнен, конвейер продолжает работу по фоллбэку.
     aggregates опциональны (None безопасен — режим без peer-сравнения);
     use_aggregates=False дополнительно срезает персональные rankings.
+    wiki_context — готовый блок wiki-сниппетов (справка об интерпретации метрик);
+    None безопасен — промпты аналитика прежние.
     """
     if metrics is None:
         return None, [], "Метрики не загружены — нечем кормить json_analyzer."
@@ -1720,6 +1725,7 @@ async def _run_analyzer(
             "raw_aggregates": aggregates if use_aggregates else None,
             "question": question,
             "direction_key": direction_key,
+            "wiki_context": wiki_context,
         })
     except Exception as exc:  # noqa: BLE001 — внешний подграф (LLM/БД), сужать нечем
         return None, [], f"{type(exc).__name__}: {exc}"[:300]
@@ -1777,24 +1783,15 @@ def _metrics_system_block(state: OrchestratorState) -> str | None:
     )
 
 
-def _easyrag_system_block(state: OrchestratorState) -> str | None:
-    snippets = state.get("easyrag_snippets") or []
-    err = state.get("easyrag_error")
-    if not snippets:
-        if err:
-            return f"Контекст из wiki недоступен: {err}"
-        stubs = state.get("easyrag_stub_pages") or []
-        if stubs:
-            names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stubs)
-            return (
-                "В базе знаний по этой теме есть ПУСТАЯ страница-заглушка "
-                f"(сущность заведена, но ещё не описана): {names}. Содержания по "
-                "ней пока нет. Сообщи пользователю, что тема в wiki уже известна, "
-                "но информация по ней пока не внесена и появится после загрузки "
-                "новых источников. НЕ придумывай содержание сам."
-            )
-        return None
+def _wiki_snippets_text(state: OrchestratorState) -> str | None:
+    """Только строки wiki-сниппетов — общий блок для респондера и аналитика.
 
+    Респондерные инструкции (заглушки, ошибки) сюда не входят: аналитику они не
+    нужны, ему уходит именно этот текст (wiki_context в json_analyzer_v5).
+    """
+    snippets = state.get("easyrag_snippets") or []
+    if not snippets:
+        return None
     lines = ["Релевантные фрагменты wiki (по направлению сотрудника):"]
     for s in snippets[:5]:
         page = s.get("page_title") or s.get("slug") or "-"
@@ -1806,6 +1803,25 @@ def _easyrag_system_block(state: OrchestratorState) -> str | None:
             body = body[:_EASYRAG_SNIPPET_PREVIEW] + "…"
         lines.append(f"- [{page} / {title}{sim_str}]: {body}")
     return "\n".join(lines)
+
+
+def _easyrag_system_block(state: OrchestratorState) -> str | None:
+    snippets_text = _wiki_snippets_text(state)
+    if snippets_text:
+        return snippets_text
+    if state.get("easyrag_error"):
+        return f"Контекст из wiki недоступен: {state.get('easyrag_error')}"
+    stubs = state.get("easyrag_stub_pages") or []
+    if stubs:
+        names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stubs)
+        return (
+            "В базе знаний по этой теме есть ПУСТАЯ страница-заглушка "
+            f"(сущность заведена, но ещё не описана): {names}. Содержания по "
+            "ней пока нет. Сообщи пользователю, что тема в wiki уже известна, "
+            "но информация по ней пока не внесена и появится после загрузки "
+            "новых источников. НЕ придумывай содержание сам."
+        )
+    return None
 
 
 def _memory_system_block(state: OrchestratorState) -> str | None:

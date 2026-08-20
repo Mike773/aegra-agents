@@ -27,7 +27,7 @@ from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import apply_metric_kinds, compute_analytics
 from .loader import load_aggregates_obj, load_dataset_obj, load_person_aggregates_obj
-from .prompts import FACTS_PROMPT, STAR_FACTS_BLOCK
+from .prompts import FACTS_PROMPT, STAR_FACTS_BLOCK, WIKI_FACTS_BLOCK
 from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
 from .sqlite_store import SqliteStore
@@ -114,11 +114,12 @@ def _run_agent(
     llm: GigaChat,
     question: str,
     embed_query: Callable[[str], list[float]],
+    wiki_context: str | None = None,
 ) -> tuple[list[Any], bool]:
     """Блокирующий прогон стадии 1: tool-loop по SQLite + in-memory индексу."""
     tools = build_tools(store, index, embed_query=_safe_embed_query(embed_query))
     strategy = ClassicStrategy()
-    agent = strategy.build(llm, tools, store.schema_overview())
+    agent = strategy.build(llm, tools, store.schema_overview(), wiki_context)
     return strategy.run(agent, [HumanMessage(content=question)])
 
 
@@ -245,7 +246,8 @@ def make_gather_node(llm: GigaChat):
         # Tool-loop блокирующий (llm.invoke + sqlite) — уводим в поток; поиск
         # внутри идёт по in-memory индексу, обращений к БД нет.
         collected, completed = await asyncio.to_thread(
-            _run_agent, store, index, llm, question, embedder.embed_query
+            _run_agent, store, index, llm, question, embedder.embed_query,
+            (state.get("wiki_context") or "").strip() or None,
         )
 
         transcript, tool_calls = extract_tool_transcript(collected)
@@ -294,8 +296,13 @@ def make_synthesize_node(llm: GigaChat):
         transcript = state.get("gathered_facts") or ""
         completed = state.get("completed", True)
 
+        # Справочный wiki-контекст — перед транскриптом, с рамкой «справка, не
+        # данные». Пусто/None → user_content прежний.
+        wiki = (state.get("wiki_context") or "").strip()
+        wiki_block = (WIKI_FACTS_BLOCK.format(wiki=wiki) + "\n") if wiki else ""
         user_content = (
             f"Вопрос пользователя: {question}\n\n"
+            f"{wiki_block}"
             f"Данные, собранные инструментами из базы:\n{transcript}\n\n"
             "Сожми эти данные в выжимку фактов по формату выше."
         )

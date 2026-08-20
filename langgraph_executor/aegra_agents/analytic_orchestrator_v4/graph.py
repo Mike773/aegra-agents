@@ -42,7 +42,8 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g.add_node("route", make_route_node(llm))
     # Один и тот же узел wiki-grounding на двух позициях графа (у узла фиксированные
     # out-edges, поэтому два инстанса проще условных рёбер): перед первичным
-    # анализом и после json_analyzer на analytics-ходу.
+    # анализом и перед json_analyzer на analytics-ходу — сниппеты уходят
+    # аналитику на вход (wiki_context) и дальше респондеру.
     g.add_node("ground_wiki_initial", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("ground_wiki_analytics", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("call_json_analyzer", make_call_json_analyzer_node(json_analyzer_graph))
@@ -85,14 +86,14 @@ def build_graph(llm: GigaChat, checkpointer=None):
         "route",
         after_route,
         {
-            "call_json_analyzer": "call_json_analyzer",
+            "call_json_analyzer": "ground_wiki_analytics",
             "call_easyrag": "call_easyrag",
             "save_insight": "save_insight",
             "respond": "respond",
         },
     )
-    g.add_edge("call_json_analyzer", "ground_wiki_analytics")
-    g.add_edge("ground_wiki_analytics", "respond")
+    g.add_edge("ground_wiki_analytics", "call_json_analyzer")
+    g.add_edge("call_json_analyzer", "respond")
     g.add_edge("call_easyrag", "respond")
     # Ходы save_insight/respond завершаются сохранением долгосрочной памяти.
     g.add_edge("save_insight", "save_memory")

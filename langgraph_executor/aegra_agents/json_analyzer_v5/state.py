@@ -17,6 +17,10 @@ class JsonAnalyzerState(TypedDict, total=False):
     raw_aggregates: Any
     # Изоляция pgvector-кэша эмбеддингов между направлениями.
     direction_key: str
+    # Вход (опционально): готовый текстовый блок wiki-сниппетов от оркестратора —
+    # справка об интерпретации метрик для обеих стадий. Пусто/None → промпты
+    # прежние.
+    wiki_context: str | None
     # Промежуточные результаты узла gather.
     parsed_rows: list[dict[str, Any]]
     parsed_agg_rows: list[dict[str, Any]]
