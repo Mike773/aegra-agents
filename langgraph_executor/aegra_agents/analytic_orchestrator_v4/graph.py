@@ -15,7 +15,6 @@ from .nodes import (
     make_auto_insight_node,
     make_call_easyrag_node,
     make_call_json_analyzer_node,
-    make_employee_diagnosis_node,
     make_ground_wiki_node,
     make_initial_analysis_node,
     make_load_data_node,
@@ -44,9 +43,6 @@ def build_graph(llm: GigaChat, checkpointer=None):
     # Один и тот же узел wiki-grounding на двух позициях графа (у узла фиксированные
     # out-edges, поэтому два инстанса проще условных рёбер): перед первичным
     # анализом и после json_analyzer на analytics-ходу.
-    # Опорный профиль сотрудника (проблемы/достижения по когортной методологии):
-    # первый запуск по source_id строит и кеширует в Store, повторные — читают.
-    g.add_node("employee_diagnosis", make_employee_diagnosis_node(llm))
     g.add_node("ground_wiki_initial", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("ground_wiki_analytics", make_ground_wiki_node(llm, easyrag_graph))
     g.add_node("call_json_analyzer", make_call_json_analyzer_node(json_analyzer_graph))
@@ -78,10 +74,7 @@ def build_graph(llm: GigaChat, checkpointer=None):
     # ИТОГОВЫЙ ответ (additional_kwargs.orchestrator_final, всегда последний).
     # Прогресс отключается флагом configurable.emit_progress_messages=false.
     g.add_edge("load_data", "load_memory")
-    # Диагностика идёт до wiki-grounding, чтобы initial_analysis получил опорный
-    # список проблем/достижений уже в первом ответе.
-    g.add_edge("load_memory", "employee_diagnosis")
-    g.add_edge("employee_diagnosis", "ground_wiki_initial")
+    g.add_edge("load_memory", "ground_wiki_initial")
     g.add_edge("ground_wiki_initial", "initial_analysis")
     # Итог хода отдаёт initial_analysis; auto_insight — «хвост» первого хода:
     # пишет стартовый инсайт в сервис и НЕ добавляет сообщений пользователю.

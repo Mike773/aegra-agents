@@ -20,7 +20,7 @@ class TraceStep(TypedDict, total=False):
     """Один шаг рассуждения для сквозного лога (Блок A ТЗ).
 
     stage — узел конвейера: 'route' | 'easyrag' | 'json_analyzer' |
-            'assignments' | 'respond' | 'initial' | 'diagnosis';
+            'assignments' | 'respond' | 'initial';
     kind  — тип шага: 'intent' | 'kb_hit' | 'tool_call' | 'derived_metric' |
             'hypothesis' | 'decision' | 'error';
     summary — человекочитаемая строка одной фразой;
@@ -131,17 +131,3 @@ class OrchestratorState(OrchestratorOutput, total=False):
     # управляется флагом configurable.use_peer_aggregates (по умолчанию включена).
     # Наружу не отдаются по той же причине, что и metrics.
     aggregates: Any
-
-    # Опорный профиль сотрудника: список проблем/достижений по когортной
-    # методологии (employee_diagnosis, первый ход). При source_type/source_id
-    # кешируется в LangGraph Store и на повторных запусках читается оттуда.
-    # Живёт в чекпоинтере между ходами (initial_analysis/respond подмешивают его
-    # блоком), наружу не отдаётся — потребитель профиля читает Store напрямую.
-    employee_profile: dict | None
-    employee_profile_error: str | None
-    # Попадание в кеш (для трассы/тестов).
-    employee_profile_cached: bool | None
-    # Детерминированный фолбэк-блок из меток диагноста — когда LLM-формулировки
-    # не собрались (кеш при этом не пишется). Полный diagnosis в стейт не кладём:
-    # он тяжёлый и живёт в Store.
-    employee_diagnosis_brief: str | None

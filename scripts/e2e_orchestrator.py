@@ -245,26 +245,6 @@ async def main():
         msgs[-1] if msgs else None,
     )
     print(getattr(final, "content", "<нет ответа>"))
-
-    # E2E_SECOND_RUN=1 (только v4, нужен E2E_SOURCE_ID): повторный первый ход
-    # «нового треда» с тем же source_id. Диагностика сотрудника должна прийти
-    # из кеша (InMemoryStore-фолбэк живёт в процессе) — в трассе «из кеша»,
-    # LLM-вызовов меньше на построение профиля.
-    if which in {"v4", "4"} and os.environ.get("E2E_SECOND_RUN"):
-        print("=" * 70 + "\nПОВТОРНЫЙ ЗАПУСК (тот же source_id — ждём кеш диагностики):")
-        tracker2 = UsageTracker()
-        result2 = await graph.ainvoke(
-            {"messages": [HumanMessage(content=briefing)]},
-            {
-                "configurable": {**configurable, "thread_id": "e2e-orch-2"},
-                "callbacks": [tracker2],
-            },
-        )
-        for s in result2.get("reasoning_trace", []):
-            if s.get("stage") == "diagnosis":
-                print(f"  [{s.get('stage')}/{s.get('kind')}] {s.get('summary', '')}")
-        print(f"  LLM-вызовов во втором прогоне: {len(tracker2.calls)} "
-              f"(в первом: {len(tracker.calls)})")
     return 0
 
 
