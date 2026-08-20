@@ -103,13 +103,6 @@ class OrchestratorOutput(TypedDict, total=False):
     memory_save_error: str | None
     memory_loaded: bool
 
-    # Инсайты, реально ушедшие в сервис за диалог: каждый — {type, metric_id,
-    # metric_name, text}, type ∈ {main_problem, problem, norm, achievement}
-    # (см. _parse_insights_json). Экрана подтверждения нет: стартовый инсайт
-    # пишется автоматически (auto_insight), последующие — по явной просьбе
-    # руководителя (save_insight). Накапливается конкатенацией в узлах.
-    committed_insights: list[dict]
-
 
 class OrchestratorState(OrchestratorOutput, total=False):
     """Полный стейт графа (output-схема + внутренние каналы).
