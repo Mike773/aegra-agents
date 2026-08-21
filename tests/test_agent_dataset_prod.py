@@ -107,3 +107,16 @@ def test_build_json_output_without_ids_field_gives_empty_list(monkeypatch):
         ).build_json_output()
     )
     assert out["me"]["aggregates_ids"] == []
+
+
+def test_history_clones_inherit_is_star_metric():
+    """Флаг «влияет на звезду» — свойство метрики: история без него наследует
+    флаг базовой строки, явный флаг в history сохраняется."""
+    base = {"metric_name": "CSI", "date": "2026-05-11", "is_star_metric": True,
+            "star_received": None, "child_metrics": []}
+    clones = agent_dataset._history_clones(
+        base, [{"dt": "2026-05-04", "fact": 4.2}, {"dt": "2026-04-27", "fact": 4.3,
+                                                   "is_star_metric": False}]
+    )
+    assert [c["is_star_metric"] for c in clones] == [True, False]
+    assert all(c["child_metrics"] == [] for c in clones)
