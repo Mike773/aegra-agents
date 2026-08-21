@@ -30,7 +30,10 @@ def _history_clones(base: dict[str, Any], history: list[dict[str, Any]]) -> list
         clone["fact"] = h.get("fact")
         clone["plan"] = h.get("plan")
         clone["star_received"] = h.get("star_received")
-        clone["is_star_metric"] = h.get("is_star_metric")
+        # «Влияет на звезду» — свойство показателя, а не периода: если в history
+        # флага нет, наследуем его от базовой (текущей) строки.
+        flag = h.get("is_star_metric")
+        clone["is_star_metric"] = flag if flag is not None else base.get("is_star_metric")
         clone["benchmark"] = h.get("bs")
         clone["child_metrics"] = []
         clones.append(clone)

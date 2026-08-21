@@ -26,7 +26,12 @@ from ..shared.clients import create_gigachat_embeddings
 from .agent_base import extract_tool_steps, extract_tool_transcript
 from .agent_classic import ClassicStrategy
 from .analytics import apply_metric_kinds, compute_analytics
-from .loader import load_aggregates_obj, load_dataset_obj, load_person_aggregates_obj
+from .loader import (
+    has_star_fields,
+    load_aggregates_obj,
+    load_dataset_obj,
+    load_person_aggregates_obj,
+)
 from .prompts import FACTS_PROMPT, STAR_FACTS_BLOCK, WIKI_FACTS_BLOCK
 from .metric_kinds_cache import sync_metric_kinds
 from .relations_cache import sync_relations
@@ -306,12 +311,9 @@ def make_synthesize_node(llm: GigaChat):
             f"Данные, собранные инструментами из базы:\n{transcript}\n\n"
             "Сожми эти данные в выжимку фактов по формату выше."
         )
-        # Раздел ЗВЕЗДА подмешиваем только при реально пришедших полях: считаем по
+        # Раздел ЗВЁЗДЫ подмешиваем только при реально пришедших полях: считаем по
         # уже разобранным строкам (их кладёт gather), новое поле состояния не нужно.
-        has_star = any(
-            r.get("star_received") is not None or r.get("is_star_metric")
-            for r in (state.get("parsed_rows") or [])
-        )
+        has_star = any(has_star_fields(r) for r in (state.get("parsed_rows") or []))
         facts_prompt = FACTS_PROMPT + ("\n\n" + STAR_FACTS_BLOCK if has_star else "")
         response = llm.invoke(
             [

@@ -31,15 +31,25 @@ def _dataset(*metrics):
 
 
 PLAIN = {"id": "1", "metric_name": "Производительность", "fact": 12}
-BINARY = {"id": "2", "metric_name": "Обучение", "fact": None, "star_received": False}
-STAR_NUMERIC = {"id": "3", "metric_name": "Доля переводов", "fact": 14,
+# Звезда — узел со star_received, её влияющие показатели — в child_metrics.
+STAR = {"id": "2", "metric_name": "Звезда качества", "star_received": False,
+        "child_metrics": [{"id": "3", "metric_name": "CSI", "fact": 4.1,
+                           "plan": 4.5, "is_star_metric": True}]}
+# Флаг без узла звезды — вторичный признак: правила про звезду всё равно нужны.
+STAR_NUMERIC = {"id": "4", "metric_name": "Доля переводов", "fact": 14,
                 "is_star_metric": True}
 
 
 # --- Детектор ---------------------------------------------------------------
 
-def test_has_star_data_detects_binary():
-    assert _has_star_data(_dataset(PLAIN, BINARY))
+def test_has_star_data_detects_star_node():
+    assert _has_star_data(_dataset(PLAIN, STAR))
+
+
+def test_star_prose_block_semantics():
+    assert "Звёзд может быть несколько" in STAR_PROSE_BLOCK
+    assert "называй каждую по имени" in STAR_PROSE_BLOCK
+    assert "дочерние показатели" in STAR_PROSE_BLOCK
 
 
 def test_has_star_data_detects_numeric_star_metric():
@@ -88,7 +98,7 @@ def _respond_system_text(metrics):
 
 
 def test_respond_injects_star_block_with_star_data():
-    assert STAR_PROSE_BLOCK in _respond_system_text(_dataset(PLAIN, BINARY))
+    assert STAR_PROSE_BLOCK in _respond_system_text(_dataset(PLAIN, STAR))
 
 
 def test_respond_omits_star_block_without_star_data():
@@ -120,7 +130,7 @@ def _initial_system_text(metrics):
 
 
 def test_initial_analysis_injects_star_block_with_star_data():
-    assert STAR_PROSE_BLOCK in _initial_system_text(_dataset(PLAIN, BINARY))
+    assert STAR_PROSE_BLOCK in _initial_system_text(_dataset(PLAIN, STAR))
 
 
 def test_initial_analysis_omits_star_block_without_star_data():

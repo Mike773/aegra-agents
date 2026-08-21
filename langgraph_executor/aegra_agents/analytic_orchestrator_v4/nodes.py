@@ -17,7 +17,7 @@ from ..easyrag.db import session_scope
 from ..easyrag.gap import record_gap
 from ..easyrag.models import WikiPage
 from ..gap_resolver.judge import answer_in_sources
-from ..json_analyzer_v5.loader import load_dataset_obj
+from ..json_analyzer_v5.loader import has_star_fields, load_dataset_obj
 from ..shared.text_similarity import similarity_ratio
 from ..shared.agent_dataset import (
     GetBatchAgentAggregateDatasetByFiltersComponent,
@@ -1776,7 +1776,8 @@ def _load_json(text: Any) -> Any:
 
 
 def _has_star_data(metrics: Any) -> bool:
-    """Есть ли в датасете сотрудника звёздные поля (star_received/is_star_metric).
+    """Есть ли в датасете сотрудника звёзды (star_received) или показатели с
+    пометкой «влияет на звезду» (is_star_metric).
 
     Считаем по СЫРОМУ датасету тем же каноническим парсером, что и остальные
     сканы здесь, а НЕ по тексту выжимки: подпись раздела пишет модель, и она
@@ -1787,9 +1788,7 @@ def _has_star_data(metrics: Any) -> bool:
         rows = load_dataset_obj(metrics)
     except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
         return False
-    return any(
-        r.get("star_received") is not None or r.get("is_star_metric") for r in rows
-    )
+    return any(has_star_fields(r) for r in rows)
 
 
 def _collect_metric_catalog(metrics: Any) -> list[dict]:

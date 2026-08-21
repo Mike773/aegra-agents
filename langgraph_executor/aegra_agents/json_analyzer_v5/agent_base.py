@@ -29,7 +29,7 @@ def _text(msg: Any) -> str:
 
 
 def _fmt_metric_entry(m: dict[str, Any]) -> str:
-    """Метрика в формате '<name> [agg+|agg-(, бинарная)(, звезда): A, B, ...]'.
+    """Метрика в формате '<name> [agg+|agg-(, звезда)(, влияет на звезду «X»): A, B]'.
 
     Тег показывает, есть ли у метрики агрегатная строка; список — её
     element-значения. Звёздные пометки появляются, только если поля пришли, —
@@ -37,10 +37,11 @@ def _fmt_metric_entry(m: dict[str, Any]) -> str:
     """
     name = m["metric_name"]
     tag = "agg+" if m.get("has_aggregate", True) else "agg-"
-    if m.get("is_binary"):
-        tag += ", бинарная"
-    if m.get("is_star_metric"):
+    if m.get("is_star"):
         tag += ", звезда"
+    if m.get("is_star_metric"):
+        star_of = m.get("star_of")
+        tag += f", влияет на звезду «{star_of}»" if star_of else ", влияет на звезду"
     elems = m.get("elements") or []
     return f"{name} [{tag}: {', '.join(elems)}]" if elems else f"{name} [{tag}]"
 
@@ -109,15 +110,27 @@ def format_facts(overview: dict[str, Any]) -> str:
     # датасете промпт остаётся прежним до байта.
     star_binary = overview.get("star_binary_rows") or 0
     star_metrics = overview.get("star_metric_rows") or 0
-    if star_binary or star_metrics:
+    star_names = overview.get("star_names") or []
+    if star_names:
+        names = ", ".join(f"«{n}»" for n in star_names)
         lines.append(
-            "- В датасете есть ЗВЁЗДНЫЕ данные: метрики с пометкой 'звезда' влияют "
-            "на получение сотрудником звезды. Часть из них с пометкой 'бинарная' "
-            f"(строк {star_binary}): у них НЕТ числового факта — только результат "
-            "«метрика получена / не получена», и ни плана, ни динамики, ни ранга у "
-            "них не существует. Полную картину по звезде за один вызов даёт "
-            "star_status; адресно — find_flags(kind='star_missed'). По бинарной "
-            "метрике не вызывай rank/aggregate/rank_elements — числа там нет."
+            f"- В датасете есть ЗВЁЗДЫ: {names}. Звезда — именной показатель БЕЗ "
+            "числа: на последней дате она либо получена, либо нет; плана, "
+            "динамики и ранга у неё не существует. Её получение определяют "
+            "ДОЧЕРНИЕ показатели с пометкой «влияет на звезду «X»» — обычные "
+            "числовые метрики с фактом и планом. Каждая звезда независима: одна "
+            "может быть получена, другая — нет. «Почему не получена / что нужно "
+            "для звезды X / какие звёзды получены» — star_status(person) (все "
+            "звёзды с влияющими показателями и их статусом плана) или "
+            "metric_tree(metric='X'). По самой звезде не вызывай "
+            "rank/aggregate/rank_elements/compare — числа там нет."
+        )
+    elif star_binary or star_metrics:
+        lines.append(
+            "- В датасете есть показатели с пометкой «влияет на звезду», но узла "
+            "самой звезды нет: разбирай их как обычные числовые метрики и "
+            "упоминай связь со звездой, а статус звезды (получена или нет) не "
+            "утверждай — его в данных нет."
         )
     return "\n".join(lines)
 

@@ -45,6 +45,27 @@ _GROUP_BY_COLUMNS = {
 }
 
 
+# Родитель-звезда строки (NULL, если родитель — не звезда): даёт колонку
+# star_name «к какой звезде относится показатель». 1:1 по PK, строки не множит.
+_STAR_PARENT_JOIN = (
+    "LEFT JOIN metrics p ON p.metric_uid = m.parent_uid "
+    "AND p.star_received IS NOT NULL"
+)
+# Агрегатные флаги метрики по всем её строкам: is_star — сама звезда;
+# is_star_metric — влияет на звезду (флаг на звезде не считается); star_of — имя
+# родительской звезды.
+_STAR_FLAG_COLS = (
+    "MAX(CASE WHEN m.is_star_metric = 1 AND m.star_received IS NULL "
+    "THEN 1 ELSE 0 END) AS is_star_metric, "
+    "MAX(m.star_received IS NOT NULL) AS is_star, "
+    "MAX(p.metric_name) AS star_of"
+)
+_STAR_NODE_HINT = (
+    "статус звезды и её влияющие показатели смотри в star_status или "
+    "metric_tree по имени звезды"
+)
+
+
 class SqliteStore:
     """Хранилище метрик и производной аналитики в оперативной памяти."""
 
@@ -84,11 +105,12 @@ class SqliteStore:
                 rr                  REAL,
                 influent_percent    REAL,
                 element             TEXT,
-                -- 1/0 = бинарный результат «метрика получена / не получена»;
-                -- NULL = поля не было (обычная числовая метрика). У бинарной
-                -- метрики fact/plan/benchmark/ex/rr пустые — числа у неё нет.
+                -- Узел — ЗВЕЗДА: 1/0 = «получена / НЕ получена»; NULL = поля не
+                -- было (обычная числовая метрика). У звезды fact/plan/benchmark/
+                -- ex/rr пустые — числа у неё нет; её дети — влияющие показатели.
                 star_received       INTEGER,
-                -- 1 = метрика влияет на получение звезды; NULL/0 = нет.
+                -- 1 = метрика влияет на получение родительской звезды; NULL/0 =
+                -- нет. На самой звезде флаг ничего не значит.
                 is_star_metric      INTEGER
             );
 
@@ -320,15 +342,15 @@ class SqliteStore:
     def metric_exists(self, name: str) -> bool:
         """Есть ли такая метрика в датасете.
 
-        Отдельно от metric_type_of: у БИНАРНОЙ (звёздной) метрики metric_type в
-        JSON может не прийти вовсе, и проверка «metric_type_of() is not None»
-        объявила бы существующую метрику ненайденной."""
+        Отдельно от metric_type_of: у ЗВЕЗДЫ metric_type в JSON может не прийти
+        вовсе, и проверка «metric_type_of() is not None» объявила бы существующую
+        метрику ненайденной."""
         return self.conn.execute(
             "SELECT 1 FROM metrics WHERE metric_name = ? LIMIT 1", (name,)
         ).fetchone() is not None
 
-    def is_binary_metric(self, name: str) -> bool:
-        """Метрика бинарная: ни одной строки с числовым фактом, но есть
+    def is_star_node(self, name: str) -> bool:
+        """Метрика — звезда: ни одной строки с числовым фактом, но есть
         star_received. Числовые сравнения (план, динамика, ранг) по ней
         бессмысленны — инструменты должны честно сказать это, а не отдавать
         таблицу пустых чисел."""
@@ -339,20 +361,31 @@ class SqliteStore:
         ).fetchone()
         return bool(row and row["facts"] == 0 and row["stars"] > 0)
 
-    def star_presence(self) -> dict[str, int]:
-        """Счётчики звёздных данных: сколько строк бинарных, сколько из них
-        получено, сколько строк помечено is_star_metric. Всё по нулям = звёздных
-        полей во входе не было, и все потребители обязаны вести себя как раньше."""
+    def star_presence(self) -> dict[str, Any]:
+        """Счётчики звёздных данных: сколько строк-звёзд, сколько из них получено,
+        сколько строк помечено «влияет на звезду» (флаг на самой звезде ничего не
+        значит и не считается), и имена звёзд. Счётчики по нулям = звёздных полей
+        во входе не было, и все потребители обязаны вести себя как раньше."""
         row = self.conn.execute(
-            "SELECT COUNT(star_received) AS binary_rows, "
+            "SELECT COUNT(star_received) AS star_rows, "
             "SUM(COALESCE(star_received, 0)) AS received_rows, "
-            "SUM(CASE WHEN is_star_metric = 1 THEN 1 ELSE 0 END) AS star_metric_rows "
+            "SUM(CASE WHEN is_star_metric = 1 AND star_received IS NULL "
+            "THEN 1 ELSE 0 END) AS star_metric_rows "
             "FROM metrics"
         ).fetchone()
+        names = [
+            r["metric_name"]
+            for r in self.conn.execute(
+                "SELECT DISTINCT metric_name FROM metrics "
+                "WHERE star_received IS NOT NULL AND metric_name IS NOT NULL "
+                "ORDER BY metric_name"
+            )
+        ]
         return {
-            "star_binary_rows": row["binary_rows"] or 0,
+            "star_binary_rows": row["star_rows"] or 0,
             "star_received_rows": row["received_rows"] or 0,
             "star_metric_rows": row["star_metric_rows"] or 0,
+            "star_names": names,
         }
 
     def metric_kind_of(self, name: str) -> str | None:
@@ -462,11 +495,12 @@ class SqliteStore:
     def schema_overview(self) -> dict[str, Any]:
         metrics = self._rows(
             self.conn.execute(
-                "SELECT metric_name, metric_type, measure_type, COUNT(*) AS rows, "
-                "MAX(COALESCE(is_star_metric, 0)) AS is_star_metric, "
-                "MAX(star_received IS NOT NULL) AS is_binary "
-                "FROM metrics GROUP BY metric_name, metric_type, measure_type "
-                "ORDER BY metric_name"
+                "SELECT m.metric_name, m.metric_type, m.measure_type, "
+                "COUNT(*) AS rows, "
+                f"{_STAR_FLAG_COLS} "
+                f"FROM metrics m {_STAR_PARENT_JOIN} "
+                "GROUP BY m.metric_name, m.metric_type, m.measure_type "
+                "ORDER BY m.metric_name"
             )
         )
         for m in metrics:
@@ -513,10 +547,11 @@ class SqliteStore:
             # GROUP BY, а не LIMIT 1: флаги надо агрегировать по всем строкам
             # метрики. Остальные колонки берутся из произвольной подходящей строки —
             # ровно та же семантика, что была у LIMIT 1.
-            "SELECT metric_name, metric_description, metric_type, measure_type, "
-            "calc_period, MAX(COALESCE(is_star_metric, 0)) AS is_star_metric, "
-            "MAX(star_received IS NOT NULL) AS is_binary "
-            "FROM metrics WHERE metric_name = ? GROUP BY metric_name LIMIT 1",
+            "SELECT m.metric_name, m.metric_description, m.metric_type, "
+            "m.measure_type, m.calc_period, "
+            f"{_STAR_FLAG_COLS} "
+            f"FROM metrics m {_STAR_PARENT_JOIN} "
+            "WHERE m.metric_name = ? GROUP BY m.metric_name LIMIT 1",
             (name,),
         )
         row = cur.fetchone()
@@ -665,9 +700,11 @@ class SqliteStore:
             "m.person_post, m.person_is_me, m.metric_name, m.metric_type, "
             "m.measure_type, m.date, m.element, m.fact, m.plan, m.benchmark, "
             "m.ex, m.rr, m.influent_percent, m.star_received, m.is_star_metric, "
+            "p.metric_name AS star_name, "
             f"{analytics_cols} "
             "FROM metrics m LEFT JOIN metric_analytics a "
             "ON a.metric_uid = m.metric_uid "
+            f"{_STAR_PARENT_JOIN} "
             f"WHERE {where} ORDER BY {order} LIMIT ?"
         )
         rows = self._rows(self.conn.execute(sql, [*params, limit + 1]))
@@ -795,11 +832,11 @@ class SqliteStore:
         post: str | None = None,
         limit: int = 30,
     ) -> dict[str, Any]:
-        if self.is_binary_metric(name):
+        if self.is_star_node(name):
             return {
-                "error": f"Метрика «{name}» бинарная: числового значения у неё "
-                "нет, ранжировать нечего.",
-                "hint": "статус получения смотри в star_status",
+                "error": f"Метрика «{name}» — это звезда: числа у неё нет, "
+                "ранжировать нечего.",
+                "hint": _STAR_NODE_HINT,
                 "rows": [],
                 "count": 0,
             }
@@ -855,11 +892,11 @@ class SqliteStore:
                 "error": f"group_by должен быть одним из {sorted(_GROUP_BY_COLUMNS)}",
                 "groups": [],
             }
-        if self.is_binary_metric(name):
+        if self.is_star_node(name):
             return {
-                "error": f"Метрика «{name}» бинарная: числового значения у неё "
-                "нет, агрегировать нечего.",
-                "hint": "статус получения смотри в star_status",
+                "error": f"Метрика «{name}» — это звезда: числа у неё нет, "
+                "агрегировать нечего.",
+                "hint": _STAR_NODE_HINT,
                 "groups": [],
             }
         where = "m.metric_name = ?"
@@ -920,12 +957,13 @@ class SqliteStore:
             "SELECT m.metric_uid, m.parent_uid, m.depth, m.person_fio, "
             "m.metric_name, m.metric_type, m.measure_type, m.date, m.element, "
             "m.fact, m.plan, m.benchmark, m.ex, m.rr, m.influent_percent, "
-            "m.star_received, m.is_star_metric, "
+            "m.star_received, m.is_star_metric, p.metric_name AS star_name, "
             "a.plan_status, a.plan_dev_pct, a.plan_dev_abs, a.benchmark_status, "
             "a.benchmark_dev_pct, a.trend, a.trend_status, "
             "a.pop_change_pct, a.pop_change_abs, a.pop_status "
             "FROM metrics m JOIN tree t ON m.metric_uid = t.metric_uid "
             "LEFT JOIN metric_analytics a ON a.metric_uid = m.metric_uid "
+            f"{_STAR_PARENT_JOIN} "
             "ORDER BY m.person_fio, m.depth, m.metric_uid LIMIT ?"
         )
         rows = self._rows(self.conn.execute(sql, [*root_params, limit + 1]))
@@ -1003,7 +1041,12 @@ class SqliteStore:
         elif kind == "star_received":
             where += " AND m.star_received = 1"
         elif kind == "star_at_risk":
-            where += " AND m.is_star_metric = 1 AND a.plan_status = 'хуже_плана'"
+            # Влияющие показатели хуже плана; сама звезда (star_received) сюда не
+            # попадает, даже если на ней стоит флаг.
+            where += (
+                " AND m.is_star_metric = 1 AND m.star_received IS NULL"
+                " AND a.plan_status = 'хуже_плана'"
+            )
         else:
             return {
                 "error": "kind должен быть 'anomaly', 'below_plan', "
@@ -1027,10 +1070,14 @@ class SqliteStore:
             "trend": "(a.pop_change_pct IS NULL), a.pop_change_pct ASC",
             "declining": "(a.pop_change_pct IS NULL), ABS(a.pop_change_pct) DESC",
             "improving": "(a.pop_change_pct IS NULL), ABS(a.pop_change_pct) DESC",
-            # У бинарных сортировать не по чему — по имени, детерминированно.
-            "star_missed": "m.metric_name",
-            "star_received": "m.metric_name",
-            "star_at_risk": "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC",
+            # У звёзд сортировать не по чему — по имени, детерминированно.
+            "star_missed": "m.metric_name, m.date DESC",
+            "star_received": "m.metric_name, m.date DESC",
+            # Группируем по звезде, внутри — самые отстающие первыми.
+            "star_at_risk": (
+                "(p.metric_name IS NULL), p.metric_name, "
+                "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC"
+            ),
         }[kind]
         return self._select_metrics(where, params, order=order, limit=limit)
 
@@ -1038,53 +1085,105 @@ class SqliteStore:
         self,
         person: str | int | None = None,
         date: str | None = None,
-        limit: int = 40,
+        limit: int = 20,
+        children_limit: int = 40,
     ) -> dict[str, Any]:
-        """Звёздный срез: бинарные показатели (получен / не получен) отдельно от
-        числовых метрик с пометкой «влияет на звезду».
+        """Все звёзды (по одной записи на звезду) с их влияющими показателями.
 
-        Секции разные по природе, поэтому не смешиваем: у бинарных нет ни факта,
-        ни вердиктов, а числовые идут через общий _select_metrics — чтобы их
-        вердикты выглядели ровно так же, как во всех остальных инструментах.
+        Звезда — узел со star_received; у неё нет динамики, поэтому берём её строку
+        за ПОСЛЕДНЮЮ дату этой звезды (или за явную date). Дети — строки с
+        parent_uid = uid любой строки этой звезды (прод кладёт все даты ребёнка
+        под один узел), за последнюю дату каждого ребёнка (или за явную date),
+        через общий _select_metrics — чтобы вердикты выглядели как везде.
 
-        Звезда считается ЗА ПЕРИОД, а бинарный показатель приходит в каждом
-        периоде своим значением. Поэтому без явного date бинарную секцию строим по
-        ПОСЛЕДНЕМУ периоду со звёздными строками: иначе одна и та же метрика попала
-        бы разом в «получены» (май) и «не получены» (апрель), а вердикт звезды
-        считался бы по устаревшему периоду."""
-        where = "m.star_received IS NOT NULL"
-        params: list[Any] = []
+        «Влияет на звезду» — свойство показателя, а не периода: у исторических
+        строк флага может не быть (конвертер копирует его из history), поэтому
+        is_star_metric ребёнка поднимаем до MAX по его серии. Если флага нет ни у
+        одного ребёнка — влияющими считаются все."""
         pc, pp = self._person_clause(person)
-        where += pc
-        params += pp
-        binary_date = date
-        if not binary_date:
-            row = self.conn.execute(
-                f"SELECT MAX(m.date) AS d FROM metrics m WHERE {where}", params
-            ).fetchone()
-            binary_date = row["d"] if row else None
-        if binary_date:
-            where += " AND m.date = ?"
-            params.append(binary_date)
-        binary = self._rows(
+        star_where = "m.star_received IS NOT NULL" + pc
+        star_params: list[Any] = list(pp)
+        if date:
+            star_where += " AND m.date = ?"
+            star_params.append(date)
+        else:
+            star_where += (
+                " AND m.date = (SELECT MAX(s.date) FROM metrics s"
+                " WHERE s.person_key = m.person_key"
+                " AND s.metric_name = m.metric_name"
+                " AND COALESCE(s.element, '') = COALESCE(m.element, '')"
+                " AND s.star_received IS NOT NULL)"
+            )
+        star_rows = self._rows(
             self.conn.execute(
-                "SELECT m.person_fio, m.metric_name, m.element, m.date, "
-                "m.star_received, m.is_star_metric FROM metrics m "
-                # Неполученные первыми: как и в find_flags, сверху самое значимое.
-                f"WHERE {where} ORDER BY m.star_received, m.metric_name LIMIT ?",
-                [*params, limit],
+                "SELECT m.metric_uid, m.person_key, m.person_fio, m.metric_name, "
+                "m.element, m.date, m.star_received FROM metrics m "
+                # Неполученные первыми: сверху самое значимое.
+                f"WHERE {star_where} ORDER BY m.star_received, m.metric_name, "
+                "m.person_fio, m.element LIMIT ?",
+                [*star_params, limit + 1],
             )
         )
-
-        num_where = "m.is_star_metric = 1 AND m.star_received IS NULL"
-        num_params: list[Any] = []
-        pc, pp = self._person_clause(person)
-        num_where += pc
-        num_params += pp
-        if date:
-            num_where += " AND m.date = ?"
-            num_params.append(date)
-        numeric = self._select_metrics(
-            num_where, num_params, order="m.date, m.metric_name", limit=limit
-        )
-        return {"binary": binary, "numeric": numeric, "date": binary_date}
+        truncated = len(star_rows) > limit
+        stars: list[dict[str, Any]] = []
+        for sr in star_rows[:limit]:
+            key_params = [sr["person_key"], sr["metric_name"], sr["element"] or ""]
+            star_uids = (
+                "(SELECT metric_uid FROM metrics WHERE person_key = ? "
+                "AND metric_name = ? AND COALESCE(element, '') = ? "
+                "AND star_received IS NOT NULL)"
+            )
+            where = f"m.parent_uid IN {star_uids}"
+            params: list[Any] = list(key_params)
+            if date:
+                where += " AND m.date = ?"
+                params.append(date)
+            else:
+                where += (
+                    f" AND m.date = (SELECT MAX(c.date) FROM metrics c"
+                    f" WHERE c.parent_uid IN {star_uids}"
+                    " AND c.metric_name = m.metric_name"
+                    " AND COALESCE(c.element, '') = COALESCE(m.element, ''))"
+                )
+                params += key_params
+            # Флаг по серии, а не по строке (история без флага).
+            flag = (
+                f"(SELECT MAX(COALESCE(f.is_star_metric, 0)) FROM metrics f"
+                f" WHERE f.parent_uid IN {star_uids}"
+                " AND f.metric_name = m.metric_name"
+                " AND COALESCE(f.element, '') = COALESCE(m.element, ''))"
+            )
+            params += key_params
+            order = (
+                f"{flag} DESC, (a.plan_status = 'хуже_плана') DESC, "
+                "(a.plan_dev_pct IS NULL), ABS(a.plan_dev_pct) DESC, "
+                "m.metric_name, m.element"
+            )
+            # Подзапрос флага стоит в ORDER BY, а параметры связываются по порядку
+            # появления в SQL: WHERE идёт раньше ORDER BY — порядок params верный.
+            kids = self._select_metrics(where, params, order=order, limit=children_limit)
+            rows = kids["rows"]
+            series_flag: dict[tuple[Any, Any], int] = {}
+            for r in self.conn.execute(
+                "SELECT metric_name, element, MAX(COALESCE(is_star_metric, 0)) AS f "
+                f"FROM metrics WHERE parent_uid IN {star_uids} "
+                "GROUP BY metric_name, element",
+                key_params,
+            ):
+                series_flag[(r["metric_name"], r["element"])] = r["f"]
+            for r in rows:
+                if series_flag.get((r["metric_name"], r["element"])):
+                    r["is_star_metric"] = 1
+            stars.append(
+                {
+                    "star": sr["metric_name"],
+                    "element": sr["element"],
+                    "person_fio": sr["person_fio"],
+                    "date": sr["date"],
+                    "received": bool(sr["star_received"]),
+                    "children": rows,
+                    "children_date": max((r["date"] for r in rows if r.get("date")), default=None),
+                    "children_truncated": kids["truncated"],
+                }
+            )
+        return {"date": date, "stars": stars, "count": len(stars), "truncated": truncated}

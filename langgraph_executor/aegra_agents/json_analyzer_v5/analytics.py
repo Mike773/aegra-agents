@@ -522,7 +522,7 @@ def build_summary(store: SqliteStore) -> dict[str, Any]:
                 "below_plan": row["below_plan"],
                 "anomalies": row["anomalies"],
                 # None на обычной метрике — колонка отпадёт в рендере целиком.
-                # Иначе бинарная метрика висела бы в сводке с пустым средним.
+                # Иначе звезда висела бы в сводке с пустым средним.
                 "star": None if not row["star_rows"] else (
                     "получена" if row["star_received"] else "не получена"
                 ),
@@ -794,27 +794,37 @@ def _node_header(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _star_section(
-    binary: list[dict[str, Any]], numeric: list[dict[str, Any]]
+    stars: list[dict[str, Any]],
+    children: dict[Any, list[dict[str, Any]]],
+    date: Any,
 ) -> dict[str, Any]:
-    """Звёздная секция обзора: полученные/неполученные бинарные показатели плюс
-    шапки числовых метрик, влияющих на звезду. Пустой словарь = звёздных данных
-    нет, и вызывающий не кладёт ключ в результат вовсе."""
-    star: dict[str, Any] = {}
-    if binary:
-        star["received"] = [
-            {"metric": r.get("metric_name"), "element": r.get("element")}
-            for r in binary if r.get("star_received")
-        ]
-        star["missed"] = [
-            {"metric": r.get("metric_name"), "element": r.get("element")}
-            for r in binary if not r.get("star_received")
-        ]
-    star_numeric = [r for r in numeric if r.get("is_star_metric")]
-    if star_numeric:
-        star["numeric"] = [
-            _node_header(r) for r in star_numeric[:_OVERVIEW_MAX_HEADLINES]
-        ]
-    return star
+    """Звёздная секция обзора: каждая звезда со своим статусом и её дочерними
+    показателями — влияющие (is_star_metric) делим на «ниже плана» (почему не
+    получена) и «в плане/лучше»; дети без флага — «прочие». Если флага нет ни у
+    одного ребёнка, влияющими считаются все. Пустой словарь = звёзд нет, и
+    вызывающий не кладёт ключ в результат вовсе."""
+    if not stars:
+        return {}
+    out: list[dict[str, Any]] = []
+    # Неполученные первыми, затем по имени.
+    for r in sorted(stars, key=lambda r: (bool(r.get("star_received")), r.get("metric_name") or "")):
+        kids = children.get(r.get("metric_uid")) or []
+        flagged = [k for k in kids if k.get("is_star_metric")]
+        influencing = flagged or kids
+        other = [k for k in kids if k not in influencing]
+        missed = [k for k in influencing if k.get("plan_status") == "хуже_плана"]
+        ok = [k for k in influencing if k.get("plan_status") != "хуже_плана"]
+        out.append(
+            {
+                "star": r.get("metric_name"),
+                "element": r.get("element"),
+                "received": bool(r.get("star_received")),
+                "missed_children": [_node_header(k) for k in missed[:_OVERVIEW_MAX_HEADLINES]],
+                "ok_children": [_node_header(k) for k in ok[:_OVERVIEW_MAX_HEADLINES]],
+                "other_children": [_node_header(k) for k in other[:_OVERVIEW_MAX_HEADLINES]],
+            }
+        )
+    return {"date": date, "stars": out}
 
 
 def _build_node(
@@ -926,12 +936,17 @@ def build_situation_overview(
             "note": "Нет данных по сотруднику на этот период.",
         }
 
-    # Бинарные («звёздные») метрики выносим из числовых зон ДО построения зон: у
-    # них нет ни факта, ни вердиктов, и _zone_of молча положил бы их в «стабильно»
-    # строкой с пустым значением. Их место — отдельная секция star.
-    binary = [r for r in rows if r.get("star_received") is not None]
+    # Звёзды выносим из числовых зон ДО построения зон: у них нет ни факта, ни
+    # вердиктов, и _zone_of молча положил бы их в «стабильно» строкой с пустым
+    # значением. Их место — отдельная секция star, вместе с их детьми.
+    stars = [r for r in rows if r.get("star_received") is not None]
     rows = [r for r in rows if r.get("star_received") is None]
-    star = _star_section(binary, rows)
+    star_children: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    star_uids = {r.get("metric_uid") for r in stars}
+    for r in rows:
+        if r.get("parent_uid") in star_uids:
+            star_children[r["parent_uid"]].append(r)
+    star = _star_section(stars, star_children, cur_date)
 
     # Зоны и вердикты читаются из metric_analytics; без неё все статусы NULL и любая
     # метрика молча попала бы в «стабильно». Честно сообщаем, что аналитика не
@@ -948,7 +963,7 @@ def build_situation_overview(
             "stable": [],
             "note": "Аналитика не посчитана (compute_analytics) — зоны недоступны.",
         }
-        # Бинарным показателям аналитика не нужна — их статус известен и без неё.
+        # Статус звёзд известен и без аналитики (детям вердиктов не достанется).
         if star:
             out["star"] = star
         return out
@@ -1018,16 +1033,17 @@ def rank_elements(
     """Ранжирует element-строки метрики одного человека за период по факту с учётом
     направления (прямая: выше=лучше, обратная: ниже=лучше). Возвращает ranked-список
     (лучшее→худшее). План/бенчмарк не используются."""
-    # Существование — по metric_exists: у бинарной метрики metric_type может не
-    # прийти, и она была бы объявлена ненайденной. metric_type нужен только для
+    # Существование — по metric_exists: у звезды metric_type может не прийти, и
+    # она была бы объявлена ненайденной. metric_type нужен только для
     # направления сравнения.
     if not store.metric_exists(metric):
         return {"error": f"Метрика '{metric}' не найдена."}
-    if store.is_binary_metric(metric):
+    if store.is_star_node(metric):
         return {
-            "error": f"Метрика «{metric}» бинарная: числового значения у неё нет, "
+            "error": f"Метрика «{metric}» — это звезда: числа у неё нет, "
             "сравнивать разрезы нечем.",
-            "hint": "статус получения смотри в star_status",
+            "hint": "статус звезды и её влияющие показатели смотри в star_status "
+            "или metric_tree по имени звезды",
         }
     mt = store.metric_type_of(metric)
     pkey, fio = _focus_person(store, person)
@@ -1182,7 +1198,7 @@ def build_peer_context(
     уровня по total_objects, не по имени); position_dynamics — изменение
     percentile при ≥2 датированных точках rankings.
     """
-    # Существование — по metric_exists (у бинарной метрики metric_type может не
+    # Существование — по metric_exists (у звезды metric_type может не
     # прийти); metric_type остаётся только для направления вердиктов.
     if not store.metric_exists(metric):
         return {"error": f"Метрика '{metric}' не найдена."}
