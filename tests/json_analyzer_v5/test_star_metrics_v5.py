@@ -485,3 +485,12 @@ def test_star_rules_point_to_metric_tree_for_dynamics():
     from langgraph_executor.aegra_agents.json_analyzer_v5.prompts import STAR_RULES
     assert "ДИНАМИКИ У ЗВЕЗДЫ НЕТ" in STAR_RULES
     assert "metric_tree(metric='X')" in STAR_RULES
+
+
+def test_star_facts_block_has_dynamics_subsection():
+    """Выжимка без ряда по периодам теряла историю детей: респондер отвечал «данные
+    только на одну дату». Подраздел ДИНАМИКА требует ряд дословно."""
+    from langgraph_executor.aegra_agents.json_analyzer_v5.prompts import STAR_FACTS_BLOCK
+    assert "ДИНАМИКА (только если вопрос про динамику" in STAR_FACTS_BLOCK
+    assert "ряд по периодам ДОСЛОВНО" in STAR_FACTS_BLOCK
+    assert "Динамики у САМОЙ звезды нет" in STAR_FACTS_BLOCK
