@@ -477,3 +477,11 @@ def test_sample_star_json_shape():
     missed = [c["metric_name"] for c in by["Звезда качества"]["children"]
               if c["plan_status"] == "хуже_плана"]
     assert sorted(missed) == ["CSI", "Повторные обращения"]
+
+
+def test_star_rules_point_to_metric_tree_for_dynamics():
+    """Динамики у звезды нет: на вопрос о ней правила отправляют к metric_tree по
+    влияющим показателям (e2e: модель иначе ограничивалась последней датой)."""
+    from langgraph_executor.aegra_agents.json_analyzer_v5.prompts import STAR_RULES
+    assert "ДИНАМИКИ У ЗВЕЗДЫ НЕТ" in STAR_RULES
+    assert "metric_tree(metric='X')" in STAR_RULES
