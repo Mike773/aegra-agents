@@ -28,6 +28,9 @@ def _text(msg: Any) -> str:
     return str(content)
 
 
+_PEOPLE_LISTED_MAX = 12  # до скольких людей перечислять ФИО в составе датасета
+
+
 def _fmt_metric_entry(m: dict[str, Any]) -> str:
     """Метрика в формате '<name> [agg+|agg-(, звезда)(, влияет на звезду «X»): A, B]'.
 
@@ -67,11 +70,24 @@ def format_facts(overview: dict[str, Any]) -> str:
             f"к нему — сразу подставляй ФИО '{only['person_fio']}' в аргумент "
             "person. НЕ переспрашивай у пользователя имя."
         )
+    elif len(people) <= _PEOPLE_LISTED_MAX:
+        # Имена показываем сразу: без них модель подставляла в person должность
+        # или слово «руководитель» и получала «не найден».
+        entries = []
+        for p in people:
+            role = "руководитель" if p.get("person_is_me") else "сотрудник"
+            extra = ", ".join(x for x in (role, p.get("person_post")) if x)
+            entries.append(f"{p.get('person_fio') or p.get('person_key')} ({extra})")
+        people_line = (
+            f"- Люди ({len(people)}): " + "; ".join(entries) + ". В аргумент person "
+            "инструментов передавай ФИО ДОСЛОВНО отсюда (не должность и не слово "
+            "«руководитель»)."
+        )
     else:
         people_line = (
             f"- Людей: {len(people)} ({managers} рук. + {len(people) - managers} "
             "сотр.). Человека по неточному имени ищи через resolve_entity или "
-            "list_people."
+            "list_people; в person передавай ФИО ДОСЛОВНО."
         )
 
     periods = ", ".join(dates)

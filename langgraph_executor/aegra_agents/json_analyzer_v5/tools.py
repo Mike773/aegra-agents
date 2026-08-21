@@ -901,34 +901,36 @@ def build_tools(
             }
         )
 
+    def _people_list() -> str:
+        parts = []
+        for p in store.list_people()[:12]:
+            role = "руководитель" if p.get("person_is_me") else "сотрудник"
+            extra = ", ".join(x for x in (role, p.get("person_post")) if x)
+            parts.append(f"{p.get('person_fio') or p.get('person_key')} ({extra})")
+        return "; ".join(parts)
+
+    def _canon_person(person: str | None) -> str | None:
+        """ФИО по аргументу person (роль/должность тоже принимаются, если
+        однозначны); нерезолвимое значение возвращается как есть — его поймает
+        _unknown_person с ошибкой и списком людей."""
+        if person is None:
+            return None
+        return store.resolve_person(person) or person
+
     def _unknown_person(person: str | None) -> str | None:
         if person is None or str(person).strip() == "":
             return None
-        text = str(person).strip()
-        people = store.list_people()
-        if text.isdigit():
-            # person_tabnum может быть NULL (на проде не приходит) — не сравниваем
-            # 'None' со строкой; число может встретиться и в ФИО.
-            needle = text.lower()
-            found = any(
-                (p.get("person_tabnum") is not None and str(p["person_tabnum"]) == text)
-                or p.get("person_key") == text
-                or needle in (p.get("person_fio") or "").lower()
-                for p in people
-            )
-        else:
-            needle = text.lower()
-            found = any(needle in (p["person_fio"] or "").lower() for p in people)
-        if found:
+        if store.resolve_person(person) is not None:
             return None
         return _render_error(
             {
-                "error": f"Человек '{person}' не найден. Здесь нужно ТОЧНОЕ ФИО "
-                "(или его часть) либо табельный номер сотрудника — не метрика, "
-                "не продукт, не произвольный текст.",
-                "hint": "список людей смотри в list_people, неточное имя "
-                "разрешай через resolve_entity(kind='person'). Если фильтр по "
-                "человеку не нужен — просто не передавай аргумент person.",
+                "error": f"Человек '{person}' не найден или неоднозначен. Аргумент "
+                "person принимает ТОЧНОЕ ФИО (или его часть) либо табельный номер "
+                "— не метрику, не продукт и не общую должность, под которую "
+                "подходят несколько людей.",
+                "hint": "люди датасета: " + (_people_list() or "нет") + ". Возьми "
+                "ФИО отсюда ДОСЛОВНО; если фильтр по человеку не нужен — просто не "
+                "передавай аргумент person.",
             }
         )
 
@@ -983,7 +985,7 @@ def build_tools(
         person — ФИО/табельный; date — YYYY-MM-DD; element не указан = агрегат
         (для agg--метрик вернутся все разрезы с пометкой
         'разрезы_вместо_агрегата')."""
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         element = _blank_to_none(element)
         date = _blank_to_none(date)
         unknown = _unknown_metric(metric) or _unknown_person(person)
@@ -1007,7 +1009,7 @@ def build_tools(
         person — ФИО/табельный; date — YYYY-MM-DD; parent — имя метрики-родителя,
         чтобы ограничить срез её прямыми детьми (одной веткой)."""
         element = _blank_to_none(element)
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         date = _blank_to_none(date)
         parent = _blank_to_none(parent)
         if element is None:
@@ -1037,7 +1039,7 @@ def build_tools(
         pop_status/trend_status) для ОДНОГО человека (person обязателен). Оценивай
         по *_status, а не по знаку. element не указан = агрегат (agg--метрики →
         все разрезы). Чтобы найти, у кого сильнее спад/рост по всем — find_flags."""
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         element = _blank_to_none(element)
         unknown = _unknown_metric(metric) or _unknown_person(person)
         if unknown:
@@ -1117,7 +1119,7 @@ def build_tools(
         по каждому. Задавай metric, person и date (иначе строк много). agg--метрика
         → корнями станут её разрезы (пометка 'разрезы_вместо_агрегата')."""
         metric = _blank_to_none(metric)
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         date = _blank_to_none(date)
         unknown = (
             _unknown_metric(metric) if metric is not None else None
@@ -1187,7 +1189,7 @@ def build_tools(
         причины — не нужно перебирать метрики по одной через find_flags/metric_tree.
         person — ФИО/табельный (по умолчанию единственный сотрудник набора);
         date — YYYY-MM-DD (по умолчанию последний период)."""
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         date = _blank_to_none(date)
         return _safe(
             _render_overview,
@@ -1206,7 +1208,7 @@ def build_tools(
         ловит, а бенчмарк может быть неуместен). person — ФИО/табельный (по
         умолчанию сотрудник набора); date — YYYY-MM-DD (по умолчанию последний)."""
         metric = _blank_to_none(metric)
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         date = _blank_to_none(date)
         unknown = _unknown_metric(metric) or _unknown_person(person)
         if unknown:
@@ -1232,7 +1234,7 @@ def build_tools(
         повторный вызов не поможет. person — ФИО/табельный (по умолчанию
         сотрудник набора)."""
         metric = _blank_to_none(metric)
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         unknown = _unknown_metric(metric) or _unknown_person(person)
         if unknown:
             return unknown
@@ -1270,7 +1272,7 @@ def build_tools(
         до плана), а на обзорном вопросе — вместе с situation_overview. person —
         ФИО/табельный (по умолчанию все люди набора); date — YYYY-MM-DD (по
         умолчанию последняя дата каждой звезды)."""
-        person = _blank_to_none(person)
+        person = _canon_person(_blank_to_none(person))
         date = _blank_to_none(date)
         unknown = _unknown_person(person)
         if unknown:

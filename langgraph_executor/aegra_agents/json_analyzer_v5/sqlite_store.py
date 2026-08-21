@@ -324,6 +324,47 @@ class SqliteStore:
             return " AND (m.person_tabnum = ? OR m.person_key = ?)", [int(text), text]
         return " AND m.person_fio LIKE ?", [f"%{text}%"]
 
+    # Слова-роли, которыми модель называет руководителя вместо ФИО.
+    _MANAGER_WORDS = frozenset({
+        "руководитель", "рук", "начальник", "босс", "шеф", "менеджер", "я", "me",
+        "manager", "boss",
+    })
+
+    def resolve_person(self, person: str | int | None) -> str | None:
+        """Каноническое ФИО по аргументу person инструмента, либо None.
+
+        Порядок: табельный/ключ → подстрока ФИО (как раньше) → слово-роль
+        («руководитель», «начальник») → person_is_me → должность/подразделение
+        (подстрока) → единственный подходящий человек. Неоднозначность (двое с
+        одной должностью) и промах — None: вызывающий отдаёт ошибку со списком
+        людей, чтобы модель подставила ФИО, а не гадала дальше."""
+        if person is None or str(person).strip() == "":
+            return None
+        text = str(person).strip()
+        people = self.list_people()
+        needle = text.casefold()
+        if text.isdigit():
+            hits = [p for p in people if str(p.get("person_tabnum")) == text
+                    or p.get("person_key") == text]
+            if len(hits) == 1:
+                return hits[0].get("person_fio") or hits[0].get("person_key")
+        by_fio = [p for p in people if needle in (p.get("person_fio") or "").casefold()]
+        if by_fio:
+            # Подстрока ФИО может задевать нескольких — прежнее поведение LIKE,
+            # дальше фильтр по ней же; возвращаем сам текст.
+            return by_fio[0]["person_fio"] if len(by_fio) == 1 else text
+        if needle.rstrip(".") in self._MANAGER_WORDS:
+            hits = [p for p in people if p.get("person_is_me")]
+        else:
+            hits = [
+                p for p in people
+                if needle in (p.get("person_post") or "").casefold()
+                or needle in (p.get("person_depart") or "").casefold()
+            ]
+        if len(hits) == 1:
+            return hits[0].get("person_fio") or hits[0].get("person_key")
+        return None
+
     @staticmethod
     def _element_clause(
         element: str | None, aggregate_default: bool = False
