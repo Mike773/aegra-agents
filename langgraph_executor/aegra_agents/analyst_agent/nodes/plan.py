@@ -17,6 +17,7 @@ from ..db import analytics, core
 from ..deviations import builder, tasks as tasks_mod
 from ..deviations.format import deviations_block
 from ..prompts import PromptContext, compose_system_prompt
+from .prepare import focus_person_key
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +53,10 @@ def make_plan_tasks_node(llm: Any):
         # руководитель, поднимается в приоритете.
         db = await asyncio.to_thread(_rebuild, state)
         resolved = await asyncio.to_thread(tasks_mod.resolve_task_metrics, db, tasks)
-        person_key = str(state.get("employee_tabnum") or "")
-        resolved_key = db.resolve_person(person_key) or person_key
+        # Тот же резолв, что и в подготовке хода: табельный из configurable
+        # может не совпадать с ключом персоны в датасете, и тогда карта
+        # отклонений собиралась бы по несуществующему человеку — то есть пустой.
+        resolved_key = focus_person_key(db, state.get("employee_tabnum"))
         deviations = await asyncio.to_thread(
             builder.build_deviations,
             db,

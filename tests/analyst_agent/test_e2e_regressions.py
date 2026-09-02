@@ -127,3 +127,42 @@ def test_knowledge_overrides_guessed_kind():
     })
     # Трактовка из базы знаний точнее эвристики по названию.
     assert db.conn.execute("SELECT kind FROM metric").fetchone()["kind"] == "уровень"
+
+
+# --- 3. фокус-персона в ветке составного разбора ---------------------------
+
+def test_plan_node_keeps_deviations_when_tabnum_not_in_dataset():
+    """employee_tabnum из configurable может не совпадать с ключом в данных.
+
+    Подготовка хода это учитывает (фолбэк на первого сотрудника), а ветка
+    составного разбора пересобирала карту по несуществующему ключу и обнуляла
+    её — на живом прогоне инструмент отвечал «карта отклонений пуста».
+    """
+    from langgraph_executor.aegra_agents.analyst_agent.nodes.prepare import (
+        focus_person_key,
+    )
+
+    db = _db(make_dataset_obj(
+        [make_metric("Продажи", fact=80.0, plan=100.0)], tabnum=4032085
+    ))
+    # Табельного «2000» в датасете нет — берём первого сотрудника.
+    assert focus_person_key(db, "2000") == "4032085"
+    assert builder.build_deviations(db, focus_person_key=focus_person_key(db, "2000"))
+
+
+# --- 4. повторный вызов с «пустыми» аргументами ----------------------------
+
+def test_repeat_key_ignores_absent_and_empty_args():
+    """«Аргумента нет» и «аргумент пустой» — один и тот же вызов.
+
+    Иначе модель, зовущая инструмент без обязательного параметра, крутит его по
+    кругу: ключи `{}` и `{"metric": None}` считались разными вызовами.
+    """
+    from langgraph_executor.aegra_agents.analyst_agent.agent.guards import RunGuards
+
+    guards = RunGuards(budget=5)
+    guards.register("metric_card", clean_args({"metric": {}}))
+    assert guards.is_repeat("metric_card", clean_args({}))
+    assert guards.is_repeat("metric_card", clean_args({"metric": "", "person": None}))
+    # Осмысленный вызов повтором не считается.
+    assert not guards.is_repeat("metric_card", clean_args({"metric": "Продажи"}))

@@ -48,7 +48,11 @@ class RunGuards:
 
     @staticmethod
     def key(name: str, args: dict[str, Any]) -> str:
-        return f"{name}|{sorted((args or {}).items(), key=lambda kv: kv[0])!r}"
+        """Ключ вызова. Пустые аргументы отбрасываются: «параметра нет» и
+        «параметр пустой» — один и тот же вызов, иначе модель, зовущая
+        инструмент без обязательного параметра, крутит его по кругу."""
+        meaningful = {k: v for k, v in (args or {}).items() if v is not None}
+        return f"{name}|{sorted(meaningful.items(), key=lambda kv: kv[0])!r}"
 
     def is_repeat(self, name: str, args: dict[str, Any]) -> bool:
         return self.key(name, args) in self._seen
