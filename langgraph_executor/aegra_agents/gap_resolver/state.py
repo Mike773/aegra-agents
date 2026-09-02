@@ -18,7 +18,11 @@ class GapResolverState(TypedDict, total=False):
 
     # Вход.
     direction_key: str
-    top_k: int
+    # Сколько чанков проверять на вопрос: судья вызывается на каждый, поэтому
+    # это прямой рычаг стоимости разбора.
+    max_chunks_per_gap: int
+    judge_concurrency: int
+    max_judge_calls: int
 
     # Нерешённые gap'ы направления, сгруппированные по нормализованному вопросу.
     # Элемент: {"id": str, "query": str, "ids": list[str]} (ids — все дубли вопроса).
@@ -29,4 +33,7 @@ class GapResolverState(TypedDict, total=False):
     unresolved: list[dict[str, Any]]
     created_stub_pages: list[str]
     errors: list[dict[str, Any]]
+    # Сколько вызовов судьи израсходовано и упёрлись ли в общий потолок.
+    judge_calls: int
+    budget_exhausted: bool
     report: str
