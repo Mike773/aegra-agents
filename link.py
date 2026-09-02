@@ -5,14 +5,9 @@
 все три подграфа упоминаются здесь, иначе анализатор может не
 включить подпакет `aegra_agents` в бандл.
 """
-from langgraph_executor.aegra_agents.analytic_orchestrator.graph import (
-    graph as analytic_orchestrator_graph,
-)
-from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import (
-    graph as analytic_orchestrator_v2_graph,
-)
-from langgraph_executor.aegra_agents.analytic_orchestrator_v3.graph import (
-    graph as analytic_orchestrator_v3_graph,
+
+from langgraph_executor.aegra_agents.analyst_agent.graph import (
+    graph as analyst_agent_graph,
 )
 from langgraph_executor.aegra_agents.analytic_orchestrator_v4.graph import (
     graph as analytic_orchestrator_v4_graph,
@@ -29,21 +24,6 @@ from langgraph_executor.aegra_agents.external_doc_loader.graph import (
 from langgraph_executor.aegra_agents.gap_resolver.graph import (
     graph as gap_resolver_graph,
 )
-from langgraph_executor.aegra_agents.json_analyzer.graph import (
-    graph as json_analyzer_graph,
-)
-from langgraph_executor.aegra_agents.json_analyzer_causal.graph import (
-    graph as json_analyzer_causal_graph,
-)
-from langgraph_executor.aegra_agents.json_analyzer_v2.graph import (
-    graph as json_analyzer_v2_graph,
-)
-from langgraph_executor.aegra_agents.json_analyzer_v3.graph import (
-    graph as json_analyzer_v3_graph,
-)
-from langgraph_executor.aegra_agents.json_analyzer_v4.graph import (
-    graph as json_analyzer_v4_graph,
-)
 from langgraph_executor.aegra_agents.json_analyzer_v5.graph import (
     graph as json_analyzer_v5_graph,
 )
@@ -55,19 +35,12 @@ from langgraph_executor.aegra_agents.wiki_ingest.graph import (
 )
 
 __all__ = [
-    "analytic_orchestrator_graph",
-    "analytic_orchestrator_v2_graph",
-    "analytic_orchestrator_v3_graph",
+    "analyst_agent_graph",
     "analytic_orchestrator_v4_graph",
     "doc_manager_graph",
     "easyrag_graph",
     "external_doc_loader_graph",
     "gap_resolver_graph",
-    "json_analyzer_graph",
-    "json_analyzer_causal_graph",
-    "json_analyzer_v2_graph",
-    "json_analyzer_v3_graph",
-    "json_analyzer_v4_graph",
     "json_analyzer_v5_graph",
     "kb_chat_graph",
     "wiki_ingest_graph",
