@@ -21,7 +21,6 @@ PERSON = "100500"
 
 def _db(dataset):
     d = core.build_run_db(dataset)
-    analytics.compute_analytics(d.conn)
     return d
 
 

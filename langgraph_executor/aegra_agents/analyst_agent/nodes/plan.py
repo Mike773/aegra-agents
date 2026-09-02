@@ -86,7 +86,6 @@ def make_plan_tasks_node(llm: Any):
 
 def _rebuild(state: Any) -> Any:
     db = core.build_run_db(state.get("metrics"), state.get("aggregates"))
-    analytics.compute_analytics(db.conn)
     return db
 
 

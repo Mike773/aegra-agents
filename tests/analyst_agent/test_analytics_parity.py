@@ -95,7 +95,10 @@ def _v5_rows(dataset: dict, aggregates: list[dict] | None) -> dict[tuple, dict]:
 
 
 def _new_rows(dataset: dict, aggregates: list[dict] | None) -> dict[tuple, dict]:
-    db = core.build_run_db(dataset, aggregates)
+    # compute=False: сверяем ровно порт формул, без подавления процентов у
+    # рангов и вкладов — это отдельная возможность нового агента (её проверяет
+    # test_e2e_regressions).
+    db = core.build_run_db(dataset, aggregates, compute=False)
     new_analytics.compute_analytics(db.conn)
     cols = ", ".join(ANALYTICS_COLUMNS)
     rows = db.conn.execute(

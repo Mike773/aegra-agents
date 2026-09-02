@@ -59,7 +59,6 @@ async def _rebuild_db(state: Any) -> Any:
 
     def _build() -> Any:
         db = core.build_run_db(state.get("metrics"), state.get("aggregates"))
-        analytics.compute_analytics(db.conn)
         return db
 
     return await asyncio.to_thread(_build)

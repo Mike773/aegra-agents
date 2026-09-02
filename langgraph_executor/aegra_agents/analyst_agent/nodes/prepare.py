@@ -29,7 +29,6 @@ def build_run_state(
 ) -> tuple[Any, dict[str, str]]:
     """Собирает базу и текстовые блоки промпта. Синхронно — зовётся в потоке."""
     db = core.build_run_db(metrics, aggregates)
-    analytics.compute_analytics(db.conn)
     blocks = {
         "schema_doc": core.schema_doc(db),
         "enrichment_block": enrich.enrichment_block(db, person_key=person_key),

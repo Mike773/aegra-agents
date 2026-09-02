@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..agent.guards import blank_to_none
 from ..db.sqlrunner import QueryResult, run_template
 
 _MAX_CANDIDATES = 8
@@ -216,15 +217,23 @@ def metric_card_text(
 ) -> str:
     """Карточка показателя одним текстом."""
     ctx.used_data_tools = True
+    # Модель присылает «не задано» и пустой строкой, и пустым объектом.
+    metric = blank_to_none(metric)
+    names = ", ".join(_catalog_names(ctx))
+    if not isinstance(metric, str) or not metric.strip():
+        return (
+            "Не указано название показателя. "
+            f"Есть, например: {names}. Назови показатель и повтори вызов."
+        )
     ref = ctx.db.resolve_metric(metric)
     if ref is None:
-        names = ", ".join(_catalog_names(ctx))
         return (
             f"Показатель «{metric}» не найден в данных. "
             f"Есть, например: {names}. Уточни название."
         )
     person_key = ctx.person_key
-    if person:
+    person = blank_to_none(person)
+    if person and isinstance(person, str):
         resolved = ctx.db.resolve_person(person)
         if resolved:
             person_key = resolved

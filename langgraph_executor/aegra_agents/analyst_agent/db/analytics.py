@@ -395,6 +395,19 @@ def compute_analytics(conn, ref_level: str | None = None) -> int:
     return len(result)
 
 
+def apply_kinds_from_catalog(conn) -> int:
+    """Применяет виды показателей, уже проставленные в таблице ``metric``.
+
+    Вызывается сборкой базы: без этого шага ранг («индекс») получал бы
+    относительные проценты и вердикт «лучше плана», хотя это позиция.
+    """
+    kinds = {
+        r["name"]: r["kind"]
+        for r in conn.execute("SELECT name, kind FROM metric WHERE kind IS NOT NULL")
+    }
+    return apply_metric_kinds(conn, kinds) if kinds else 0
+
+
 def apply_metric_kinds(conn, kinds: dict[str, str]) -> int:
     """Подавляет относительные проценты у метрик-«вкладов» и «индексов».
 
@@ -456,6 +469,7 @@ def apply_metric_kinds(conn, kinds: dict[str, str]) -> int:
 
 __all__ = [
     "ANALYTICS_COLUMNS",
+    "apply_kinds_from_catalog",
     "apply_metric_kinds",
     "compute_analytics",
     "direction_better",

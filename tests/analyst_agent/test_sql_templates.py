@@ -20,7 +20,6 @@ def db():
         make_metric("AHT", date="2026-04-13", fact=4.0, plan=3.0, element="Разрез А"),
     ]
     d = core.build_run_db(make_dataset_obj(metrics))
-    analytics.compute_analytics(d.conn)
     return d
 
 
@@ -67,7 +66,6 @@ def test_all_templates_run_on_samples():
     """Каждый шаблон исполняется на каждом демо-датасете без ошибок."""
     for sample in ("sample_declining_ex_rr.json", "sample_star.json"):
         d = core.build_run_db(load_sample(sample))
-        analytics.compute_analytics(d.conn)
         person = d.conn.execute("SELECT person_key FROM person LIMIT 1").fetchone()[0]
         metric = d.conn.execute(
             "SELECT name FROM metric WHERE depth = 1 LIMIT 1"

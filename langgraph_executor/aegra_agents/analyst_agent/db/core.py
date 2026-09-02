@@ -18,6 +18,7 @@ from typing import Any, Iterator
 
 from ...shared.peer_levels import level_order
 from ...shared.text_similarity import similarity_ratio
+from . import analytics as analytics_mod
 from . import loader
 from .loader import MetricRec, ParsedDataset
 from .schema_doc import build_schema_doc as schema_doc
@@ -119,6 +120,16 @@ def _build_hierarchy(
     for norm in metrics:
         resolve(norm, frozenset())
     return out
+
+
+def _apply_guessed_kinds(conn: sqlite3.Connection, parsed: ParsedDataset) -> None:
+    """Вид показателя по названию — без него ранг получал бы проценты и вердикт
+    «лучше плана», хотя это позиция, а не уровень."""
+    for norm, rec in parsed.metrics.items():
+        conn.execute(
+            "UPDATE metric SET kind = ? WHERE name_norm = ?",
+            (loader.guess_kind(rec.name, rec.description), norm),
+        )
 
 
 def _insert_dataset(conn: sqlite3.Connection, parsed: ParsedDataset, report: BuildReport) -> None:
@@ -422,8 +433,13 @@ def build_run_db(
     *,
     knowledge: dict[str, Any] | None = None,
     deviations: list[dict[str, Any]] | None = None,
+    compute: bool = True,
 ) -> RunDb:
-    """JSON датасета (+ агрегаты peer-групп) → готовая к запросам база."""
+    """JSON датасета (+ агрегаты peer-групп) → готовая к запросам база.
+
+    ``compute=False`` отдаёт базу без производных полей — нужно только тестам
+    паритета, которые сверяют расчёт формул отдельно от подавления процентов.
+    """
     parsed = loader.parse_dataset(raw_dataset if isinstance(raw_dataset, dict) else {})
     report = BuildReport(
         skipped_empty_leaves=parsed.report.skipped_empty_leaves,
@@ -432,13 +448,22 @@ def build_run_db(
     )
     conn = _connect()
     _insert_dataset(conn, parsed, report)
+    # Вид показателя нужен ДО расчёта аналитики: у рангов и вкладов
+    # относительные проценты подавляются (см. analytics.apply_metric_kinds).
+    _apply_guessed_kinds(conn, parsed)
     _insert_aggregates(conn, loader.parse_aggregates(raw_aggregates), report)
     if sqlite3.sqlite_version_info >= (3, 25):
         conn.executescript(_SERIES_VIEW)
     else:  # pragma: no cover — зависит от сборки SQLite на проме
         report.warnings.append("SQLite < 3.25: вью v_series недоступна")
     conn.commit()
-    return RunDb(conn, report)
+    db = RunDb(conn, report)
+    if compute:
+        # Готовая база = данные + производные поля + подавление процентов у
+        # показателей, которым проценты не идут (ранги, вклады).
+        analytics_mod.compute_analytics(conn)
+        analytics_mod.apply_kinds_from_catalog(conn)
+    return db
 
 
 __all__ = ["BuildReport", "MetricRef", "RunDb", "build_run_db", "schema_doc"]

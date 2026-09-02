@@ -24,7 +24,6 @@ def _ctx(dataset=None, **kw):
                                           plan=50.0, influent_percent=60)]),
     ])
     db = core.build_run_db(dataset)
-    analytics.compute_analytics(db.conn)
     devs = builder.build_deviations(db, focus_person_key=PERSON)
     return RunContext(
         db=db,
@@ -152,7 +151,6 @@ def test_peer_context_renders_levels():
                          aggregates_ids=["a1"]),
         aggregates,
     )
-    analytics.compute_analytics(db.conn)
     ctx = RunContext(db=db, person_key=PERSON, direction_key="d",
                      ledger=ledger.DeviationLedger(db, [], turn=1))
     out = _call(build_tools(ctx), "peer_context", metric="Продажи")

@@ -35,7 +35,6 @@ def test_list_templates():
 
 def test_template_output_matches_in_process():
     db = core.build_run_db(load_sample(SAMPLE.name))
-    analytics.compute_analytics(db.conn)
     person = db.conn.execute("SELECT person_key FROM person LIMIT 1").fetchone()[0]
     metric = db.conn.execute("SELECT name FROM metric WHERE depth = 1 LIMIT 1").fetchone()[0]
     expected = sqlrunner.render_markdown(

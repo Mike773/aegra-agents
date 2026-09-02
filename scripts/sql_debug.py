@@ -61,7 +61,6 @@ def _load_db(args: argparse.Namespace) -> core.RunDb:
         else None
     )
     db = core.build_run_db(dataset, aggregates)
-    analytics.compute_analytics(db.conn)
     return db
 
 

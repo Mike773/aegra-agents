@@ -122,7 +122,6 @@ def test_fits_budget_on_production_scale():
     from langgraph_executor.aegra_agents.analyst_agent.db import enrich
 
     db = core.build_run_db(make_synthetic_dataset(n_level1=100, depth=5, periods=6))
-    analytics.compute_analytics(db.conn)
     text = prompts.compose_system_prompt(
         _ctx(
             schema_doc=core.schema_doc(db),

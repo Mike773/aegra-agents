@@ -16,6 +16,7 @@ import logging
 import re
 from typing import Any
 
+from ..analyst_agent.db.loader import guess_kind as _guess_kind_by_name
 from .types import (
     DEFAULT_KIND,
     KNOWLEDGE_VERSION,
@@ -75,17 +76,8 @@ TOOL_SCHEMA = {
 
 
 def guess_kind(entry: CatalogEntry) -> str:
-    """Вид показателя по названию — работает и без находок в базе знаний.
-
-    Заменяет прежний отдельный LLM-классификатор: относительные проценты
-    подавляются у «вкладов» и «индексов», а их видно по самому названию.
-    """
-    text = f"{entry.metric_name} {entry.metric_description}".casefold()
-    if re.search(r"\bранг\b|\bместо\b|\bпозици|\bиндекс", text):
-        return "индекс"
-    if re.search(r"\bвклад\b|\bвлияни|\bразниц|\bдельт|\bприрост\b|\bотклонени", text):
-        return "вклад"
-    return DEFAULT_KIND
+    """Вид показателя по названию — та же эвристика, что при сборке базы."""
+    return _guess_kind_by_name(entry.metric_name, entry.metric_description)
 
 
 def build_queries(entry: CatalogEntry) -> list[str]:

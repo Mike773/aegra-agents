@@ -15,7 +15,6 @@ PERSON = "100500"
 
 def _db(dataset, aggregates=None):
     d = core.build_run_db(dataset, aggregates)
-    analytics.compute_analytics(d.conn)
     return d
 
 

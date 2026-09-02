@@ -22,7 +22,6 @@ from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core, en
 
 def _db(dataset, aggregates=None):
     d = core.build_run_db(dataset, aggregates)
-    analytics.compute_analytics(d.conn)
     return d
 
 

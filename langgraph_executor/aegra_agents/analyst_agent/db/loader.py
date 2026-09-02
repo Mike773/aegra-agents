@@ -44,6 +44,30 @@ def metric_key(name: Any, description: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# Виды показателей: относительные проценты осмысленны только у «уровня».
+# У «вклада» (знаковая величина, центр у нуля) и «индекса» (ранг, место) деление
+# на базу даёт бессмыслицу и даже переворачивает вердикт динамики.
+VALID_KINDS = ("уровень", "вклад", "индекс")
+DEFAULT_KIND = "уровень"
+
+_INDEX_RE = re.compile(r"\bранг\b|\bместо\b|\bпозици|\bиндекс")
+_SHARE_RE = re.compile(r"\bвклад\b|\bвлияни|\bразниц|\bдельт|\bприрост\b|\bотклонени")
+
+
+def guess_kind(name: Any, description: Any = None) -> str:
+    """Вид показателя по его названию и описанию.
+
+    Работает без базы знаний, поэтому проценты у рангов подавляются даже когда
+    кэш трактовок недоступен. Трактовка из wiki, если она есть, вид уточняет.
+    """
+    text = f"{name or ''} {description or ''}".casefold()
+    if _INDEX_RE.search(text):
+        return "индекс"
+    if _SHARE_RE.search(text):
+        return "вклад"
+    return DEFAULT_KIND
+
+
 def _is_empty_fact(value: Any) -> bool:
     """Факт «пустой» = None или пустая строка. Ноль — валидный факт."""
     if value is None:
@@ -399,6 +423,8 @@ def parse_aggregates(data: Any) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "DEFAULT_KIND",
+    "VALID_KINDS",
     "FactRec",
     "LoadReport",
     "MetricRec",
@@ -412,4 +438,5 @@ __all__ = [
     "parse_aggregates",
     "parse_dataset",
     "parse_rank",
+    "guess_kind",
 ]
