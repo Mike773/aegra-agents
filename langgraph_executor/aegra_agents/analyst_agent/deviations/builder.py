@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Iterable
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator
 
 from ..db.analytics import direction_better
 from . import rules
@@ -273,6 +274,18 @@ def materialize(db: Any, deviations: list[dict[str, Any]]) -> int:
         r["person_key"]: r["person_id"]
         for r in conn.execute("SELECT person_id, person_key FROM person")
     }
+    writable = getattr(db, "writable", None)
+    with writable() if writable else _nullcontext():
+        _write_deviations(conn, deviations, metric_ids, person_ids)
+    return len(deviations)
+
+
+@contextmanager
+def _nullcontext() -> Iterator[None]:
+    yield
+
+
+def _write_deviations(conn, deviations, metric_ids, person_ids) -> None:
     conn.execute("DELETE FROM deviation")
     for d in deviations:
         conn.execute(
@@ -297,7 +310,6 @@ def materialize(db: Any, deviations: list[dict[str, Any]]) -> int:
             ),
         )
     conn.commit()
-    return len(deviations)
 
 
 __all__ = ["build_deviations", "materialize"]

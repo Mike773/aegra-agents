@@ -11,9 +11,10 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ...shared.peer_levels import level_order
 from ...shared.text_similarity import similarity_ratio
@@ -345,6 +346,19 @@ class RunDb:
     def __init__(self, conn: sqlite3.Connection, report: BuildReport) -> None:
         self.conn = conn
         self.report = report
+        # Защита text2sql, если она установлена на это соединение. Наши
+        # собственные записи (карта отклонений) идут через writable().
+        self.guard: Any = None
+
+    @contextmanager
+    def writable(self) -> Iterator[None]:
+        """Временно снимает read-only защиту для НАШИХ записей, не для SQL модели."""
+        guard = self.guard
+        if guard is None:
+            yield
+            return
+        with guard.writable():
+            yield
 
     @property
     def has_stars(self) -> bool:
