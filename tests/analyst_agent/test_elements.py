@@ -318,3 +318,14 @@ def test_prompt_block_skips_zero_change():
     text = deviations_block(builder.build_deviations(db, focus_person_key=PERSON))
     assert "+0.0 %" not in text
     assert "-0.0 %" not in text
+
+
+def test_profile_says_distinct_element_values():
+    """«Разрезов: N» в профиле — это разные ЗНАЧЕНИЯ по всей базе, а не число
+    разрезов показателя; формулировка не должна вводить в заблуждение."""
+    db = core.build_run_db(make_dataset_obj(
+        _elements("Продажи", 3) + _elements("Качество", 3)
+    ))
+    text = enrich.dataset_profile_block(db)
+    assert "Разных значений разрезов: 3" in text
+    assert "в каталоге" in text

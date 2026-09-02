@@ -82,7 +82,13 @@ def dataset_profile_block(db: Any) -> str:
             "последняя дата может отличаться — смотри дату у самого показателя."
         )
     if p["n_elements"]:
-        lines.append(f"- Разрезов: {p['n_elements']}.")
+        # Считаются РАЗНЫЕ значения разрезов по всей базе, а не пары
+        # показатель×разрез: у показателя их бывают сотни, и число здесь — только
+        # масштаб. Сколько разрезов у конкретного показателя — в каталоге.
+        lines.append(
+            f"- Разных значений разрезов: {p['n_elements']} "
+            "(сколько у конкретного показателя — в каталоге)."
+        )
     levels = db.conn.execute(
         "SELECT DISTINCT level_name, total_objects FROM peer_aggregate "
         "WHERE level_name IS NOT NULL ORDER BY level_order"
