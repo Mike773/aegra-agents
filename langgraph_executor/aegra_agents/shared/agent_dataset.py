@@ -51,10 +51,11 @@ def _demo_aggregates(dt: str, mean_fact: float) -> dict[str, Any]:
 
 
 class GetBatchAgentAggregateDatasetByFiltersComponent:
-    """Запрос batch-агрегатов peer-групп по уровням ORG/TERR/OFFICE.
+    """Запрос предагрегатов peer-групп.
 
-    Args: как у ``GetBatchAgentDatasetByFiltersComponent`` — те же
-    ``dataset_name`` и ``filters``.
+    Предагрегаты загружаются индивидуально: один вызов на один aggregate_id из
+    ``aggregates_ids`` персоны в датасете, ``filters`` вида
+    ``[{"object_type": "aggregate_id", "object_id": "182_m_777"}]``.
 
     Ответ: список ``{"dataset": {"level", "metrics": [...]}}``, у метрики —
     ``aggregates`` (текущий срез + ``history``) и дети в ``children_metrics``.

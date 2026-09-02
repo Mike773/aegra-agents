@@ -30,6 +30,114 @@ agent_dataset.GetBatchAgentDatasetByFiltersComponent.build_json_output = (
 )
 
 
+# Профили демо-групп: (код уровня, название для выдачи, множитель среднего, доля
+# выполняющих план, размер группы). Название приходит с данными полем level_name —
+# именно его подставляет рендер. Группы РАЗЛИЧАЮТСЯ по всем показателям: с
+# одинаковыми числами модели нечего сказать про широкие группы, и в ответе
+# остаётся только референсная (самая узкая).
+_LEVEL_PROFILES = (
+    ("OFFICE", "по офису", 1.00, 46.0, 40),
+    ("TERR", "по территории", 1.12, 52.0, 900),
+    ("ORG", "по всему банку", 1.25, 58.0, 12000),
+)
+
+
+def _sample_agg_id(m):
+    """Демо-id предагрегата корневой метрики (в проде — вида «182_m_777»)."""
+    return f"agg_{m.get('id') or m['metric_name']}"
+
+
+def _inject_aggregates_ids(data):
+    """Кладёт персонам aggregates_ids рядом с metrics, как прод-компонент.
+
+    Сэмплы samples_v2 — старой формы, без этого поля; файлы не редактируем,
+    инъектируем на лету по корневым метрикам персоны. Без поля load_data v4
+    не сделает ни одного вызова предагрегатов.
+    """
+    for person in [data.get("me"), *(data.get("employees") or [])]:
+        if not isinstance(person, dict):
+            continue
+        ids = []
+        for m in person.get("metrics") or []:
+            if m.get("metric_name") and isinstance(m.get("fact"), (int, float)):
+                agg_id = _sample_agg_id(m)
+                if agg_id not in ids:
+                    ids.append(agg_id)
+        person["aggregates_ids"] = ids
+
+
+def _peer_aggregates_by_id(data):
+    """Демо-предагрегаты peer-групп ПОД ИМЕНА МЕТРИК сэмпла, по aggregate_id.
+
+    Штатная заглушка отдаёт метрику «Метрика тест», которой в сэмпле нет, — тогда
+    peer_context ничего не находит и сравнение с коллегами в ответе не проверишь.
+    Здесь берём корневые метрики сэмпла и строим по ним группы с фактом чуть выше
+    личного, историю за два прошлых периода и топ-20% заметно выше. Индекс — по
+    aggregate_id: предагрегаты загружаются индивидуально, по одному id на вызов.
+    """
+    people = [p for p in [data.get("me"), *(data.get("employees") or [])] if p]
+    seen, roots = set(), []
+    for person in people:
+        for m in person.get("metrics") or []:
+            name = m.get("metric_name")
+            fact = m.get("fact")
+            if not name or name in seen or not isinstance(fact, (int, float)):
+                continue
+            seen.add(name)
+            roots.append(m)
+
+    def _metric_entry(m, level_mult, hit_rate, objects):
+        fact = m["fact"]
+
+        def _slice(dt, mult):
+            scale = level_mult * mult
+            return {
+                "dt": dt, "calc_period": m.get("calc_period") or "Месяц",
+                "mean_fact": round(fact * 1.1 * scale, 2),
+                "mean_plan": round((m.get("plan") or fact) * 1.0, 2),
+                "mean_ex": 98.0, "median": round(fact * 1.05 * scale, 2),
+                "hit_rate": hit_rate,
+                "top20_mean_fact": round(fact * 1.4 * scale, 2),
+                "iqr": round(abs(fact) * 0.3, 2), "cv": 42.0,
+                "total_objects": objects,
+            }
+
+        return {
+            "metric_id": str(m.get("id") or m["metric_name"]),
+            "metric_name": m["metric_name"],
+            "aggregates": {
+                **_slice(m.get("date") or "2026-07-30", 1.0),
+                "history": [
+                    _slice("2026-05-31", 1.08), _slice("2026-04-30", 1.12),
+                ],
+            },
+        }
+
+    return {
+        _sample_agg_id(m): [
+            {"dataset": {"level": lvl, "level_name": name,
+                         "metrics": [_metric_entry(m, mult, hit, objs)]}}
+            for lvl, name, mult, hit, objs in _LEVEL_PROFILES
+        ]
+        for m in roots
+    }
+
+
+_inject_aggregates_ids(_DATA)
+_AGGS_BY_ID = _peer_aggregates_by_id(_DATA)
+
+
+def _aggs_for_filters(self):
+    """Ответ на индивидуальный запрос: object_id из filters → записи этого id."""
+    flt = self.filters[0] if isinstance(self.filters, list) and self.filters else {}
+    return _AGGS_BY_ID.get(str(flt.get("object_id")), [])
+
+
+agent_dataset.GetBatchAgentAggregateDatasetByFiltersComponent.build_json_output = (
+    _aggs_for_filters
+)
+
+
 class UsageTracker(BaseCallbackHandler):
     def __init__(self):
         self.calls = []
@@ -66,7 +174,12 @@ async def main():
     # E2E_ORCHESTRATOR=v2 гоняет бизнес-оркестратор (analytic_orchestrator_v2):
     # многоуровневый разбор по бизнес-методологии + блок «Что делаем дальше?» +
     # завершение через post_insights. По умолчанию — прод-оркестратор.
-    if os.environ.get("E2E_ORCHESTRATOR", "").strip().lower() in {"v2", "2", "business"}:
+    which = os.environ.get("E2E_ORCHESTRATOR", "").strip().lower()
+    if which in {"v4", "4"}:
+        # v4: аналитик json_analyzer_v5, предагрегаты peer-групп, инсайты по
+        # source_type/source_id, блок продолжения без нумерованных вариантов.
+        from langgraph_executor.aegra_agents.analytic_orchestrator_v4.graph import graph
+    elif which in {"v2", "2", "business"}:
         from langgraph_executor.aegra_agents.analytic_orchestrator_v2.graph import graph
     else:
         from langgraph_executor.aegra_agents.analytic_orchestrator.graph import graph
@@ -81,16 +194,26 @@ async def main():
 
     tracker = UsageTracker()
     state = {"messages": [HumanMessage(content=briefing)]}
-    config = {
-        "configurable": {
-            "boss_tabnum": "1000",
-            "employee_tabnum": "2000",
-            "position": "оператор",
-            "thread_id": "e2e-orch-1",
-            "wiki_grounding_enabled": False,
-        },
-        "callbacks": [tracker],
+    configurable = {
+        "boss_tabnum": "1000",
+        "employee_tabnum": "2000",
+        # Позиция задаёт direction_key wiki-поиска: страницы в базе лежат по
+        # направлениям, E2E_POSITION позволяет прогнать под наполненное.
+        "position": os.environ.get("E2E_POSITION", "оператор"),
+        "thread_id": "e2e-orch-1",
+        # По умолчанию wiki-grounding выключен (фокус прогона — json_analyzer);
+        # E2E_WIKI=1 включает настоящий вызов easyrag (нужна база wiki_rag).
+        "wiki_grounding_enabled": bool(os.environ.get("E2E_WIKI")),
     }
+    # Только для v4: привязка инсайтов, флаг предагрегатов и режим описания хода.
+    if os.environ.get("E2E_SOURCE_ID"):
+        configurable["source_type"] = os.environ.get("E2E_SOURCE_TYPE", "meeting")
+        configurable["source_id"] = os.environ["E2E_SOURCE_ID"]
+    if os.environ.get("E2E_PEER_AGGREGATES"):
+        configurable["use_peer_aggregates"] = os.environ["E2E_PEER_AGGREGATES"]
+    if os.environ.get("E2E_DESCRIBE_ANSWER"):
+        configurable["describe_answer"] = os.environ["E2E_DESCRIBE_ANSWER"]
+    config = {"configurable": configurable, "callbacks": [tracker]}
     result = await graph.ainvoke(state, config)
 
     print("=" * 70 + "\nREASONING TRACE (шаги хода):")
@@ -104,6 +227,12 @@ async def main():
     print("=" * 70 + "\nmetrics загружены:", result.get("metrics") is not None,
           "| direction_key:", result.get("direction_key"),
           "| metrics_error:", result.get("metrics_error"))
+
+    # Факты аналитика, которые ушли в системный контекст ответчика: если итоговый
+    # ответ расходится с ними — проблема в промпте оркестратора, а не в аналитике.
+    summary = result.get("metrics_summary")
+    print("=" * 70 + "\nРАЗБОР АНАЛИТИКА (вход ответчика):")
+    print(summary if summary else "<пусто>")
 
     tracker.report()
 

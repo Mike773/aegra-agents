@@ -1,0 +1,1320 @@
+"""Типизированные инструменты агента-аналитика.
+
+Агент НИКОГДА не пишет SQL — он только вызывает эти инструменты с параметрами.
+Каждый инструмент внутри выполняет параметрический запрос к in-memory SQLite
+(метрики + производная аналитика) либо семантический поиск по in-memory индексу
+эмбеддингов (EmbeddingIndex).
+
+Выдача намеренно компактная: пустые поля убираются, числа округляются —
+контекст чат-модели ограничен.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Callable
+
+from langchain_core.tools import StructuredTool
+
+from . import analytics
+from .sqlite_store import SqliteStore
+from .store_cache import EmbeddingIndex
+
+def _blank_to_none(value: Any) -> Any:
+    """Пустая/пробельная строка → None.
+
+    Некоторые модели присылают аргумент как "" вместо опускания, если считают
+    фильтр ненужным. Без нормализации это превратится в WHERE col = '' и молча
+    даст 0 строк.
+    """
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
+def _dump(obj: Any) -> str:
+    """JSON-фолбэк: используется только в _safe при ошибке рендера. Основная
+    выдача инструментов — человекочитаемый рендер ниже."""
+    return json.dumps(obj, ensure_ascii=False, default=str)
+
+
+# --------------------------------------------------------------------------- #
+# Человекочитаемый рендер для GigaChat: Markdown-таблицы и фразовые списки вместо
+# сырого JSON. Русские самоописательные метки, единицы инлайн, без дублирующих
+# сырых чисел (trend 'рост/падение' и сырой zscore выкинуты — их смысл уже в
+# вердиктах trend_status/peer_status). Каждый рендер вызывается через _safe:
+# при любой ошибке отдаём прежний JSON, чтобы баг рендера не ломал инструмент.
+# --------------------------------------------------------------------------- #
+# Вердикты приходят из analytics в машинном виде со снейк-кейсом ('хуже_плана').
+# Внутри расчётов они так и остаются (на них завязаны сравнения в analytics.py), но
+# в выдачу для модели идут словами: снейк-кейс модель переносит в ответ дословно, и
+# служебная форма протекает пользователю. Множество закрытое — незнакомое значение
+# отдаём как есть, а не калечим слепой заменой подчёркиваний.
+_VERDICTS = frozenset({
+    "лучше_плана", "в_плане", "хуже_плана",
+    "лучше_бенчмарка", "на_уровне_бенчмарка", "хуже_бенчмарка",
+    "лучше_коллег", "на_уровне_коллег", "хуже_коллег",
+    "лучше_группы", "на_уровне_группы", "хуже_группы",
+    "жёсткий_план", "мягкий_план", "обычный_план",
+})
+
+
+def _verdict(value: Any) -> str:
+    """Вердикт человеческими словами: 'хуже_плана' → 'хуже плана'."""
+    if value is None:
+        return ""
+    text = str(value)
+    return text.replace("_", " ") if text in _VERDICTS else text
+
+
+def _unit(measure_type: Any) -> str | None:
+    u = (measure_type or "").strip() if isinstance(measure_type, str) else ""
+    return u or None
+
+
+def _fmt_num(value: Any, unit: str | None = None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        value = round(value, 2)
+        if value == int(value):
+            value = int(value)
+    s = str(value)
+    return f"{s} {unit}" if unit else s
+
+
+def _pct(value: Any) -> str:
+    return "" if value is None else f"{_fmt_num(value)} %"
+
+
+def _delta_cell(pct: Any, abs_: Any, unit: str | None) -> str:
+    """Относительное изменение: процент, если он задан; иначе абсолютное изменение
+    с единицей (для знаковых/индексных метрик относительный % обнулён как
+    бессмысленный — показываем абсолют)."""
+    if pct is not None:
+        return f"{_fmt_num(pct)} %"
+    if abs_ is not None:
+        return _fmt_num(abs_, unit)
+    return ""
+
+
+# Вердикты, у которых нет величины отклонения: «в плане на 0.4 %» — бессмыслица.
+_NEUTRAL_VERDICTS = frozenset({
+    "в_плане", "на_уровне_бенчмарка", "на_уровне_коллег", "на_уровне_группы",
+    "стабильно",
+})
+
+
+def _verdict_delta(status: Any, pct: Any, abs_: Any, unit: str | None) -> str:
+    """Вердикт вместе со своей величиной ОДНОЙ фразой: «лучше плана на 27.72 %».
+
+    Раздельные «статус плана» и «отклонение от плана» модель склеивала неверно
+    двумя способами. Во-первых, голое число рядом с фактом читалось как ЗНАЧЕНИЕ
+    плана: «факт 22.99, отклонение 27.72» → «22.99 ниже плана 27.72», хотя метрика
+    план перевыполняет. Во-вторых, знак процента читался как «хорошо/плохо», хотя
+    он показывает направление ЗНАЧЕНИЯ (у 'обратной' метрики плюс — это хуже).
+
+    Поэтому величину даём по МОДУЛЮ: направление уже несёт слово-вердикт, а
+    отдельного числа, которое можно перетолковать, в выдаче не остаётся.
+    """
+    verdict = _verdict(status)
+    if not verdict:
+        return ""
+    if str(status) in _NEUTRAL_VERDICTS:
+        return verdict
+    if pct is not None:
+        return f"{verdict} на {_fmt_num(abs(pct))} %"
+    if abs_ is not None:
+        return f"{verdict} на {_fmt_num(abs(abs_), unit)}"
+    return verdict
+
+
+def _md_cell(value: Any) -> str:
+    return str(value).replace("|", "/").replace("\n", " ") if value not in (None, "") else ""
+
+
+def _md_table(rows: list[dict[str, Any]], columns: list[tuple[str, Any]]) -> str:
+    """Markdown-таблица. columns: список (заголовок, fn(row)->значение). Столбцы,
+    пустые во всех строках, выкидываются — один набор колонок подходит всем
+    row-инструментам (у compare отпадут peer-колонки, у rank — динамика и т.п.)."""
+    if not rows:
+        return ""
+    cells = [[fn(r) for (_, fn) in columns] for r in rows]
+    keep = [
+        i
+        for i in range(len(columns))
+        if any(cells[r][i] not in (None, "") for r in range(len(rows)))
+    ]
+    if not keep:
+        return ""
+    headers = [columns[i][0] for i in keep]
+    out = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for r in range(len(rows)):
+        out.append("| " + " | ".join(_md_cell(cells[r][i]) for i in keep) + " |")
+    return "\n".join(out)
+
+
+def _flat_columns() -> list[tuple[str, Any]]:
+    def plain(key: str) -> Any:
+        return lambda r: "" if r.get(key) is None else str(r.get(key))
+
+    def fact_with_unit(r: dict[str, Any]) -> str:
+        return _fmt_num(r.get("fact"), _unit(r.get("measure_type")))
+
+    def rank_cell(r: dict[str, Any]) -> str:
+        if r.get("peer_rank") is None:
+            return ""
+        pc = r.get("peer_count")
+        return f"{r['peer_rank']}/{pc}" if pc else str(r["peer_rank"])
+
+    def verdict(key: str) -> Any:
+        return lambda r: _verdict(r.get(key))
+
+    def rel_cell(r: dict[str, Any]) -> str:
+        if r.get("rel_status") is None:
+            return ""
+        pct = r.get("rel_change_pct")
+        status = _verdict(r["rel_status"])
+        return status if pct is None else f"{status} ({_fmt_num(pct)} п.п.)"
+
+    return [
+        ("сотрудник", plain("person_fio")),
+        ("метрика", plain("metric_name")),
+        # К какой звезде относится показатель (родитель-звезда). Пустая колонка
+        # отпадает сама (_md_table) — на обычном датасете её нет.
+        ("звезда", lambda r: r.get("star_name") or ""),
+        ("разрез", plain("element")),
+        ("период", plain("date")),
+        ("факт", fact_with_unit),
+        # Звезда: числа нет, результат — «да/нет». Колонка стоит на месте факта,
+        # который она заменяет, и отпадёт сама, когда звёзд в выдаче нет.
+        ("звезда получена", lambda r: (
+            "" if r.get("star_received") is None
+            else ("да" if r.get("star_received") else "нет")
+        )),
+        # План печатаем ЗНАЧЕНИЕМ рядом с фактом: без него модель достраивала план
+        # из процента отклонения и переворачивала вердикт.
+        ("план", lambda r: _fmt_num(r.get("plan"), _unit(r.get("measure_type")))),
+        # ex/rr приходят в данных не всегда — пустая колонка отпадёт сама (_md_table).
+        ("выполнение плана, %", lambda r: _pct(r.get("ex"))),
+        ("run rate", lambda r: _fmt_num(r.get("rr"), _unit(r.get("measure_type")))),
+        # Вердикт и его величина — ОДНОЙ ячейкой, разнести их обратно нельзя.
+        ("статус плана", lambda r: _verdict_delta(
+            r.get("plan_status"), r.get("plan_dev_pct"), r.get("plan_dev_abs"),
+            _unit(r.get("measure_type")))),
+        ("жёсткость плана", verdict("plan_rigidity")),
+        ("статус к бенчмарку", lambda r: _verdict_delta(
+            r.get("benchmark_status"), r.get("benchmark_dev_pct"),
+            r.get("benchmark_dev_abs"), _unit(r.get("measure_type")))),
+        ("динамика", lambda r: _verdict_delta(
+            r.get("pop_status"), r.get("pop_change_pct"), r.get("pop_change_abs"),
+            _unit(r.get("measure_type")))),
+        ("против группы", rel_cell),
+        ("тренд", plain("trend_status")),
+        ("ранг в команде", rank_cell),
+        ("против коллег", verdict("peer_status")),
+        ("аномалия", lambda r: "да" if r.get("is_anomaly") else ""),
+        # Флаг на самой звезде ничего не значит — печатаем только у детей.
+        ("влияет на звезду", lambda r: (
+            "да" if r.get("is_star_metric") and r.get("star_received") is None else ""
+        )),
+    ]
+
+
+def _meta_lines(result: dict[str, Any]) -> list[str]:
+    """Не-табличные пометки результата (усечение, разрезы вместо агрегата)."""
+    lines: list[str] = []
+    rows = result.get("rows", [])
+    if result.get("разрезы_вместо_агрегата"):
+        lines.append(str(result["разрезы_вместо_агрегата"]))
+    if result.get("truncated"):
+        shown = result.get("count", len(rows))
+        lines.append(
+            f"(показаны первые {shown} строк — самые значимые, по убыванию; это НЕ "
+            "полное число случаев. Сузь фильтрами metric/date/element.)"
+        )
+    elif rows:
+        lines.append(f"Строк: {len(rows)}.")
+    return lines
+
+
+def _render_rows(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return _render_error(result)
+    rows = result.get("rows", [])
+    meta = _meta_lines(result)
+    if not rows:
+        return "\n".join(meta) or "Ничего не найдено по заданным фильтрам."
+    table = _md_table(rows, _flat_columns())
+    return "\n".join(meta + ([table] if table else []))
+
+
+def _render_error(result: dict[str, Any]) -> str:
+    parts = [f"Ошибка: {result.get('error')}"]
+    if result.get("hint"):
+        parts.append(f"Подсказка: {result['hint']}")
+    for k in ("available_elements", "разрезы"):
+        if result.get(k):
+            parts.append(f"{k}: {', '.join(map(str, result[k]))}")
+    return "\n".join(parts)
+
+
+def _render_tree(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return _render_error(result)
+    rows = result.get("rows", [])
+    if not rows:
+        return "Дерево пустое."
+    lines: list[str] = []
+    if result.get("разрезы_вместо_агрегата"):
+        lines.append(str(result["разрезы_вместо_агрегата"]))
+    current_person = object()
+    multi_person = len({r.get("person_fio") for r in rows}) > 1
+    for r in rows:
+        if multi_person and r.get("person_fio") != current_person:
+            current_person = r.get("person_fio")
+            lines.append(f"Сотрудник: {current_person}")
+        depth = r.get("depth") or 1
+        indent = "  " * (depth - 1)
+        label = r.get("metric_name")
+        if r.get("element"):
+            label = f"{label} [{r['element']}]"
+        # У звезды числа нет: без этой ветки узел печатался бы как
+        # «Метрика: | план …» с пустым значением на месте факта.
+        is_star = r.get("star_received") is not None
+        if r.get("fact") is None and is_star:
+            head = f"{label} (звезда): " + (
+                "получена" if r["star_received"] else "НЕ получена"
+            )
+        else:
+            head = f"{label}: {_fmt_num(r.get('fact'), _unit(r.get('measure_type')))}"
+        parts = [head]
+        if r.get("is_star_metric") and not is_star:
+            parts.append(_influences_star(r.get("star_name")))
+        if r.get("ex") is not None:
+            parts.append(f"выполнение плана {_pct(r['ex'])}")
+        if r.get("rr") is not None:
+            parts.append(f"run rate {_fmt_num(r['rr'], _unit(r.get('measure_type')))}")
+        if r.get("influent_percent") is not None:
+            parts.append(f"влияние {_fmt_num(r['influent_percent'])}%")
+        elif r.get("influent_percent_missing"):
+            rel = r.get("inferred_relation")
+            parts.append("влияние н/д" + (f" (связь: {rel})" if rel else ""))
+        if r.get("plan") is not None:
+            parts.append(f"план {_fmt_num(r['plan'], _unit(r.get('measure_type')))}")
+        if r.get("plan_status"):
+            parts.append(_verdict_delta(
+                r.get("plan_status"), r.get("plan_dev_pct"), r.get("plan_dev_abs"),
+                _unit(r.get("measure_type"))))
+        if r.get("pop_status"):
+            parts.append("динамика " + _verdict_delta(
+                r.get("pop_status"), r.get("pop_change_pct"), r.get("pop_change_abs"),
+                _unit(r.get("measure_type"))))
+        lines.append(f"{indent}- " + " | ".join(parts))
+    return "\n".join(lines)
+
+
+def _render_schema(ov: dict[str, Any]) -> str:
+    lines = ["Состав датасета:"]
+    lines.append(f"- Периоды: {', '.join(ov.get('dates') or [])}")
+    metrics = ov.get("metrics") or []
+    mparts = []
+    for m in metrics:
+        tag = "agg+" if m.get("has_aggregate", True) else "agg-"
+        u = _unit(m.get("measure_type")) or "—"
+        elems = m.get("elements") or []
+        e = f" {{разрезы: {', '.join(elems)}}}" if elems else ""
+        flags = ""
+        if m.get("is_star"):
+            flags += ", звезда"
+        if m.get("is_star_metric"):
+            flags += ", " + _influences_star(m.get("star_of"))
+        mparts.append(
+            f"{m['metric_name']} ({m.get('metric_type')}, {u}) [{tag}{flags}]{e}"
+        )
+    lines.append(f"- Метрики ({len(metrics)}): " + "; ".join(mparts))
+    if ov.get("elements"):
+        lines.append(f"- Разрезы (element): {', '.join(ov['elements'])}")
+    people = ov.get("people") or []
+    managers = sum(1 for p in people if p.get("person_is_me"))
+    lines.append(f"- Людей: {len(people)} ({managers} рук. + {len(people) - managers} сотр.)")
+    return "\n".join(lines)
+
+
+def _render_describe(d: dict[str, Any]) -> str:
+    if d.get("error"):
+        return _render_error(d)
+    if d.get("is_star"):
+        # Направление ('меньше=лучше') для звезды бессмысленно: у неё нет
+        # величины, которую можно было бы сравнивать.
+        name = d.get("metric_name")
+        return (
+            f"Метрика «{name}»: "
+            f"{d.get('metric_description') or 'описание отсутствует'}\n"
+            "Вид: ЗВЕЗДА — именной показатель без числа: на последней дате она "
+            "либо получена, либо нет. Плана, динамики, тренда и места среди "
+            "коллег у неё не существует. Что на неё влияет и почему она не "
+            f"получена — star_status или metric_tree(metric='{name}')."
+        )
+    else:
+        dir_hint = (
+            "меньше=лучше" if d.get("metric_type") == "обратная" else "больше=лучше"
+        )
+        out = (
+            f"Метрика «{d.get('metric_name')}»: "
+            f"{d.get('metric_description') or 'описание отсутствует'}\n"
+            f"Тип: {d.get('metric_type')} ({dir_hint}). "
+            f"Единица: {_unit(d.get('measure_type')) or '—'}. "
+            f"Период расчёта: {d.get('calc_period') or '—'}."
+        )
+        kind = d.get("kind")
+        if kind and kind != "уровень":
+            out += (
+                f"\nВид: {kind} — относительное %-сравнение неуместно; "
+                "оценивай по факту (уровню) и абсолютному изменению."
+            )
+    if d.get("is_star_metric"):
+        star_of = d.get("star_of")
+        out += (
+            f"\nВлияет на получение звезды «{star_of}»." if star_of
+            else "\nВлияет на получение звезды."
+        )
+    return out
+
+
+def _render_people(people: list[dict[str, Any]]) -> str:
+    if not people:
+        return "Людей по фильтрам не найдено."
+    cols = [
+        ("сотрудник", lambda r: r.get("person_fio") or ""),
+        ("должность", lambda r: r.get("person_post") or ""),
+        ("подразделение", lambda r: r.get("person_depart") or ""),
+        ("роль", lambda r: "руководитель" if r.get("person_is_me") else "сотрудник"),
+    ]
+    return f"Людей: {len(people)}.\n" + _md_table(people, cols)
+
+
+def _render_resolve(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return _render_error(result)
+    kind = result.get("kind")
+    matches = result.get("matches") or []
+    if not matches:
+        return f"Совпадений ({kind}) не найдено."
+    if kind == "person":
+        return _render_people(matches)
+    lines = [f"Кандидаты ({kind}), по убыванию похожести:"]
+    for i, m in enumerate(matches, 1):
+        name = m.get("canonical") or m.get("content")
+        sim = m.get("similarity")
+        lines.append(f"{i}. {name}" + (f" (похожесть {sim})" if sim is not None else ""))
+    return "\n".join(lines)
+
+
+def _render_related(metric: str, edges: list[dict[str, Any]]) -> str:
+    if not edges:
+        return f"Связанных метрик для «{metric}» в графе нет."
+    cols = [
+        ("источник", lambda r: r.get("source") or ""),
+        ("связь", lambda r: r.get("relation") or ""),
+        ("цель", lambda r: r.get("target") or ""),
+        ("сила", lambda r: r.get("strength") or ""),
+        ("обоснование", lambda r: r.get("rationale") or ""),
+    ]
+    return (
+        f"Связи метрики «{metric}» (ЭВРИСТИКА из названий/описаний, "
+        "не из значений — помечай как предположительные):\n" + _md_table(edges, cols)
+    )
+
+
+def _render_aggregate(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return _render_error(result)
+    groups = result.get("groups") or []
+    head = (
+        f"Агрегация «{result.get('metric')}» по {result.get('group_by')} "
+        f"({len(groups)} групп):"
+    )
+    if not groups:
+        return head + "\nпусто."
+    cols = [
+        ("группа", lambda r: r.get("grp") or ""),
+        ("avg", lambda r: _fmt_num(r.get("avg"))),
+        ("min", lambda r: _fmt_num(r.get("min"))),
+        ("max", lambda r: _fmt_num(r.get("max"))),
+        ("sum", lambda r: _fmt_num(r.get("sum"))),
+        ("кол-во", lambda r: _fmt_num(r.get("n") if r.get("n") is not None else r.get("count"))),
+    ]
+    return head + "\n" + _md_table(groups, cols)
+
+
+def _render_summary(s: dict[str, Any]) -> str:
+    scope = s.get("scope") or {}
+    lines = [
+        "Сводка по датасету:",
+        f"- Охват: {scope.get('people')} чел ({scope.get('employees')} сотр.), "
+        f"метрик {scope.get('metric_types')}, периоды {', '.join(scope.get('dates') or [])}.",
+        f"- Последний период: {s.get('latest_date')}.",
+    ]
+    by_metric = s.get("by_metric_latest") or []
+    if by_metric:
+        cols = [
+            ("метрика", lambda r: r.get("metric") or ""),
+            ("тип", lambda r: r.get("metric_type") or ""),
+            ("среднее", lambda r: _fmt_num(r.get("avg_fact"))),
+            ("ниже плана, шт", lambda r: _fmt_num(r.get("below_plan"))),
+            ("аномалий", lambda r: _fmt_num(r.get("anomalies"))),
+            # Пусто у всех обычных метрик — колонка отпадёт (_md_table).
+            ("звезда", lambda r: r.get("star") or ""),
+        ]
+        lines.append("Ключевые метрики на последнем периоде:")
+        lines.append(_md_table(by_metric, cols))
+    anomalies = s.get("top_anomalies_latest") or []
+    if anomalies:
+        cols = [
+            ("сотрудник", lambda r: r.get("person_fio") or ""),
+            ("метрика", lambda r: r.get("metric_name") or ""),
+            ("разрез", lambda r: r.get("element") or ""),
+            ("факт", lambda r: _fmt_num(r.get("fact"))),
+            ("z-score", lambda r: _fmt_num(r.get("zscore"))),
+        ]
+        lines.append("Топ аномалий:")
+        lines.append(_md_table(anomalies, cols))
+    tc = s.get("trend_counts_level1") or {}
+    if tc:
+        lines.append(
+            "Динамика метрик 1-го уровня: "
+            + ", ".join(f"{k}: {v}" for k, v in tc.items())
+        )
+    return "\n".join(lines)
+
+
+def _overview_headline(h: dict[str, Any]) -> str:
+    """Одна строка по метрике: имя [разрез]: факт, план-статус, динамика."""
+    name = h.get("metric") or "—"
+    if h.get("element"):
+        name = f"{name} [{h['element']}]"
+    unit = _unit(h.get("measure_type"))
+    parts = [f"{name}: {_fmt_num(h.get('fact'), unit)}"]
+    if h.get("ex") is not None:
+        parts.append(f"выполнение плана {_pct(h['ex'])}")
+    if h.get("rr") is not None:
+        parts.append(f"run rate {_fmt_num(h['rr'], unit)}")
+    if h.get("plan") is not None:
+        parts.append(f"план {_fmt_num(h.get('plan'), unit)}")
+    if h.get("plan_status"):
+        parts.append(_verdict_delta(
+            h.get("plan_status"), h.get("plan_dev_pct"), h.get("plan_dev_abs"), unit))
+    # Динамика и тренд — РАЗНЫЕ вердикты: величину изменения приклеиваем только к
+    # pop_status (она про период к периоду), тренд печатаем словом без числа.
+    if h.get("pop_status"):
+        parts.append("динамика " + _verdict_delta(
+            h.get("pop_status"), h.get("pop_change_pct"), h.get("pop_change_abs"), unit))
+    if h.get("trend_status"):
+        parts.append(f"тренд {h['trend_status']}")
+    if h.get("is_star_metric"):
+        parts.append("влияет на звезду")
+    return ", ".join(parts)
+
+
+def _overview_driver(d: dict[str, Any]) -> str:
+    name = d.get("metric") or "—"
+    bits: list[str] = []
+    if d.get("influent_percent") is not None:
+        bits.append(f"вес {_fmt_num(d['influent_percent'])}%")
+    elif d.get("share_pct") is not None:  # без бизнес-веса — доля по изменению
+        bits.append(f"доля {_fmt_num(d['share_pct'])}%")
+    if d.get("plan_status"):
+        bits.append(_verdict(d["plan_status"]))
+    if d.get("ex") is not None:
+        bits.append(f"вып. {_pct(d['ex'])}")
+    # Величина изменения — внутри фразы вердикта («ухудшение на 61.61 %»), иначе
+    # знак Δ рядом со словом-вердиктом читается как «хорошо/плохо».
+    if d.get("pop_status"):
+        bits.append(_verdict_delta(
+            d.get("pop_status"), d.get("pop_change_pct"), d.get("pop_change_abs"),
+            _unit(d.get("measure_type"))))
+    elif d.get("trend_status"):
+        bits.append(str(d["trend_status"]))
+        # Тренд без вердикта динамики: величину дать негде, но для «больше всего
+        # изменилось» (share не задана) она и есть критерий ранжирования.
+        if d.get("share_pct") is None:
+            delta = _delta_cell(
+                d.get("pop_change_pct"), d.get("pop_change_abs"),
+                _unit(d.get("measure_type"))
+            )
+            if delta:
+                bits.append(f"Δ {delta}")
+    return name + (f" ({', '.join(bits)})" if bits else "")
+
+
+def _overview_segment(s: dict[str, Any]) -> str:
+    unit = _unit(s.get("measure_type"))
+    el = s.get("element") or "—"
+    val = _fmt_num(s.get("fact"), unit)
+    ch = _delta_cell(s.get("pop_change_pct"), s.get("pop_change_abs"), unit)
+    return f"{el} {val}".strip() + (f" (Δ {ch})" if ch else "")
+
+
+def _overview_chain(node: dict[str, Any], indent: str) -> list[str]:
+    """Драйверы узла + разрезы + рекурсивный спуск в доминирующий драйвер."""
+    lines: list[str] = []
+    drivers = node.get("drivers") or []
+    if drivers:
+        lines.append(indent + "драйверы: " + "; ".join(_overview_driver(d) for d in drivers))
+    seg = node.get("by_segments")
+    if seg and (seg.get("worst") or seg.get("best")):
+        worst = seg.get("worst") or []
+        worst_els = {s.get("element") for s in worst}
+        best = [s for s in (seg.get("best") or []) if s.get("element") not in worst_els]
+        parts = []
+        if worst:
+            parts.append("худшие: " + "; ".join(_overview_segment(s) for s in worst))
+        if best:
+            parts.append("лучшие: " + "; ".join(_overview_segment(s) for s in best))
+        if parts:
+            lines.append(indent + f"по разрезам ({seg.get('label')}) — " + "; ".join(parts))
+    mover = node.get("biggest_mover")
+    if mover:
+        lines.append(indent + "больше всего изменилось: " + _overview_driver(mover))
+    main = node.get("main_driver")
+    if main:
+        lines.append(indent + "↳ " + _overview_headline(main))
+        if main.get("note"):
+            lines.append(indent + "  " + str(main["note"]))
+        lines.extend(_overview_chain(main, indent + "  "))
+    return lines
+
+
+def _render_overview(o: dict[str, Any]) -> str:
+    """Фразовый рендер карты ситуации: зоны + причинная цепочка вглубь."""
+    if o.get("error"):
+        return _render_error(o)
+    head = f"Обзор ситуации: {o.get('person_fio') or '—'}, период {o.get('date')}"
+    if o.get("prev_date"):
+        head += f" (сравнение с {o['prev_date']})"
+    lines = [head + "."]
+    if o.get("note"):
+        lines.append(str(o["note"]))
+
+    problems = o.get("problems") or []
+    lines.append("")
+    if problems:
+        lines.append("Проблемные зоны:")
+        for p in problems:
+            lines.append("- " + _overview_headline(p))
+            if p.get("note"):
+                lines.append("    " + str(p["note"]))
+            lines.extend(_overview_chain(p, "    "))
+    else:
+        lines.append("Проблемных зон (хуже плана / ухудшение) не выявлено.")
+
+    for title, key in (("Позитив:", "positives"), ("Стабильно:", "stable")):
+        items = o.get(key) or []
+        if items:
+            lines.append("")
+            lines.append(title)
+            for h in items:
+                lines.append("- " + _overview_headline(h))
+
+    # Ключа star нет вовсе, когда звёзд во входе не было — на обычном датасете
+    # обзор выглядит ровно как раньше.
+    star = o.get("star")
+    if star and star.get("stars"):
+        lines.append("")
+        date = star.get("date")
+        lines.append(f"Звёзды (за {date}):" if date else "Звёзды:")
+        for st in star["stars"]:
+            lines.append("- " + _star_overview_line(st))
+
+    lines.append("")
+    lines.append(
+        "(Причинная вертикаль построена по бизнес-весу влияния (influent_percent); "
+        "«больше всего изменилось» и динамика — отдельные сигналы. Это ориентир, не "
+        "доказанная причинность. Зоны и направление — по готовым вердиктам.)"
+    )
+    return "\n".join(lines)
+
+
+def _rank_elem_cell(e: dict[str, Any]) -> str:
+    unit = _unit(e.get("measure_type"))
+    s = f"{e.get('element')} {_fmt_num(e.get('fact'), unit)}"
+    ch = _delta_cell(e.get("pop_change_pct"), e.get("pop_change_abs"), unit)
+    return s + (f" (Δ {ch})" if ch else "")
+
+
+def _render_rank_elements(r: dict[str, Any]) -> str:
+    """Лучшие/худшие разрезы метрики по значению (направление-зависимо)."""
+    if r.get("error"):
+        return _render_error(r)
+    best = r.get("best") or []
+    worst = r.get("worst") or []
+    dir_hint = "ниже=лучше" if r.get("metric_type") == "обратная" else "выше=лучше"
+    head = (
+        f"Разрезы метрики «{r.get('metric')}» по значению ({dir_hint}), "
+        f"сотрудник {r.get('person_fio') or '—'}, период {r.get('date')}"
+    )
+    if not best and not worst:
+        return head + ". " + (r.get("note") or "Разрезов нет.")
+    count = r.get("count") or 0
+    top = r.get("top") or len(best)
+    lines = [head + f" (всего разрезов: {count}):"]
+    if count <= top:  # мало разрезов — один список
+        lines.append("по значению (лучшие→худшие): " + "; ".join(_rank_elem_cell(e) for e in best))
+    else:
+        worst_els = {e.get("element") for e in worst}
+        best_shown = [e for e in best if e.get("element") not in worst_els]
+        lines.append("Худшие: " + "; ".join(_rank_elem_cell(e) for e in worst))
+        if best_shown:
+            lines.append("Лучшие: " + "; ".join(_rank_elem_cell(e) for e in best_shown))
+    return "\n".join(lines)
+
+
+def _render_peer_context(result: dict[str, Any]) -> str:
+    """Peer-контекст метрики: независимые секции, пустые пропускаются молча —
+    состав данных плавает (уровни/history/rankings приходят частично)."""
+    if result.get("error"):
+        return _render_error(result)
+    if result.get("note"):
+        return f"«{result.get('metric')}»: {result['note']}."
+
+    lines: list[str] = []
+    head = f"Peer-контекст метрики «{result.get('metric')}»"
+    if result.get("person_fio"):
+        head += f" — {result['person_fio']}"
+    # Название группы приходит с данными (level_name). Не пришло — сравнение
+    # описывается обезличенно: служебный код группы в выдачу не попадает.
+    if result.get("ref_level_name"):
+        head += f" (сравнение с группой: {result['ref_level_name']})"
+    lines.append(head + ":")
+
+    dynamics = result.get("dynamics") or []
+    if dynamics:
+        unit = _unit(dynamics[0].get("measure_type"))
+        cols = [
+            ("период", lambda r: r.get("date") or ""),
+            ("факт", lambda r: _fmt_num(r.get("fact"), unit)),
+            ("среднее по группе", lambda r: _fmt_num(r.get("group_mean"), unit)),
+            ("медиана группы", lambda r: _fmt_num(r.get("group_median"), unit)),
+            ("топ-20% группы", lambda r: _fmt_num(r.get("group_top20"), unit)),
+            ("отрыв от топ-20%", lambda r: _fmt_num(r.get("gap_top20"), unit)),
+            ("против группы", lambda r: (
+                "" if r.get("rel_status") is None
+                else f"{_verdict(r['rel_status'])} "
+                     f"({_fmt_num(r.get('rel_change_pct'))} п.п.)"
+                if r.get("rel_change_pct") is not None
+                else _verdict(r["rel_status"]))),
+            ("план выполняют, %", lambda r: _pct(r.get("group_hit_rate"))),
+            ("жёсткость плана", lambda r: _verdict(r.get("plan_rigidity"))),
+        ]
+        table = _md_table(dynamics, cols)
+        if table:
+            lines.append("Динамика на фоне группы («против группы» = личное изменение "
+                         "минус групповое, направление учтено):")
+            lines.append(table)
+        gap_change = result.get("gap_top20_change")
+        first_gap = dynamics[0].get("gap_top20")
+        if gap_change is not None and first_gap is not None:
+            last_gap = first_gap + gap_change
+            direction = (
+                "сократился" if abs(last_gap) < abs(first_gap)
+                else "вырос" if abs(last_gap) > abs(first_gap) else "не изменился"
+            )
+            lines.append(
+                f"Разрыв с топ-20% группы от первого к последнему периоду "
+                f"{direction}: {_fmt_num(first_gap, unit)} → {_fmt_num(last_gap, unit)}."
+            )
+
+    levels = result.get("levels") or []
+    if levels:
+        cols = [
+            ("группа", lambda r: r.get("level_name") or ""),
+            ("период", lambda r: r.get("dt") or ""),
+            ("среднее по группе", lambda r: _fmt_num(r.get("mean_fact"))),
+            ("медиана", lambda r: _fmt_num(r.get("median"))),
+            ("план выполняют, %", lambda r: _pct(r.get("hit_rate"))),
+            ("разброс", lambda r: _fmt_num(r.get("cv"))),
+            ("объектов", lambda r: _fmt_num(r.get("total_objects"))),
+            ("изменение группы, %", lambda r: _pct(r.get("change_pct"))),
+            ("место", lambda r: r.get("rank_raw") or ""),
+            ("процентиль", lambda r: _fmt_num(r.get("percentile"))),
+        ]
+        table = _md_table(levels, cols)
+        if table:
+            lines.append("Группы сравнения (от узкой к широкой):")
+            lines.append(table)
+    if result.get("localization"):
+        lines.append(f"Локализация: {result['localization']}.")
+
+    for p in result.get("position_dynamics") or []:
+        arrow = "вырос" if p["change"] > 0 else ("снизился" if p["change"] < 0 else "не изменился")
+        group = f" ({p['level_name']})" if p.get("level_name") else ""
+        lines.append(
+            f"Позиция в рейтинге{group}: процентиль {arrow} "
+            f"с {_fmt_num(p['from_percentile'])} ({p['from_date']}) до "
+            f"{_fmt_num(p['to_percentile'])} ({p['to_date']})."
+        )
+
+    if len(lines) == 1:
+        lines.append("Секций с данными нет — peer-данные пришли пустыми.")
+    return "\n".join(lines)
+
+
+def _star_label(r: dict[str, Any]) -> str:
+    """Имя показателя с разрезом: «CSI [Продукт А]»."""
+    name = r.get("metric") or r.get("metric_name") or "—"
+    return f"{name} [{r['element']}]" if r.get("element") else str(name)
+
+
+def _influences_star(star_name: Any) -> str:
+    return f"влияет на звезду «{star_name}»" if star_name else "влияет на звезду"
+
+
+def _star_title(name: Any, received: Any) -> str:
+    return f"«{name}» — " + ("получена" if received else "НЕ получена")
+
+
+def _star_child_phrase(r: dict[str, Any], star_date: Any = None) -> str:
+    """Влияющий показатель одной фразой: «CSI 4.1 балл при плане 4.5 балл (хуже
+    плана на 8.89 %, динамика ухудшение на 2.38 %)»."""
+    unit = _unit(r.get("measure_type"))
+    text = f"{_star_label(r)} {_fmt_num(r.get('fact'), unit)}".rstrip()
+    if r.get("plan") is not None:
+        text += f" при плане {_fmt_num(r['plan'], unit)}"
+    bits: list[str] = []
+    if r.get("plan_status"):
+        bits.append(_verdict_delta(
+            r.get("plan_status"), r.get("plan_dev_pct"), r.get("plan_dev_abs"), unit))
+    if r.get("pop_status"):
+        bits.append("динамика " + _verdict_delta(
+            r.get("pop_status"), r.get("pop_change_pct"), r.get("pop_change_abs"), unit))
+    if star_date and r.get("date") and r.get("date") != star_date:
+        bits.append(f"за {r['date']}")
+    if bits:
+        text += " (" + ", ".join(bits) + ")"
+    return text
+
+
+def _star_overview_line(st: dict[str, Any]) -> str:
+    """Строка звезды в обзоре: статус + дети по группам через _overview_headline."""
+    parts = [_star_title(st.get("star"), st.get("received")) + "."]
+    missed = st.get("missed_children") or []
+    ok = st.get("ok_children") or []
+    other = st.get("other_children") or []
+    if missed:
+        parts.append("Ниже плана: " + "; ".join(_overview_headline(h) for h in missed) + ".")
+    if ok:
+        parts.append("В плане/лучше: " + "; ".join(_overview_headline(h) for h in ok) + ".")
+    if other:
+        parts.append("Прочие показатели: " + "; ".join(_overview_headline(h) for h in other) + ".")
+    if not (missed or ok or other):
+        parts.append("Влияющие показатели в данных не указаны.")
+    return " ".join(parts)
+
+
+def _render_star_status(result: dict[str, Any]) -> str:
+    """Каждая звезда отдельной строкой: статус + влияющие показатели с фактом,
+    планом и вердиктами (отстающие первыми). Никакого общего вердикта по всем
+    звёздам — они независимы."""
+    if result.get("error"):
+        return _render_error(result)
+    stars = result.get("stars") or []
+    if not stars:
+        if result.get("date"):
+            return f"Звёзд за период {result['date']} в датасете нет."
+        return "Звёзд в датасете нет."
+
+    people = {st.get("person_fio") for st in stars}
+    dates = {st.get("date") for st in stars if st.get("date")}
+    head = "Звёзды"
+    if len(people) == 1:
+        head += f" сотрудника {next(iter(people))}"
+    if len(dates) == 1:
+        head += f" (за {next(iter(dates))})"
+    lines: list[str] = [head + ":"]
+    for st in stars:
+        title = _star_title(st.get("star"), st.get("received"))
+        if len(people) > 1:
+            title = f"{st.get('person_fio')}: {title}"
+        if len(dates) > 1 and st.get("date"):
+            title += f" (за {st['date']})"
+        kids = st.get("children") or []
+        flagged = [k for k in kids if k.get("is_star_metric")]
+        influencing = flagged or kids
+        other = [k for k in kids if k not in influencing]
+        line = f"- {title}."
+        if influencing:
+            line += " Влияющие показатели: " + "; ".join(
+                _star_child_phrase(k, st.get("date")) for k in influencing
+            ) + "."
+        else:
+            line += " Влияющие показатели в данных не указаны."
+        if other:
+            line += " Прочие показатели: " + "; ".join(
+                _star_child_phrase(k, st.get("date")) for k in other
+            ) + "."
+        if st.get("children_truncated"):
+            line += " (список показателей усечён)"
+        lines.append(line)
+    if result.get("truncated"):
+        lines.append("(показаны не все звёзды — уточни person или date)")
+    return "\n".join(lines)
+
+
+def _safe(render: Any, result: Any) -> str:
+    """Рендер с безопасным fallback на JSON при любой ошибке/пустом выводе."""
+    try:
+        out = render(result)
+        return out if out else _dump(result)
+    except Exception:
+        return _dump(result)
+
+
+def build_tools(
+    store: SqliteStore,
+    index: EmbeddingIndex,
+    embed_query: Callable[[str], list[float]],
+) -> list[StructuredTool]:
+    """Собирает инструменты, замкнутые на конкретные хранилища.
+
+    Семантический поиск (resolve_entity) идёт по in-memory индексу эмбеддингов,
+    уже загруженному только для текущего направления — данные других
+    направлений в него не попадают.
+    """
+
+    def _unknown_metric(metric: str) -> str | None:
+        # Существование проверяем по metric_exists, а НЕ по metric_type_of: у
+        # звезды metric_type может не прийти вовсе, и она
+        # была бы объявлена ненайденной, хотя лежит в базе.
+        if store.metric_exists(metric):
+            return None
+        return _render_error(
+            {
+                "error": f"Метрика '{metric}' не найдена. Здесь нужно ТОЧНОЕ "
+                "название метрики — не человек, не продукт, не произвольный текст.",
+                "hint": "человека передавай в person, продукт — в element; "
+                "точные названия метрик смотри в schema_overview или подбери "
+                "через resolve_entity(kind='metric'). Если фильтр по метрике не "
+                "нужен — просто не передавай этот аргумент.",
+            }
+        )
+
+    def _people_list() -> str:
+        parts = []
+        for p in store.list_people()[:12]:
+            role = "руководитель" if p.get("person_is_me") else "сотрудник"
+            extra = ", ".join(x for x in (role, p.get("person_post")) if x)
+            parts.append(f"{p.get('person_fio') or p.get('person_key')} ({extra})")
+        return "; ".join(parts)
+
+    def _canon_person(person: str | None) -> str | None:
+        """ФИО по аргументу person (роль/должность тоже принимаются, если
+        однозначны); нерезолвимое значение возвращается как есть — его поймает
+        _unknown_person с ошибкой и списком людей."""
+        if person is None:
+            return None
+        return store.resolve_person(person) or person
+
+    def _unknown_person(person: str | None) -> str | None:
+        if person is None or str(person).strip() == "":
+            return None
+        if store.resolve_person(person) is not None:
+            return None
+        return _render_error(
+            {
+                "error": f"Человек '{person}' не найден или неоднозначен. Аргумент "
+                "person принимает ТОЧНОЕ ФИО (или его часть) либо табельный номер "
+                "— не метрику, не продукт и не общую должность, под которую "
+                "подходят несколько людей.",
+                "hint": "люди датасета: " + (_people_list() or "нет") + ". Возьми "
+                "ФИО отсюда ДОСЛОВНО; если фильтр по человеку не нужен — просто не "
+                "передавай аргумент person.",
+            }
+        )
+
+    def schema_overview() -> str:
+        """Обзор загруженного датасета: метрики с их типами и единицами, значения
+        element (продукты/разрезы), люди и диапазон дат. Семантику метрик не
+        предполагай — смотри по факту."""
+        return _safe(_render_schema, store.schema_overview())
+
+    def resolve_entity(text: str, kind: str) -> str:
+        """Разрешает нечёткую формулировку в каноничное имя сущности.
+        kind: 'metric' — название метрики (поиск по названиям и описаниям),
+        'element' — значение поля element (продукт/разрез), 'person' — сотрудник.
+        Используй, когда метрика/продукт/человек названы неточно или описательно."""
+        kind = (kind or "").strip().lower()
+        if kind == "person":
+            matches = store.list_people(name_query=text)[:10]
+            return _safe(_render_resolve, {"kind": "person", "matches": matches})
+        if kind == "metric":
+            search_kinds = ["metric_name", "metric_description"]
+        elif kind == "element":
+            search_kinds = ["element"]
+        else:
+            return _render_error(
+                {"error": "kind должен быть 'metric', 'element' или 'person'"}
+            )
+        vector = embed_query(text)
+        matches = index.search(vector, kinds=search_kinds, top_k=5)
+        return _safe(_render_resolve, {"kind": kind, "matches": matches})
+
+    def describe_metric(metric: str) -> str:
+        """Описание метрики, её тип ('прямая' — чем больше, тем лучше; 'обратная' —
+        чем меньше, тем лучше), единица измерения и период расчёта. Вызывай перед
+        интерпретацией значений: направление метрики критично."""
+        result = store.describe_metric(metric)
+        if result is None:
+            return _render_error(
+                {"error": f"Метрика '{metric}' не найдена", "hint": "используй resolve_entity"}
+            )
+        result["kind"] = store.metric_kind_of(metric)
+        return _safe(_render_describe, result)
+
+    def get_metric(
+        metric: str,
+        person: str | None = None,
+        element: str | None = None,
+        date: str | None = None,
+    ) -> str:
+        """Значения метрики (fact/plan/benchmark) + аналитика по строке.
+        Динамику/позицию читай по ВЕРДИКТАМ (trend_status/pop_status/peer_status),
+        а не по знаку: для 'обратной' метрики рост значения = ухудшение.
+        person — ФИО/табельный; date — YYYY-MM-DD; element не указан = агрегат
+        (для agg--метрик вернутся все разрезы с пометкой
+        'разрезы_вместо_агрегата')."""
+        person = _canon_person(_blank_to_none(person))
+        element = _blank_to_none(element)
+        date = _blank_to_none(date)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rows,
+            store.get_metric(metric, person=person, element=element, date=date),
+        )
+
+    def element_slice(
+        element: str,
+        person: str | None = None,
+        date: str | None = None,
+        parent: str | None = None,
+    ) -> str:
+        """Срез по ОДНОМУ продукту/element across ВСЕХ метрик: значение этого
+        element у каждой метрики (с аналитикой), а НЕ разрезы одной метрики.
+        Используй для «все метрики уровня по конкретному продукту» — metric_tree
+        разрезы СОСЕДНИХ метрик не показывает (они хранятся сиблингами агрегата).
+        person — ФИО/табельный; date — YYYY-MM-DD; parent — имя метрики-родителя,
+        чтобы ограничить срез её прямыми детьми (одной веткой)."""
+        element = _blank_to_none(element)
+        person = _canon_person(_blank_to_none(person))
+        date = _blank_to_none(date)
+        parent = _blank_to_none(parent)
+        if element is None:
+            return _render_error(
+                {
+                    "error": "element обязателен",
+                    "hint": "возьми точное значение element из «Состава датасета»",
+                }
+            )
+        unknown = _unknown_person(person) or (
+            _unknown_metric(parent) if parent is not None else None
+        )
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rows,
+            store.element_slice(element, person=person, date=date, parent=parent),
+        )
+
+    def compare(
+        metric: str,
+        person: str | None = None,
+        element: str | None = None,
+        dates: list[str] | None = None,
+    ) -> str:
+        """Динамика метрики по периодам (pop_change_pct, trend + вердикты
+        pop_status/trend_status) для ОДНОГО человека (person обязателен). Оценивай
+        по *_status, а не по знаку. element не указан = агрегат (agg--метрики →
+        все разрезы). Чтобы найти, у кого сильнее спад/рост по всем — find_flags."""
+        person = _canon_person(_blank_to_none(person))
+        element = _blank_to_none(element)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rows,
+            store.compare(metric, person=person, element=element, dates=dates),
+        )
+
+    def rank(
+        metric: str,
+        date: str,
+        element: str | None = None,
+        post: str | None = None,
+    ) -> str:
+        """Рейтинг ВНУТРИ КОМАНДЫ: сравнивает только сотрудников загруженного
+        датасета между собой (обычно 2-5 человек). Для места в БОЛЬШОЙ
+        peer-группе — «N из 500», процентиль и его динамика, уровни
+        организация/территория/офис — используй peer_context(metric), это
+        ДРУГОЙ источник (серверные данные по сотням объектов). Направление уже
+        учтено: peer_rank=1 — лучший. element не указан = агрегат по сотруднику;
+        post — фильтр по должности. Если у метрики нет агрегата (agg- в
+        составе датасета), тула вернёт error со списком доступных element —
+        передай element и повтори."""
+        element = _blank_to_none(element)
+        post = _blank_to_none(post)
+        unknown = _unknown_metric(metric)
+        if unknown:
+            return unknown
+        # Ранжировать одного человека не с кем: детерминированный редирект,
+        # иначе модель делает вывод «худший/лучший в группе» из одной строки.
+        employees = store.conn.execute(
+            "SELECT COUNT(DISTINCT person_key) FROM metrics WHERE person_is_me = 0"
+        ).fetchone()[0]
+        if employees < 2:
+            return _render_error(
+                {
+                    "error": (
+                        "В датасете "
+                        + ("один сотрудник" if employees else "нет сотрудников")
+                        + " — ранжировать внутри команды не с кем."
+                    ),
+                    "hint": (
+                        "место сотрудника в БОЛЬШОЙ peer-группе (организация/"
+                        "территория/офис, «N из M», процентиль) смотри в "
+                        "peer_context(metric)."
+                    ),
+                }
+            )
+        return _safe(_render_rows, store.rank(metric, date, element=element, post=post))
+
+    def aggregate(
+        metric: str,
+        group_by: str,
+        date: str | None = None,
+        element: str | None = None,
+    ) -> str:
+        """Агрегация значений метрики (avg/min/max/sum/count) по группам.
+        group_by: 'person' | 'element' | 'date' | 'post'."""
+        date = _blank_to_none(date)
+        element = _blank_to_none(element)
+        unknown = _unknown_metric(metric)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_aggregate, store.aggregate(metric, group_by, date=date, element=element)
+        )
+
+    def metric_tree(
+        metric: str | None = None,
+        person: str | None = None,
+        date: str | None = None,
+    ) -> str:
+        """Иерархия метрики со всеми дочерними child_metrics и аналитикой по
+        каждому узлу (plan_status, trend_status, pop_status, influent_percent и
+        др.). ОДИН вызов раскладывает метрику на компоненты — не дёргай get_metric
+        по каждому. Задавай metric, person и date (иначе строк много). agg--метрика
+        → корнями станут её разрезы (пометка 'разрезы_вместо_агрегата')."""
+        metric = _blank_to_none(metric)
+        person = _canon_person(_blank_to_none(person))
+        date = _blank_to_none(date)
+        unknown = (
+            _unknown_metric(metric) if metric is not None else None
+        ) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_tree, store.metric_tree(name=metric, person=person, date=date)
+        )
+
+    def list_people(
+        role: str | None = None,
+        post: str | None = None,
+        depart: str | None = None,
+        name_query: str | None = None,
+    ) -> str:
+        """Список людей в датасете. role: 'me' (руководитель) | 'employee'.
+        name_query — подстрока ФИО для поиска."""
+        role = _blank_to_none(role)
+        post = _blank_to_none(post)
+        depart = _blank_to_none(depart)
+        name_query = _blank_to_none(name_query)
+        return _safe(
+            _render_people,
+            store.list_people(role=role, post=post, depart=depart, name_query=name_query),
+        )
+
+    def find_flags(
+        kind: str,
+        date: str | None = None,
+        metric: str | None = None,
+        element: str | None = None,
+    ) -> str:
+        """Предрассчитанные проблемные/заметные строки, отсортированы по силе
+        (первая — самая значимая). kind:
+        'anomaly' — выбросы (|z-score| выше порога);
+        'below_plan' — хуже плана (с учётом направления); 'above_plan' — лучше плана;
+        'declining' — динамика ухудшилась (trend_status='ухудшение'); 'improving' —
+        улучшилась; 'trend' — любое движение значения без оценки хорошо/плохо.
+        «просела/упала/ухудшилась динамика» = 'declining', «хуже плана/отстаёт» =
+        'below_plan' (это РАЗНЫЕ вопросы). Фокусируй фильтрами metric/date/element."""
+        date = _blank_to_none(date)
+        metric = _blank_to_none(metric)
+        element = _blank_to_none(element)
+        # metric_exists, а не metric_type_of: у звезды metric_type может
+        # не прийти, и фильтр по ней молча сбрасывался бы.
+        if metric and not store.metric_exists(metric):
+            metric = None
+        return _safe(
+            _render_rows, store.find_flags(kind, date=date, metric=metric, element=element)
+        )
+
+    def analytics_summary() -> str:
+        """Стартовая детерминированная сводка: охват датасета, средние по ключевым
+        метрикам на последнем периоде, топ аномалий, счётчики трендов."""
+        return _safe(_render_summary, analytics.build_summary(store))
+
+    def situation_overview(person: str | None = None, date: str | None = None) -> str:
+        """Карта ситуации сотрудника за ОДИН вызов: зоны (проблемы / позитив /
+        стабильность) по корневым метрикам и причинная цепочка драйверов в каждой
+        проблеме — вглубь до компонентов (метрика → главный под-показатель → …),
+        с разрезами-продуктами там, где они есть. Зоны и направление берутся из
+        готовых вердиктов; причинная вертикаль ранжируется по бизнес-весу влияния
+        (influent_percent), а при его отсутствии — по величине изменения (эвристика).
+        Для ШИРОКИХ вопросов («что происходит», «как дела», «общая оценка»,
+        «проблемные зоны», «разбери») вызывай ПЕРВЫМ: один вызов даёт и зоны, и
+        причины — не нужно перебирать метрики по одной через find_flags/metric_tree.
+        person — ФИО/табельный (по умолчанию единственный сотрудник набора);
+        date — YYYY-MM-DD (по умолчанию последний период)."""
+        person = _canon_person(_blank_to_none(person))
+        date = _blank_to_none(date)
+        return _safe(
+            _render_overview,
+            analytics.build_situation_overview(store, person=person, date=date),
+        )
+
+    def rank_elements(
+        metric: str, person: str | None = None, date: str | None = None
+    ) -> str:
+        """Лучшие и худшие разрезы (element/продукты) метрики, сравнённые МЕЖДУ
+        СОБОЙ по фактическому значению с учётом направления (прямая: выше=лучше,
+        обратная: ниже=лучше). План и бенчмарк НЕ используются — только сравнение
+        разрезов одной метрики у одного сотрудника между собой. Используй для
+        вопросов «какие продукты/разрезы лучшие/худшие по метрике X», и ОСОБЕННО
+        когда у метрики НЕТ плана (тогда find_flags(below_plan) её разрезы не
+        ловит, а бенчмарк может быть неуместен). person — ФИО/табельный (по
+        умолчанию сотрудник набора); date — YYYY-MM-DD (по умолчанию последний)."""
+        metric = _blank_to_none(metric)
+        person = _canon_person(_blank_to_none(person))
+        date = _blank_to_none(date)
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_rank_elements,
+            analytics.rank_elements(store, metric, person=person, date=date),
+        )
+
+    def peer_context(metric: str, person: str | None = None) -> str:
+        """Сравнение сотрудника с БОЛЬШОЙ peer-группой (серверные данные, сотни
+        объектов). НЕ для сравнения внутри команды из датасета — это rank;
+        здесь другой источник и другая группа. Отдаёт: динамику на фоне группы
+        (колонка «против группы» — падает вместе с группой или против неё),
+        разрыв с топ-20% группы, реалистичность плана (какая доля группы вообще
+        выполняет план), срезы по всем доступным группам сравнения — от узкой к
+        широкой — с локализацией «системное/локальное», место и процентиль в
+        рейтинге. Используй для вопросов «как
+        он на фоне банка/территории/офиса», «это у всех так или только у него»,
+        «насколько реалистичен план», «догоняет ли лучших», «какое место в
+        рейтинге», «N из M», «процентиль». ОДИН вызов на метрику отдаёт всё
+        доступное; если какой-то секции нет в ответе — таких данных не пришло,
+        повторный вызов не поможет. person — ФИО/табельный (по умолчанию
+        сотрудник набора)."""
+        metric = _blank_to_none(metric)
+        person = _canon_person(_blank_to_none(person))
+        unknown = _unknown_metric(metric) or _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(
+            _render_peer_context,
+            analytics.build_peer_context(store, metric, person=person),
+        )
+
+    def related_metrics(metric: str) -> str:
+        """Связанные по СМЫСЛУ метрики (граф выведен LLM из названий/описаний, не
+        из значений). Возвращает рёбра с relation ('опережающая→запаздывающая'/
+        'компонент'/'смежная'/'влияет_на'), strength и rationale. Полезно, когда у
+        дочерней метрики нет influent_percent. Это ЭВРИСТИКА — помечай связи как
+        предположительные, не как факт."""
+        metric = _blank_to_none(metric)
+        if metric is None:
+            return _render_error(
+                {"error": "related_metrics требует точное название метрики"}
+            )
+        unknown = _unknown_metric(metric)
+        if unknown:
+            return unknown
+        edges = store.related_metrics(metric)
+        return _safe(lambda e: _render_related(metric, e), edges)
+
+    def star_status(person: str | None = None, date: str | None = None) -> str:
+        """Все ЗВЁЗДЫ сотрудника за ОДИН вызов: каждая звезда по имени, её статус
+        на последней дате («получена» / «НЕ получена») и её ВЛИЯЮЩИЕ показатели —
+        дочерние числовые метрики с фактом, планом, статусом плана и динамикой;
+        отстающие от плана — первыми. Звезда — показатель БЕЗ числа: плана,
+        динамики, тренда и места среди коллег у неё нет; статусы звёзд независимы
+        друг от друга (нет общего «заработана / не заработана»). Вызывай на вопросы
+        «какие звёзды получены / не получены», «почему не получена звезда X», «что
+        нужно, чтобы получить звезду X» (ответ — её показатели хуже плана и разрыв
+        до плана), а на обзорном вопросе — вместе с situation_overview. person —
+        ФИО/табельный (по умолчанию все люди набора); date — YYYY-MM-DD (по
+        умолчанию последняя дата каждой звезды)."""
+        person = _canon_person(_blank_to_none(person))
+        date = _blank_to_none(date)
+        unknown = _unknown_person(person)
+        if unknown:
+            return unknown
+        return _safe(_render_star_status, store.star_status(person=person, date=date))
+
+    specs = [
+        (schema_overview, "schema_overview"),
+        (resolve_entity, "resolve_entity"),
+        (describe_metric, "describe_metric"),
+        (get_metric, "get_metric"),
+        (element_slice, "element_slice"),
+        (compare, "compare"),
+        (rank, "rank"),
+        (aggregate, "aggregate"),
+        (metric_tree, "metric_tree"),
+        (list_people, "list_people"),
+        (find_flags, "find_flags"),
+        (analytics_summary, "analytics_summary"),
+        (situation_overview, "situation_overview"),
+        (rank_elements, "rank_elements"),
+        (peer_context, "peer_context"),
+        (related_metrics, "related_metrics"),
+    ]
+
+    descriptions = {name: (func.__doc__ or "") for func, name in specs}
+    # Звёздный инструмент и виды флагов появляются в списке ТОЛЬКО когда звёздные
+    # поля реально пришли (звёзды или показатели с пометкой «влияет на звезду»): иначе модель видела бы правила про звезду на датасете,
+    # где её нет, и пыталась бы их применить.
+    star = store.star_presence()
+    if star["star_binary_rows"] or star["star_metric_rows"]:
+        specs.append((star_status, "star_status"))
+        descriptions["star_status"] = star_status.__doc__ or ""
+        descriptions["find_flags"] += (
+            "\n'star_missed' — звёзды, которые НЕ получены; 'star_received' — "
+            "полученные звёзды; 'star_at_risk' — влияющие на звезду показатели "
+            "хуже плана, колонка «звезда» говорит, к какой звезде относится "
+            "показатель. Полную картину по всем звёздам за один вызов даёт "
+            "star_status."
+        )
+
+    return [
+        StructuredTool.from_function(func=func, name=name, description=descriptions[name])
+        for func, name in specs
+    ]

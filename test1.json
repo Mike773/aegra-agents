@@ -1,0 +1,564 @@
+[{"dataset": {
+			"level": "ORG",
+			"metrics": [
+				{
+					"metric_id": "377722562",
+					"aggregates": {
+						"cv": 75.5,
+						"dt": "2026-07-30",
+						"iqr": 8442485,
+						"median": 14894246,
+						"history": [
+							{
+								"cv": 45.4,
+								"dt": "2026-05-31",
+								"iqr": 16614210,
+								"median": 31814586,
+								"mean_ex": 100.6,
+								"hit_rate": 45.4,
+								"mean_fact": 33313488,
+								"mean_plan": 33106861,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 55165980
+							},
+							{
+								"cv": 45.6,
+								"dt": "2026-04-30",
+								"iqr": 19529755,
+								"median": 36105761,
+								"mean_ex": 100.3,
+								"hit_rate": 45.4,
+								"mean_fact": 38507555,
+								"mean_plan": 38393691,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 64349046
+							}
+						],
+						"mean_ex": 102.1,
+						"hit_rate": 43.8,
+						"mean_fact": 16335807,
+						"mean_plan": 15995040,
+						"calc_period": "Месяц",
+						"total_objects": 496,
+						"top20_mean_fact": 30322068
+					},
+					"metric_name": "Метрика тест",
+					"children_metrics": [
+						{
+							"metric_id": "377722562",
+							"aggregates": {
+								"cv": 146,
+								"dt": "2026-07-30",
+								"iqr": 5775107,
+								"median": 5563760,
+								"history": [
+									{
+										"cv": 74.3,
+										"dt": "2026-05-31",
+										"iqr": 11665217,
+										"median": 10100154,
+										"mean_ex": 102,
+										"hit_rate": 42.6,
+										"mean_fact": 12108343,
+										"mean_plan": 11871635,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 26402618
+									},
+									{
+										"cv": 70.4,
+										"dt": "2026-04-30",
+										"iqr": 12104564,
+										"median": 13192071,
+										"mean_ex": 101.6,
+										"hit_rate": 42.8,
+										"mean_fact": 15034855,
+										"mean_plan": 14790940,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 31604792
+									}
+								],
+								"mean_ex": 105.9,
+								"hit_rate": 38.9,
+								"mean_fact": 7331432,
+								"mean_plan": 6925031,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 18441775
+							},
+							"metric_name": "Пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022538",
+							"aggregates": {
+								"cv": 74.6,
+								"dt": "2026-07-30",
+								"iqr": 4850243,
+								"median": 4909332,
+								"history": [
+									{
+										"cv": 63.3,
+										"dt": "2026-05-31",
+										"iqr": 12094040,
+										"median": 13286860,
+										"mean_ex": 96.7,
+										"hit_rate": 42.6,
+										"mean_fact": 14153619,
+										"mean_plan": 14639725,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 27839060
+									},
+									{
+										"cv": 70,
+										"dt": "2026-04-30",
+										"iqr": 12777153,
+										"median": 13394521,
+										"mean_ex": 97.4,
+										"hit_rate": 42.4,
+										"mean_fact": 15516867,
+										"mean_plan": 15922932,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 32091931
+									}
+								],
+								"mean_ex": 96.2,
+								"hit_rate": 39.7,
+								"mean_fact": 5657046,
+								"mean_plan": 5882339,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 11962087
+							},
+							"metric_name": "Еще один пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022541",
+							"aggregates": {
+								"cv": 222,
+								"dt": "2026-07-30",
+								"iqr": 825125,
+								"median": 152625,
+								"history": [
+									{
+										"cv": 198,
+										"dt": "2026-05-31",
+										"iqr": 1930175,
+										"median": 608750,
+										"mean_ex": 113.1,
+										"hit_rate": 29.6,
+										"mean_fact": 1867675,
+										"mean_plan": 1651909,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 6836552
+									},
+									{
+										"cv": 154,
+										"dt": "2026-04-30",
+										"iqr": 2767000,
+										"median": 1094611,
+										"mean_ex": 102.9,
+										"hit_rate": 30.6,
+										"mean_fact": 2483434,
+										"mean_plan": 2413745,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 8283165
+									}
+								],
+								"mean_ex": 107,
+								"hit_rate": 26.2,
+								"mean_fact": 830386,
+								"mean_plan": 776334,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 3318618
+							},
+							"metric_name": "Третий пример дочерней метрики"
+						}
+					]
+				}
+			]
+		}
+    },
+{"dataset": {
+			"level": "TERR",
+			"metrics": [
+				{
+					"metric_id": "377722562",
+					"aggregates": {
+						"cv": 75.5,
+						"dt": "2026-07-30",
+						"iqr": 8442485,
+						"median": 14894246,
+						"history": [
+							{
+								"cv": 45.4,
+								"dt": "2026-05-31",
+								"iqr": 16614210,
+								"median": 31814586,
+								"mean_ex": 100.6,
+								"hit_rate": 45.4,
+								"mean_fact": 33313488,
+								"mean_plan": 33106861,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 55165980
+							},
+							{
+								"cv": 45.6,
+								"dt": "2026-04-30",
+								"iqr": 19529755,
+								"median": 36105761,
+								"mean_ex": 100.3,
+								"hit_rate": 45.4,
+								"mean_fact": 38507555,
+								"mean_plan": 38393691,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 64349046
+							}
+						],
+						"mean_ex": 102.1,
+						"hit_rate": 43.8,
+						"mean_fact": 16335807,
+						"mean_plan": 15995040,
+						"calc_period": "Месяц",
+						"total_objects": 496,
+						"top20_mean_fact": 30322068
+					},
+					"metric_name": "Метрика тест",
+					"children_metrics": [
+						{
+							"metric_id": "377722562",
+							"aggregates": {
+								"cv": 146,
+								"dt": "2026-07-30",
+								"iqr": 5775107,
+								"median": 5563760,
+								"history": [
+									{
+										"cv": 74.3,
+										"dt": "2026-05-31",
+										"iqr": 11665217,
+										"median": 10100154,
+										"mean_ex": 102,
+										"hit_rate": 42.6,
+										"mean_fact": 12108343,
+										"mean_plan": 11871635,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 26402618
+									},
+									{
+										"cv": 70.4,
+										"dt": "2026-04-30",
+										"iqr": 12104564,
+										"median": 13192071,
+										"mean_ex": 101.6,
+										"hit_rate": 42.8,
+										"mean_fact": 15034855,
+										"mean_plan": 14790940,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 31604792
+									}
+								],
+								"mean_ex": 105.9,
+								"hit_rate": 38.9,
+								"mean_fact": 7331432,
+								"mean_plan": 6925031,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 18441775
+							},
+							"metric_name": "Пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022538",
+							"aggregates": {
+								"cv": 74.6,
+								"dt": "2026-07-30",
+								"iqr": 4850243,
+								"median": 4909332,
+								"history": [
+									{
+										"cv": 63.3,
+										"dt": "2026-05-31",
+										"iqr": 12094040,
+										"median": 13286860,
+										"mean_ex": 96.7,
+										"hit_rate": 42.6,
+										"mean_fact": 14153619,
+										"mean_plan": 14639725,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 27839060
+									},
+									{
+										"cv": 70,
+										"dt": "2026-04-30",
+										"iqr": 12777153,
+										"median": 13394521,
+										"mean_ex": 97.4,
+										"hit_rate": 42.4,
+										"mean_fact": 15516867,
+										"mean_plan": 15922932,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 32091931
+									}
+								],
+								"mean_ex": 96.2,
+								"hit_rate": 39.7,
+								"mean_fact": 5657046,
+								"mean_plan": 5882339,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 11962087
+							},
+							"metric_name": "Еще один пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022541",
+							"aggregates": {
+								"cv": 222,
+								"dt": "2026-07-30",
+								"iqr": 825125,
+								"median": 152625,
+								"history": [
+									{
+										"cv": 198,
+										"dt": "2026-05-31",
+										"iqr": 1930175,
+										"median": 608750,
+										"mean_ex": 113.1,
+										"hit_rate": 29.6,
+										"mean_fact": 1867675,
+										"mean_plan": 1651909,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 6836552
+									},
+									{
+										"cv": 154,
+										"dt": "2026-04-30",
+										"iqr": 2767000,
+										"median": 1094611,
+										"mean_ex": 102.9,
+										"hit_rate": 30.6,
+										"mean_fact": 2483434,
+										"mean_plan": 2413745,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 8283165
+									}
+								],
+								"mean_ex": 107,
+								"hit_rate": 26.2,
+								"mean_fact": 830386,
+								"mean_plan": 776334,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 3318618
+							},
+							"metric_name": "Третий пример дочерней метрики"
+						}
+					]
+				}
+			]
+		}
+    },
+{"dataset": {
+			"level": "OFFICE",
+			"metrics": [
+				{
+					"metric_id": "377722562",
+					"aggregates": {
+						"cv": 75.5,
+						"dt": "2026-07-30",
+						"iqr": 8442485,
+						"median": 14894246,
+						"history": [
+							{
+								"cv": 45.4,
+								"dt": "2026-05-31",
+								"iqr": 16614210,
+								"median": 31814586,
+								"mean_ex": 100.6,
+								"hit_rate": 45.4,
+								"mean_fact": 33313488,
+								"mean_plan": 33106861,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 55165980
+							},
+							{
+								"cv": 45.6,
+								"dt": "2026-04-30",
+								"iqr": 19529755,
+								"median": 36105761,
+								"mean_ex": 100.3,
+								"hit_rate": 45.4,
+								"mean_fact": 38507555,
+								"mean_plan": 38393691,
+								"calc_period": "Месяц",
+								"total_objects": 500,
+								"top20_mean_fact": 64349046
+							}
+						],
+						"mean_ex": 102.1,
+						"hit_rate": 43.8,
+						"mean_fact": 16335807,
+						"mean_plan": 15995040,
+						"calc_period": "Месяц",
+						"total_objects": 496,
+						"top20_mean_fact": 30322068
+					},
+					"metric_name": "Метрика тест",
+					"children_metrics": [
+						{
+							"metric_id": "377722562",
+							"aggregates": {
+								"cv": 146,
+								"dt": "2026-07-30",
+								"iqr": 5775107,
+								"median": 5563760,
+								"history": [
+									{
+										"cv": 74.3,
+										"dt": "2026-05-31",
+										"iqr": 11665217,
+										"median": 10100154,
+										"mean_ex": 102,
+										"hit_rate": 42.6,
+										"mean_fact": 12108343,
+										"mean_plan": 11871635,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 26402618
+									},
+									{
+										"cv": 70.4,
+										"dt": "2026-04-30",
+										"iqr": 12104564,
+										"median": 13192071,
+										"mean_ex": 101.6,
+										"hit_rate": 42.8,
+										"mean_fact": 15034855,
+										"mean_plan": 14790940,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 31604792
+									}
+								],
+								"mean_ex": 105.9,
+								"hit_rate": 38.9,
+								"mean_fact": 7331432,
+								"mean_plan": 6925031,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 18441775
+							},
+							"metric_name": "Пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022538",
+							"aggregates": {
+								"cv": 74.6,
+								"dt": "2026-07-30",
+								"iqr": 4850243,
+								"median": 4909332,
+								"history": [
+									{
+										"cv": 63.3,
+										"dt": "2026-05-31",
+										"iqr": 12094040,
+										"median": 13286860,
+										"mean_ex": 96.7,
+										"hit_rate": 42.6,
+										"mean_fact": 14153619,
+										"mean_plan": 14639725,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 27839060
+									},
+									{
+										"cv": 70,
+										"dt": "2026-04-30",
+										"iqr": 12777153,
+										"median": 13394521,
+										"mean_ex": 97.4,
+										"hit_rate": 42.4,
+										"mean_fact": 15516867,
+										"mean_plan": 15922932,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 32091931
+									}
+								],
+								"mean_ex": 96.2,
+								"hit_rate": 39.7,
+								"mean_fact": 5657046,
+								"mean_plan": 5882339,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 11962087
+							},
+							"metric_name": "Еще один пример дочерней метрики"
+						},
+						{
+							"metric_id": "350022541",
+							"aggregates": {
+								"cv": 222,
+								"dt": "2026-07-30",
+								"iqr": 825125,
+								"median": 152625,
+								"history": [
+									{
+										"cv": 198,
+										"dt": "2026-05-31",
+										"iqr": 1930175,
+										"median": 608750,
+										"mean_ex": 113.1,
+										"hit_rate": 29.6,
+										"mean_fact": 1867675,
+										"mean_plan": 1651909,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 6836552
+									},
+									{
+										"cv": 154,
+										"dt": "2026-04-30",
+										"iqr": 2767000,
+										"median": 1094611,
+										"mean_ex": 102.9,
+										"hit_rate": 30.6,
+										"mean_fact": 2483434,
+										"mean_plan": 2413745,
+										"calc_period": "Месяц",
+										"total_objects": 500,
+										"top20_mean_fact": 8283165
+									}
+								],
+								"mean_ex": 107,
+								"hit_rate": 26.2,
+								"mean_fact": 830386,
+								"mean_plan": 776334,
+								"calc_period": "Месяц",
+								"total_objects": 496,
+								"top20_mean_fact": 3318618
+							},
+							"metric_name": "Третий пример дочерней метрики"
+						}
+					]
+				}
+			]
+		}
+    }]

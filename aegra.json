@@ -1,19 +1,15 @@
 {
   "graphs": {
-    "json_analyzer": "./link.py:json_analyzer_graph",
-    "json_analyzer_causal": "./link.py:json_analyzer_causal_graph",
-    "json_analyzer_v2": "./link.py:json_analyzer_v2_graph",
-    "json_analyzer_v3": "./link.py:json_analyzer_v3_graph",
-    "json_analyzer_v4": "./link.py:json_analyzer_v4_graph",
+    "analyst_agent": "./link.py:analyst_agent_graph",
+    "json_analyzer_v5": "./link.py:json_analyzer_v5_graph",
     "easyrag": "./link.py:easyrag_graph",
-    "analytic_orchestrator": "./link.py:analytic_orchestrator_graph",
-    "analytic_orchestrator_v2": "./link.py:analytic_orchestrator_v2_graph",
-    "analytic_orchestrator_v3": "./link.py:analytic_orchestrator_v3_graph",
+    "analytic_orchestrator_v4": "./link.py:analytic_orchestrator_v4_graph",
     "wiki_ingest": "./link.py:wiki_ingest_graph",
     "doc_manager": "./link.py:doc_manager_graph",
     "kb_chat": "./link.py:kb_chat_graph",
     "gap_resolver": "./link.py:gap_resolver_graph",
-    "external_doc_loader": "./link.py:external_doc_loader_graph"
+    "external_doc_loader": "./link.py:external_doc_loader_graph",
+    "metric_enricher": "./link.py:metric_enricher_graph"
   },
   "http": {
     "app": "langgraph_executor.plugins.app:app",

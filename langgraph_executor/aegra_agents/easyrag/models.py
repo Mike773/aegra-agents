@@ -12,6 +12,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
     TIMESTAMP,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -234,6 +236,79 @@ class SectionProvenance(Base):
     )
 
 
+class MetricCatalog(Base):
+    """Показатели, которые видел агент-аналитик по направлению.
+
+    Источник работы для фонового обогатителя знаний: он смотрит сюда, а не в
+    последний загруженный датасет, поэтому переживает ротацию данных.
+    """
+
+    __tablename__ = "metric_catalog"
+    __table_args__ = (
+        Index("ix_metric_catalog_seen", "direction_key", "last_seen_at"),
+        {"schema": SCHEMA},
+    )
+
+    direction_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    metric_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_name: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    metric_ext_id: Mapped[str | None] = mapped_column(Text)
+    direction: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str | None] = mapped_column(Text)
+    parent_name: Mapped[str | None] = mapped_column(Text)
+    depth: Mapped[int | None] = mapped_column(Integer)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    seen_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+
+class MetricKnowledge(Base):
+    """Трактовка показателя, найденная в базе знаний.
+
+    ``status='unknown'`` — искали и не нашли: строка пишется намеренно, чтобы не
+    ходить в wiki за одним и тем же на каждом запуске.
+    """
+
+    __tablename__ = "metric_knowledge"
+    __table_args__ = (
+        UniqueConstraint("direction_key", "metric_key", name="uq_metric_knowledge"),
+        Index("ix_metric_knowledge_direction", "direction_key"),
+        Index("ix_metric_knowledge_name_key", "direction_key", "name_key"),
+        Index("ix_metric_knowledge_status", "direction_key", "status", "updated_at"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    direction_key: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    name_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    metric_name: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    aliases: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    rules: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="found")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source_section_ids: Mapped[list[UUID]] = mapped_column(
+        ARRAY(PG_UUID(as_uuid=True)), nullable=False, default=list
+    )
+    model: Mapped[str | None] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(),
+        nullable=False,
+    )
+
+
 __all__ = [
     "Base",
     "WikiPage",
@@ -244,6 +319,8 @@ __all__ = [
     "SourceChunk",
     "EntityCandidate",
     "SectionProvenance",
+    "MetricCatalog",
+    "MetricKnowledge",
     "EMBED_DIM",
     "SCHEMA",
 ]

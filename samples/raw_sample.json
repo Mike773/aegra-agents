@@ -1,0 +1,127 @@
+{
+  "metrics": [
+    {
+      "metric_id": "M1",
+      "metric_name": "Производительность",
+      "metric_description": "Условные продукты на нормированный день",
+      "metric_type": "прямая",
+      "measure_type": "у.е.",
+      "calc_period": "неделя",
+      "dt": "2026-04-06",
+      "fact": 18.13,
+      "plan": 18.0,
+      "ex": 100.7,
+      "bs": 16.5,
+      "history": [
+        {"dt": "2026-03-30", "calc_period": "неделя", "fact": 17.4, "plan": 18.0, "bs": 16.3},
+        {"dt": "2026-03-23", "calc_period": "неделя", "fact": 16.9, "plan": 18.0, "bs": 16.1}
+      ],
+      "details": [
+        {
+          "metric_id": "M1",
+          "element_name": "Банковские счета",
+          "metric_type": "прямая",
+          "measure_type": "у.е.",
+          "calc_period": "неделя",
+          "dt": "2026-04-06",
+          "fact": 19.2,
+          "bs": 17.0,
+          "history": [
+            {"dt": "2026-03-30", "calc_period": "неделя", "fact": 18.5, "plan": 18.0, "bs": 16.8}
+          ]
+        },
+        {
+          "metric_id": "M1",
+          "element_name": "Кредитование",
+          "metric_type": "прямая",
+          "measure_type": "у.е.",
+          "calc_period": "неделя",
+          "dt": "2026-04-06",
+          "fact": 17.5,
+          "bs": 16.0
+        }
+      ],
+      "children_metrics": [
+        {
+          "metric_id": "M1.1",
+          "metric_name": "Доля переводов",
+          "metric_description": "Доля переведённых вызовов",
+          "metric_type": "обратная",
+          "measure_type": "%",
+          "calc_period": "неделя",
+          "parent_metric": "M1",
+          "influence_percent": 4,
+          "dt": "2026-04-06",
+          "fact": 10.48,
+          "plan": 10.0,
+          "bs": 12.5,
+          "history": [
+            {"dt": "2026-03-30", "calc_period": "неделя", "fact": 11.1, "plan": 10.0, "bs": 12.7}
+          ],
+          "details": [
+            {
+              "metric_id": "M1.1",
+              "element_name": "Банковские счета",
+              "metric_type": "обратная",
+              "measure_type": "%",
+              "calc_period": "неделя",
+              "dt": "2026-04-06",
+              "fact": 24.45,
+              "bs": 16.45
+            }
+          ]
+        },
+        {
+          "metric_id": "M1.2",
+          "metric_name": "Время удержания",
+          "metric_description": "Метрика-родитель без собственного fact, но с детализацией и потомками",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "calc_period": "неделя",
+          "parent_metric": "M1",
+          "influence_percent": 2,
+          "dt": "2026-04-06",
+          "bs": 60.0,
+          "details": [
+            {
+              "metric_id": "M1.2",
+              "element_name": "Банковские счета",
+              "metric_type": "обратная",
+              "measure_type": "сек",
+              "calc_period": "неделя",
+              "dt": "2026-04-06",
+              "fact": 75.0,
+              "bs": 60.0
+            },
+            {
+              "metric_id": "M1.2",
+              "element_name": "Кредитование",
+              "metric_type": "обратная",
+              "measure_type": "сек",
+              "calc_period": "неделя",
+              "dt": "2026-04-06",
+              "fact": 50.0,
+              "bs": 60.0
+            }
+          ],
+          "children_metrics": [
+            {
+              "metric_id": "M1.2.1",
+              "metric_name": "Доля молчания",
+              "metric_description": "Доля молчания в разговоре",
+              "metric_type": "обратная",
+              "measure_type": "%",
+              "calc_period": "неделя",
+              "parent_metric": "M1.2",
+              "influence_percent": 1,
+              "dt": "2026-04-06",
+              "fact": 5.5,
+              "plan": 5.0,
+              "bs": 6.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
