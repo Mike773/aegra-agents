@@ -169,6 +169,37 @@ SELECT m.metric_id, m.name, m.ext_id, m.description, m.direction, m.unit,
        (m.depth = 1) AS is_root
 FROM metric m;
 
+-- Показатель глазами конкретного человека.
+--
+-- has_aggregate — есть ли у ЭТОГО человека строка без разреза, то есть
+-- собственный итог показателя. Считать глобально по имени нельзя: у
+-- руководителя итог может быть, а у сотрудника тот же показатель представлен
+-- только разрезами, и глобальный флаг увёл бы запрос в element IS NULL и
+-- вернул бы пусто, скрыв данные сотрудника.
+CREATE VIEW v_metric_person AS
+SELECT p.person_key,
+       m.name AS metric,
+       m.metric_id,
+       m.depth,
+       m.direction,
+       m.unit,
+       m.kind,
+       EXISTS (SELECT 1 FROM fact f
+                WHERE f.person_id = p.person_id AND f.metric_id = m.metric_id
+                  AND f.element IS NULL) AS has_aggregate,
+       (SELECT COUNT(DISTINCT f.element) FROM fact f
+         WHERE f.person_id = p.person_id AND f.metric_id = m.metric_id
+           AND f.element IS NOT NULL) AS n_elements,
+       (SELECT COUNT(DISTINCT f.period_id) FROM fact f
+         WHERE f.person_id = p.person_id AND f.metric_id = m.metric_id) AS n_periods,
+       (SELECT COUNT(*) FROM fact f
+         WHERE f.person_id = p.person_id AND f.metric_id = m.metric_id
+           AND f.plan IS NOT NULL AND f.plan <> 0) > 0 AS has_plan
+FROM person p
+JOIN metric m ON EXISTS (
+        SELECT 1 FROM fact f
+         WHERE f.person_id = p.person_id AND f.metric_id = m.metric_id);
+
 CREATE VIEW v_tree AS
 SELECT pm.name AS parent, cm.name AS child, e.influent_percent,
        cm.depth AS child_depth, cm.path AS child_path, e.edge_kind,

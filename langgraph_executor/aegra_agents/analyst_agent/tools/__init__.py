@@ -28,17 +28,21 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
 
     tools.append(
         StructuredTool.from_function(
-            func=lambda metric, person=None, date=None, depth=2: metric_card_text(
-                ctx, metric=metric, person=person, date=date, depth=depth
+            func=lambda metric, person=None, date=None, depth=2, element=None: (
+                metric_card_text(
+                    ctx, metric=metric, person=person, date=date, depth=depth,
+                    element=element,
+                )
             ),
             name="metric_card",
             description=(
                 "Всё об одном показателе за один вызов: описание и единицы, значения "
-                "по периодам с планом и вердиктами, разрезы, состав (влияющие "
+                "по периодам с планом и вердиктами, худшие разрезы, состав (влияющие "
                 "показатели с весами), место среди коллег. Аргументы: metric — "
                 "название показателя; person — чей результат (по умолчанию тот, кого "
                 "разбираем); date — конкретная дата, если нужна одна; depth — сколько "
-                "уровней состава показать."
+                "уровней состава показать; element — название разреза, если нужен ряд "
+                "по периодам одного конкретного разреза."
             ),
         )
     )

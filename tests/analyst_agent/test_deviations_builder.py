@@ -101,14 +101,21 @@ def test_element_included_only_when_material():
     assert "Мелкий" not in elements
 
 
-def test_elements_included_when_aggregate_itself_flagged():
-    """Если проблемен сам агрегат — разрезы нужны для декомпозиции, даже мелкие."""
+def test_flagged_aggregate_admits_only_worse_elements():
+    """Проблемный агрегат разбирается разрезами, которые ХУЖЕ него.
+
+    Раньше флаг агрегата пропускал любой свой разрез, и в карту лезли строки
+    вроде «худший разрез, к плану −5 %» внутри показателя с −30 %: такой разрез
+    не объясняет проблему, он лучше показателя в целом.
+    """
     metrics = [
-        make_metric("Продажи", fact=70.0, plan=100.0),
-        make_metric("Продажи", fact=95.0, plan=100.0, element="Мелкий"),
+        make_metric("Продажи", fact=70.0, plan=100.0),                    # −30 %
+        make_metric("Продажи", fact=95.0, plan=100.0, element="Мелкий"),  # −5 %
+        make_metric("Продажи", fact=20.0, plan=100.0, element="Крупный"), # −80 %
     ]
-    devs = _build(_db(make_dataset_obj(metrics)))
-    assert "Мелкий" in {d["element"] for d in devs if d["element"]}
+    elements = {d["element"] for d in _build(_db(make_dataset_obj(metrics))) if d["element"]}
+    assert "Крупный" in elements
+    assert "Мелкий" not in elements
 
 
 def test_priority_prefers_bigger_impact_and_scale():

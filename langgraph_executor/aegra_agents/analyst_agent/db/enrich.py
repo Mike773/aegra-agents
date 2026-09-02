@@ -132,6 +132,9 @@ def scoreboard_block(db: Any, *, person_key: str, max_depth: int = 1) -> str:
         return ""
     lines = ["ПОКАЗАТЕЛИ ВЕРХНЕГО УРОВНЯ (последнее значение каждого, со своей датой)"]
     for r in rows[:_SCOREBOARD_FULL_ROWS]:
+        if not r.get("has_aggregate"):
+            lines.append("- " + _no_total_line(r))
+            continue
         bits = [f"{r['metric']} ({r['date']}): факт {_num(r['fact'])}"]
         if r["unit"]:
             bits[0] += f" {r['unit']}"
@@ -173,14 +176,45 @@ def scoreboard_block(db: Any, *, person_key: str, max_depth: int = 1) -> str:
     return _trim("\n".join(lines), BUDGET_SCOREBOARD)
 
 
-def catalog_block(db: Any, *, budget_chars: int = BUDGET_CATALOG) -> str:
+def _default_person(db: Any) -> str:
+    row = db.conn.execute(
+        "SELECT person_key FROM person ORDER BY is_me, person_id LIMIT 1"
+    ).fetchone()
+    return row["person_key"] if row else ""
+
+
+def _no_total_line(r: dict[str, Any]) -> str:
+    """Строка показателя, у которого нет собственного итога.
+
+    Итог НЕ вычисляем: сложить проценты, средние или ранги по разрезам
+    бессмысленно. Вместо числа даём масштаб и худший разрез как зацепку.
+    """
+    date = f" ({r['date']})" if r.get("date") else ""
+    bits = [f"только разрезы: {r.get('n_elements') or 0}, своего итога нет"]
+    if r.get("n_bad_elements"):
+        bits.append(f"хуже плана {r['n_bad_elements']}")
+    if r.get("worst_element"):
+        bits.append(f"худший разрез — «{r['worst_element']}»")
+    return f"{r['metric']}{date}: " + ", ".join(bits)
+
+
+def catalog_block(
+    db: Any, *, person_key: str | None = None, budget_chars: int = BUDGET_CATALOG
+) -> str:
     """Каталог: все показатели 1-го и 2-го уровня.
 
     У показателя 2-го уровня печатаются счётчики потомков по слоям
     («10 метрик 3-го, 20 4-го») — имена глубже второго уровня в промпт не идут,
     их модель достаёт через SQL или карточку показателя.
+
+    Про разрезы здесь только ЧИСЛО и признак собственного итога: разрезов у
+    показателя бывают сотни, их имена в промпт не помещаются и не нужны.
     """
-    res = run_template(db.conn, "enrich_catalog", max_rows=1000, max_level=2, row_limit=1000)
+    person_key = person_key or _default_person(db)
+    res = run_template(
+        db.conn, "enrich_catalog", max_rows=1000,
+        person_key=person_key, max_level=2, row_limit=1000,
+    )
     rows = _rows(res)
     if not rows:
         return ""
@@ -206,8 +240,13 @@ def catalog_block(db: Any, *, budget_chars: int = BUDGET_CATALOG) -> str:
         if r["direction"]:
             tags.append(str(r["direction"]))
         tags.append("план есть" if r["has_plan"] else "плана нет")
-        if r["n_elements"]:
-            tags.append(f"разрезов {r['n_elements']}")
+        n_elements = r.get("n_elements") or 0
+        if n_elements and not r.get("has_aggregate"):
+            # Показателя как единого числа не существует: он есть только
+            # разрезами, и складывать их в итог нельзя.
+            tags.append(f"только разрезы: {n_elements}, своего итога нет")
+        elif n_elements:
+            tags.append(f"разрезов {n_elements}")
         if r["kind"] and r["kind"] != "уровень":
             tags.append(str(r["kind"]))
         if r["influent_percent"]:

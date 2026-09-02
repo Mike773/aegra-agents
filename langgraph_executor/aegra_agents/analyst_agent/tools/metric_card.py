@@ -13,6 +13,9 @@ from ..agent.guards import blank_to_none
 from ..db.sqlrunner import QueryResult, run_template
 
 _MAX_CANDIDATES = 8
+# Разрезов у показателя бывают сотни: в карточку идёт только край выборки.
+_WORST_ELEMENTS = 8
+_BEST_ELEMENTS = 2
 
 
 def _rows(res: QueryResult) -> list[dict[str, Any]]:
@@ -40,7 +43,21 @@ def _catalog_names(ctx: Any) -> list[str]:
     ]
 
 
-def _header(ctx: Any, name: str) -> list[str]:
+def _person_info(ctx: Any, person: str, name: str) -> dict[str, Any]:
+    """Как показатель выглядит у ЭТОГО человека: есть ли свой итог и сколько
+    разрезов. Считается на человека: у руководителя итог может быть, а у
+    сотрудника тот же показатель представлен только разрезами."""
+    row = ctx.db.conn.execute(
+        "SELECT has_aggregate, n_elements FROM v_metric_person "
+        "WHERE person_key = ? AND metric = ?",
+        (person, name),
+    ).fetchone()
+    if row is None:
+        return {"has_aggregate": 1, "n_elements": 0}
+    return {"has_aggregate": row["has_aggregate"], "n_elements": row["n_elements"]}
+
+
+def _header(ctx: Any, name: str, info: dict[str, Any] | None = None) -> list[str]:
     row = ctx.db.conn.execute(
         "SELECT name, description, unit, direction, kind, depth, path, parent_name, "
         "is_star, is_star_metric, star_of, kn_summary, kn_aliases, kn_cumulative, "
@@ -67,6 +84,15 @@ def _header(ctx: Any, name: str) -> list[str]:
         facts.append("это звезда: числа нет, только получена или нет")
     if row["star_of"]:
         facts.append(f"влияет на звезду «{row['star_of']}»")
+    info = info or {}
+    n_elements = info.get("n_elements") or 0
+    if n_elements and not info.get("has_aggregate"):
+        facts.append(
+            f"собственного итога нет — показатель есть только разрезами ({n_elements}); "
+            "складывать разрезы в итог нельзя"
+        )
+    elif n_elements:
+        facts.append(f"разрезов {n_elements}")
     if facts:
         lines.append("Свойства: " + "; ".join(facts) + ".")
     if row["kn_summary"]:
@@ -81,7 +107,9 @@ def _header(ctx: Any, name: str) -> list[str]:
     return lines
 
 
-def _periods(ctx: Any, person: str, name: str, date: str | None) -> list[str]:
+def _periods(
+    ctx: Any, person: str, name: str, date: str | None, info: dict[str, Any] | None = None
+) -> list[str]:
     res = run_template(
         ctx.db.conn, "tool_metric_card", person_key=person, metric=name, row_limit=40
     )
@@ -89,6 +117,14 @@ def _periods(ctx: Any, person: str, name: str, date: str | None) -> list[str]:
     if date:
         rows = [r for r in rows if r["date"] == date]
     if not rows:
+        info = info or {}
+        if info.get("n_elements") and not info.get("has_aggregate"):
+            # Не «данных нет», а «нет собственного итога»: ниже идут разрезы с
+            # данными, и без этой оговорки карточка противоречила бы сама себе.
+            return [
+                "СВОЕГО ИТОГА У ПОКАЗАТЕЛЯ НЕТ: он существует только разрезами "
+                f"({info['n_elements']}). Ниже — разрезы; складывать их в итог нельзя."
+            ]
         return ["Значений по периодам нет."]
     lines = ["ЗНАЧЕНИЯ ПО ПЕРИОДАМ (последнее сверху; у показателей даты могут различаться)"]
     for r in rows:
@@ -124,27 +160,53 @@ def _periods(ctx: Any, person: str, name: str, date: str | None) -> list[str]:
     return lines
 
 
-def _elements(ctx: Any, person: str, name: str) -> list[str]:
-    rows = _rows(
-        run_template(
-            ctx.db.conn, "tool_metric_elements", person_key=person, metric=name
-        )
-    )
-    if not rows:
+def _element_line(r: dict[str, Any]) -> str:
+    bits = [f"факт {_num(r['fact'])}"]
+    if r["plan"] is not None:
+        bits.append(f"план {_num(r['plan'])}")
+    if r["plan_status"]:
+        piece = _verdict(r["plan_status"])
+        if r["plan_dev_pct"] is not None:
+            piece += f" на {abs(r['plan_dev_pct']):.1f} %"
+        bits.append(piece)
+    if r["pop_status"]:
+        bits.append(_verdict(r["pop_status"]))
+    return f"- {r['element']} ({r['date']}): " + ", ".join(bits)
+
+
+def _elements(ctx: Any, person: str, name: str, total: int) -> list[str]:
+    """Край выборки разрезов: худшие и пара лучших.
+
+    Перечислять сотни разрезов бессмысленно — модель получает верхушку и
+    подсказку, как достать остальное запросом.
+    """
+    worst = _rows(run_template(
+        ctx.db.conn, "tool_metric_elements", person_key=person, metric=name,
+        worst_first=True, row_limit=_WORST_ELEMENTS,
+    ))
+    if not worst:
         return []
-    lines = ["РАЗРЕЗЫ (последнее значение каждого)"]
-    for r in rows:
-        bits = [f"факт {_num(r['fact'])}"]
-        if r["plan"] is not None:
-            bits.append(f"план {_num(r['plan'])}")
-        if r["plan_status"]:
-            piece = _verdict(r["plan_status"])
-            if r["plan_dev_pct"] is not None:
-                piece += f" на {abs(r['plan_dev_pct']):.1f} %"
-            bits.append(piece)
-        if r["pop_status"]:
-            bits.append(_verdict(r["pop_status"]))
-        lines.append(f"- {r['element']} ({r['date']}): " + ", ".join(bits))
+    shown = {r["element"] for r in worst}
+    best = [
+        r for r in _rows(run_template(
+            ctx.db.conn, "tool_metric_elements", person_key=person, metric=name,
+            worst_first=False, row_limit=_BEST_ELEMENTS + len(shown),
+        ))
+        if r["element"] not in shown
+    ][:_BEST_ELEMENTS]
+
+    lines = ["РАЗРЕЗЫ (последнее значение каждого; худшие сверху)"]
+    lines.extend(_element_line(r) for r in worst)
+    if best:
+        lines.append("Лучшие разрезы:")
+        lines.extend(_element_line(r) for r in best)
+    total = total or len(worst)
+    if total > len(worst) + len(best):
+        lines.append(
+            f"Показаны {len(worst) + len(best)} из {total} разрезов. Остальные — "
+            "запросом с фильтром по имени (LIKE) и LIMIT либо "
+            "metric_card с аргументом element."
+        )
     return lines
 
 
@@ -207,6 +269,47 @@ def _peers(ctx: Any, person: str, name: str) -> list[str]:
     return lines
 
 
+def _single_element(ctx: Any, person: str, name: str, element: str) -> str:
+    """Карточка одного разреза: его ряд по периодам."""
+    known = [
+        r["element"]
+        for r in ctx.db.conn.execute(
+            "SELECT DISTINCT element FROM v_fact WHERE person_key = ? AND metric = ? "
+            "AND element IS NOT NULL ORDER BY element LIMIT ?",
+            (person, name, _MAX_CANDIDATES),
+        )
+    ]
+    match = ctx.db.resolve_element(person, name, element)
+    if match is None:
+        return (
+            f"Разрез «{element}» у показателя «{name}» не найден. "
+            f"Есть, например: {', '.join(known)}. "
+            "Полный список — запросом к v_fact_latest с фильтром по имени."
+        )
+    rows = _rows(run_template(
+        ctx.db.conn, "tool_metric_history", person_key=person, metric=name,
+        element=match, row_limit=40,
+    ))
+    lines = [f"ПОКАЗАТЕЛЬ «{name}», РАЗРЕЗ «{match}» — значения по периодам"]
+    if not rows:
+        lines.append("Значений нет.")
+        return "\n".join(lines)
+    for r in rows:
+        bits = [f"факт {_num(r['fact'])}"]
+        if r["plan"] is not None:
+            bits.append(f"план {_num(r['plan'])}")
+        if r["plan_status"]:
+            piece = _verdict(r["plan_status"])
+            bits.append(piece)
+        if r["pop_status"]:
+            piece = _verdict(r["pop_status"])
+            if r["pop_change_pct"] is not None:
+                piece += f" ({r['pop_change_pct']:+.1f} % к прошлому периоду)"
+            bits.append(piece)
+        lines.append(f"- {r['date']}: " + ", ".join(bits))
+    return "\n".join(lines)
+
+
 def metric_card_text(
     ctx: Any,
     *,
@@ -214,6 +317,7 @@ def metric_card_text(
     person: str | None = None,
     date: str | None = None,
     depth: int = 2,
+    element: str | None = None,
 ) -> str:
     """Карточка показателя одним текстом."""
     ctx.used_data_tools = True
@@ -238,12 +342,17 @@ def metric_card_text(
         if resolved:
             person_key = resolved
 
+    element = blank_to_none(element)
+    if isinstance(element, str) and element.strip():
+        return _single_element(ctx, person_key, ref.name, element.strip())
+
+    info = _person_info(ctx, person_key, ref.name)
     blocks = [
-        "\n".join(_header(ctx, ref.name)),
-        "\n".join(_periods(ctx, person_key, ref.name, date)),
+        "\n".join(_header(ctx, ref.name, info)),
+        "\n".join(_periods(ctx, person_key, ref.name, date, info)),
     ]
     for part in (
-        _elements(ctx, person_key, ref.name),
+        _elements(ctx, person_key, ref.name, info.get("n_elements") or 0),
         _children(ctx, person_key, ref.name, depth),
         _peers(ctx, person_key, ref.name),
     ):

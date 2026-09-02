@@ -409,6 +409,36 @@ class RunDb:
             return MetricRef(mid, name, path)
         return None
 
+    def resolve_element(self, person_key: str, metric: str, text: Any) -> str | None:
+        """Имя разреза → точное значение из данных.
+
+        Разрезов бывают сотни, и модель почти всегда называет их неточно:
+        принимаем точное совпадение, регистр и подстроку.
+        """
+        norm = loader.norm_text(text)
+        if not norm:
+            return None
+        rows = [
+            r["element"]
+            for r in self.conn.execute(
+                "SELECT DISTINCT element FROM v_fact WHERE person_key = ? "
+                "AND ru_lower(metric) = ru_lower(?) AND element IS NOT NULL",
+                (person_key, metric),
+            )
+        ]
+        for value in rows:
+            if loader.norm_text(value) == norm:
+                return value
+        contains = [v for v in rows if norm in loader.norm_text(v)]
+        if len(contains) == 1:
+            return contains[0]
+        best: tuple[float, str] | None = None
+        for value in rows:
+            score = similarity_ratio(norm, loader.norm_text(value))
+            if score >= _FUZZY_THRESHOLD and (best is None or score > best[0]):
+                best = (score, value)
+        return best[1] if best else None
+
     def resolve_person(self, text: Any) -> str | None:
         """Текст → person_key: табельный/ключ → ФИО (подстрока) → 'я'/руководитель."""
         norm = loader.norm_text(text)

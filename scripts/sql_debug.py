@@ -137,7 +137,7 @@ def main() -> int:
             return 1
         print(enrich.enrichment_block(db, person_key=person))
         print()
-        print(enrich.catalog_block(db))
+        print(enrich.catalog_block(db, person_key=person))
         return 0
 
     if args.template:

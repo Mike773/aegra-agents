@@ -184,24 +184,66 @@ def build_deviations(
                 continue
 
         share_pct = row.get("share_pct")
-        for kind, polarity in _kinds_for(row):
+        kinds = _kinds_for(row)
+        if row["element"] is not None:
+            # Разрез даёт РОВНО ОДНУ запись: иначе один и тот же разрез попадал
+            # в карту дважды (и «худший разрез», и «ухудшается»), удваивая шум.
+            kinds = _element_kind(kinds)
+        for kind, polarity in kinds:
             dev = _make(row, kind, polarity, share_pct=share_pct, turn=turn)
-            if row["element"] is not None and kind == "below_plan":
-                dev["kind"] = "segment_worst"
-                dev["id"] = _dev_id(
-                    "segment_worst", row["person_key"], row["metric"], row["element"]
-                )
             _apply_task_focus(dev, row, task_metrics, task_by_metric, bool(task_metrics))
             found[dev["id"]] = dev
 
     merged = _merge(found, previous or [], turn)
     auto = [d for d in merged if d["source"] == "auto" and d["status"] == "open"]
     other = [d for d in merged if d not in auto]
-    auto.sort(key=lambda d: (-d["priority"], -(d.get("signal") or 0), d["metric_name"]))
-    kept = auto[:max_auto]
-    result = kept + other
+    result = _select_auto(auto, max_auto) + other
     result.sort(key=lambda d: (-d["priority"], d["metric_name"]))
     return result
+
+
+def _element_kind(kinds: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Сильнейший вид отклонения для строки-разреза, одной записью.
+
+    Отрицательные важнее положительных; «хуже плана» у разреза называется
+    «худший разрез», «лучше плана» — «лучший разрез».
+    """
+    if not kinds:
+        return []
+    negative = [k for k in kinds if k[1] == "negative"]
+    chosen = negative[0] if negative else kinds[0]
+    kind, polarity = chosen
+    if kind == "below_plan":
+        kind = "segment_worst"
+    elif kind == "above_plan":
+        kind = "segment_best"
+    return [(kind, polarity)]
+
+
+def _select_auto(auto: list[dict[str, Any]], max_auto: int) -> list[dict[str, Any]]:
+    """Отбор в карту: сперва показатели, потом разрезы как их объяснение.
+
+    Разрез не конкурирует с показателем: у одного показателя бывают сотни
+    разрезов, и без разделения они занимали всю карту, вытесняя агрегатные
+    отклонения других показателей.
+    """
+    aggregates = [d for d in auto if not d.get("element")]
+    elements = [d for d in auto if d.get("element")]
+    order = lambda d: (-d["priority"], -(d.get("signal") or 0), d["metric_name"])  # noqa: E731
+    aggregates.sort(key=order)
+    elements.sort(key=order)
+
+    kept = aggregates[:max_auto]
+    per_metric: dict[str, int] = {}
+    for dev in elements:
+        if len(kept) >= max_auto:
+            break
+        name = dev["metric_name"]
+        if per_metric.get(name, 0) >= rules.MAX_ELEMENT_DEVS_PER_METRIC:
+            continue
+        per_metric[name] = per_metric.get(name, 0) + 1
+        kept.append(dev)
+    return kept
 
 
 def _apply_task_focus(

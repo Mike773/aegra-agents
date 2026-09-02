@@ -32,7 +32,7 @@ def build_run_state(
     blocks = {
         "schema_doc": core.schema_doc(db),
         "enrichment_block": enrich.enrichment_block(db, person_key=person_key),
-        "catalog_block": enrich.catalog_block(db),
+        "catalog_block": enrich.catalog_block(db, person_key=person_key),
     }
     return db, blocks
 
@@ -97,9 +97,13 @@ def make_prepare_node():
             knowledge_error = sync.error
             await asyncio.to_thread(knowledge_repo.apply_knowledge, db, sync.rows)
         blocks["knowledge_block"] = knowledge_repo.knowledge_block(db)
-        # Заново пересчитываем блоки под реального фокус-человека.
+        # Заново пересчитываем блоки под реального фокус-человека: и состав
+        # данных, и каталог (число разрезов и признак итога — на человека).
         blocks["enrichment_block"] = await asyncio.to_thread(
             enrich.enrichment_block, db, person_key=person_key
+        )
+        blocks["catalog_block"] = await asyncio.to_thread(
+            enrich.catalog_block, db, person_key=person_key
         )
 
         # Задачи из брифинга: без dashboard_mode они всё равно смещают фокус

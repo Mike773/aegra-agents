@@ -97,7 +97,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         enrichment = state.get("enrichment_block") or enrich.enrichment_block(
             db, person_key=person_key
         )
-        catalog = state.get("catalog_block") or enrich.catalog_block(db)
+        catalog = state.get("catalog_block") or enrich.catalog_block(db, person_key=person_key)
 
         task_block = ""
         if is_dashboard:
