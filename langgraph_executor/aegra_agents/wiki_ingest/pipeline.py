@@ -4,7 +4,8 @@
 ``SourceDoc`` (его сырой текст в ``doc.content``). За один проход:
 
 1. ``analyze_document`` по началу документа → ``domain_brief`` (контекст для extraction).
-2. ``chunk_text`` → эмбеддинг чанков → запись ``source_chunk``.
+2. ``chunk_text`` → запись ``source_chunk`` (без эмбеддинга: вектор чанка на
+   построение вики не влияет, см. миграцию 0004).
 3. По каждому чанку ``extract_entities`` → эмбеддинг кандидата по чистому
    ``name`` → запись ``entity_candidate``.
 4. ``resolve_candidates`` свежих кандидатов → wiki-страницы + ``section_provenance``.
@@ -98,7 +99,7 @@ async def ingest_one_document(
         max_size=cfg.chunk_max_size,
         overlap=cfg.chunk_overlap,
     )
-    chunk_rows = await _persist_chunks(session, doc, chunks, embedder)
+    chunk_rows = await _persist_chunks(session, doc, chunks)
 
     # Шаг 3: извлечение сущностей (+ упоминаний для заглушек) по чанкам.
     entity_total = 0
@@ -215,13 +216,17 @@ async def _persist_chunks(
     session: AsyncSession,
     doc: SourceDoc,
     chunks: list[Chunk],
-    embedder: EmbeddingClient,
 ) -> list[SourceChunk]:
+    """Сохранить чанки документа. Эмбеддинги им не считаются.
+
+    Вектор чанка не участвовал в построении вики: сущности извлекаются из
+    ТЕКСТА чанка, а со страницами сопоставляется эмбеддинг имени кандидата.
+    Единственный потребитель — gap_resolver — теперь читает чанки напрямую.
+    """
     if not chunks:
         return []
-    vectors = await embed_batched(embedder, [c.text for c in chunks])
     rows: list[SourceChunk] = []
-    for chunk, vec in zip(chunks, vectors):
+    for chunk in chunks:
         row = SourceChunk(
             doc_id=doc.id,
             direction_key=doc.direction_key,
@@ -229,7 +234,6 @@ async def _persist_chunks(
             text=chunk.text,
             char_start=chunk.char_start,
             char_end=chunk.char_end,
-            embedding=vec,
         )
         session.add(row)
         rows.append(row)

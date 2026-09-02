@@ -187,7 +187,9 @@ class SourceChunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     char_start: Mapped[int] = mapped_column(Integer, nullable=False)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM))
+    # Вектора у чанка нет: на построение вики он не влиял (страницы собираются по
+    # эмбеддингу имени сущности-кандидата), а gap_resolver проверяет чанки
+    # судьёй напрямую. См. миграцию 0004.
 
 
 class EntityCandidate(Base):

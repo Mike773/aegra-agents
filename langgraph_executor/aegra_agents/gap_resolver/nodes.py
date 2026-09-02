@@ -4,6 +4,12 @@
 ``investigate`` — по каждой группе ищем ответ в исходных документах
 (``source_chunk``), заводим пустую wiki-заглушку по теме и, если ответ нашёлся,
 помечаем все дубли вопроса решёнными;
+
+Отбора кандидатов больше нет: у чанков нет эмбеддинга (миграция 0004), поэтому
+судья проверяет КАЖДЫЙ чанк направления отдельным вызовом. Отсюда ограничители —
+ранняя остановка на найденном ответе, кап чанков на вопрос и общий кап вызовов
+судьи на прогон: вопрос без ответа стоит столько вызовов, сколько чанков в
+направлении, а таких вопросов обычно большинство.
 ``finalize`` — собираем человекочитаемый отчёт «решено / не решено / что загрузить».
 
 ``direction_key`` и параметры берём из ``config.configurable``, затем из state,
@@ -11,7 +17,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
@@ -20,19 +28,21 @@ from langchain_core.runnables import RunnableConfig
 
 from ..easyrag.db import session_scope
 from ..easyrag.models import QueryGap
-from ..wiki_ingest.embeddings import EmbeddingClient
 from ..wiki_ingest.llm import LLMClient
 from ..wiki_ingest.repository import ensure_stub_page
 from .config import get_settings
 from .judge import answer_in_sources
 from .repository import load_unresolved_groups, mark_groups_resolved
-from .retrieval import search_source_chunks
+from .retrieval import SourceMatch, load_source_chunks
 from .state import GapResolverState
 from .topic import extract_topics
 
 logger = logging.getLogger(__name__)
 
 _PREVIEW = 200
+# Слова короче трёх букв в упорядочивании не участвуют — тот же приём, что в
+# поиске страниц-заглушек в оркестраторе.
+_MIN_WORD = 3
 
 
 def _reply(text: str, **extra: Any) -> dict:
@@ -89,6 +99,27 @@ def _cfg_bool(config, key: str, default: bool) -> bool:
     return bool(v)
 
 
+def _words(text: str) -> set[str]:
+    return {w.casefold() for w in re.findall(r"\w+", text or "") if len(w) >= _MIN_WORD}
+
+
+def order_chunks(query: str, chunks: list[SourceMatch]) -> list[SourceMatch]:
+    """Очередь обхода: сперва чанки со словами вопроса.
+
+    Ничего НЕ отбрасывает — меняется только порядок. Он важен из-за ранней
+    остановки: если ответ есть, его лучше найти на первых вызовах судьи, а не на
+    последних. Порядок внутри равных групп остаётся исходным (документ, позиция).
+    """
+    wanted = _words(query)
+    if not wanted:
+        return list(chunks)
+    scored = [
+        (len(wanted & _words(c.text)), -i, c) for i, c in enumerate(chunks)
+    ]
+    scored.sort(key=lambda item: (-item[0], -item[1]))
+    return [c for _, _, c in scored]
+
+
 async def load_gaps(state: GapResolverState, config: RunnableConfig) -> dict:
     direction_key = _resolve_direction_key(state, config)
     if not direction_key:
@@ -101,16 +132,70 @@ async def load_gaps(state: GapResolverState, config: RunnableConfig) -> dict:
     return {"direction_key": direction_key, "gaps": groups}
 
 
+async def _judge_chunks(
+    query: str,
+    chunks: list[SourceMatch],
+    *,
+    llm: Any,
+    concurrency: int,
+    budget: int,
+) -> tuple[SourceMatch | None, str, int]:
+    """Проверяет чанки судьёй по одному; возвращает (чанк-ответ, цитата, сколько проверено).
+
+    Ранняя остановка: как только вердикт положительный, остальные проверки
+    отменяются — незачем платить за то, что уже найдено. ``budget`` ограничивает
+    число вызовов сверху (общий потолок прогона).
+    """
+    if not chunks or budget <= 0:
+        return None, "", 0
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    checked = 0
+    found_at: SourceMatch | None = None
+    quote = ""
+    stop = asyncio.Event()
+
+    async def check(chunk: SourceMatch) -> None:
+        nonlocal checked, found_at, quote
+        if stop.is_set():
+            return
+        async with semaphore:
+            if stop.is_set():
+                return
+            verdict = await answer_in_sources(query, [chunk.text], llm=llm)
+            checked += 1
+            if verdict.found is None:
+                # Судья не ответил после ретраев — трактуем консервативно как
+                # «не подтверждено», вопрос останется открытым.
+                logger.warning(
+                    "gap_resolver: судья не дал вердикт по чанку %s#%s",
+                    chunk.uri, chunk.ord,
+                )
+                return
+            if verdict.found and found_at is None:
+                found_at = chunk
+                quote = verdict.quote
+                stop.set()
+
+    tasks = [asyncio.create_task(check(c)) for c in chunks[:budget]]
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        for task in tasks:
+            task.cancel()
+    return found_at, quote, checked
+
+
 async def investigate(state: GapResolverState, config: RunnableConfig) -> dict:
     direction_key = _resolve_direction_key(state, config)
     gaps = state.get("gaps") or []
     settings = get_settings()
-    top_k = _cfg_int(config, state, "top_k", settings.top_k)
-    candidate_thresh = _cfg_float(config, "candidate_thresh", settings.candidate_thresh)
+    max_chunks = _cfg_int(config, state, "max_chunks_per_gap", settings.max_chunks_per_gap)
+    concurrency = _cfg_int(config, state, "judge_concurrency", settings.judge_concurrency)
+    max_calls = _cfg_int(config, state, "max_judge_calls", settings.max_judge_calls)
     create_stub = _cfg_bool(config, "create_stub_pages", settings.create_stub_pages)
     mark_resolved = _cfg_bool(config, "mark_resolved", settings.mark_resolved)
 
-    embedder = EmbeddingClient()
     llm = LLMClient()
     topics = await extract_topics([g["query"] for g in gaps], llm=llm)
 
@@ -118,8 +203,15 @@ async def investigate(state: GapResolverState, config: RunnableConfig) -> dict:
     unresolved: list[dict[str, Any]] = []
     stub_slugs: list[str] = []
     errors: list[dict[str, Any]] = list(state.get("errors") or [])
+    calls_left = max_calls
+    budget_exhausted = False
 
     for group, topic in zip(gaps, topics):
+        if calls_left <= 0:
+            # Потолок вызовов исчерпан: оставшиеся вопросы честно не трогаем,
+            # они разберутся на следующем прогоне.
+            budget_exhausted = True
+            break
         try:
             async with session_scope() as session:
                 gap = await session.get(QueryGap, UUID(group["id"]))
@@ -130,36 +222,16 @@ async def investigate(state: GapResolverState, config: RunnableConfig) -> dict:
                 ):
                     continue
 
-                if gap.embedding is not None:
-                    vec = [float(x) for x in gap.embedding]
-                else:
-                    vec = await embedder.embed_one(group["query"])
-
-                matches = await search_source_chunks(
-                    session, direction_key=direction_key, query_vec=vec, top_k=top_k
+                chunks = await load_source_chunks(
+                    session, direction_key=direction_key, limit=max_chunks
                 )
-                best = matches[0] if matches else None
-
-                # Векторный отбор → LLM-судья по тексту кандидатов. Близость лишь
-                # тематическая (вопрос про объект ≠ ответ про него есть), поэтому
-                # «найден ли ответ» решает judge; порог — только префильтр кандидатов.
-                candidates = [m for m in matches if m.similarity >= candidate_thresh]
-                quote = ""
-                if candidates:
-                    verdict = await answer_in_sources(
-                        group["query"], [m.text for m in candidates], llm=llm
-                    )
-                    if verdict.found is None:
-                        logger.warning(
-                            "gap_resolver: судья не дал вердикт по gap id=%s — оставляю открытым",
-                            group["id"],
-                        )
-                    # found=None трактуем консервативно как «не подтверждено» —
-                    # gap остаётся открытым до следующего прогона.
-                    found = bool(verdict.found)
-                    quote = verdict.quote
-                else:
-                    found = False
+                ordered = order_chunks(group["query"], chunks)
+                best, quote, checked = await _judge_chunks(
+                    group["query"], ordered,
+                    llm=llm, concurrency=concurrency, budget=calls_left,
+                )
+                calls_left -= checked
+                found = best is not None
 
                 stub_slug = None
                 if create_stub:
@@ -173,19 +245,20 @@ async def investigate(state: GapResolverState, config: RunnableConfig) -> dict:
                     "query": group["query"],
                     "topic": topic,
                     "stub_slug": stub_slug,
+                    "chunks_checked": checked,
                 }
                 if found:
                     rec["evidence"] = {
                         "uri": best.uri,
-                        "similarity": round(best.similarity, 3),
+                        "ord": best.ord,
                         "preview": (quote or best.text or "")[:_PREVIEW],
                     }
                     if mark_resolved:
                         await mark_groups_resolved(session, group["ids"])
                 else:
-                    rec["best_similarity"] = (
-                        round(best.similarity, 3) if best is not None else None
-                    )
+                    # Уперлись в кап — значит просмотрели не весь корпус, и
+                    # «ответа нет» здесь слабее, чем при полном обходе.
+                    rec["capped"] = len(chunks) >= max_chunks and checked >= max_chunks
             # Транзакция закоммичена — только теперь фиксируем результат в стейте,
             # чтобы при откате (например, упал mark) отчёт не разошёлся с БД.
             if stub_slug:
@@ -200,6 +273,8 @@ async def investigate(state: GapResolverState, config: RunnableConfig) -> dict:
         "unresolved": unresolved,
         "created_stub_pages": list(dict.fromkeys(stub_slugs)),
         "errors": errors,
+        "budget_exhausted": budget_exhausted,
+        "judge_calls": max_calls - calls_left,
     }
 
 
@@ -229,14 +304,24 @@ async def finalize(state: GapResolverState) -> dict:
     ]
     for r in resolved:
         ev = r.get("evidence") or {}
-        src = f"{ev.get('uri', '?')} (близость {ev.get('similarity')})" if ev else "?"
+        src = f"{ev.get('uri', '?')}, фрагмент {ev.get('ord')}" if ev else "?"
         stub = f"; заглушка «{r['stub_slug']}»" if r.get("stub_slug") else ""
-        lines.append(f"  • «{r['query']}» → тема «{r['topic']}»; источник: {src}{stub}")
+        checked = r.get("chunks_checked")
+        scanned = f"; проверено фрагментов: {checked}" if checked is not None else ""
+        lines.append(
+            f"  • «{r['query']}» → тема «{r['topic']}»; источник: {src}{scanned}{stub}"
+        )
 
     lines.append(f"Не решено (данных в источниках нет): {len(unresolved)}")
     for u in unresolved:
         stub = f"; заглушка «{u['stub_slug']}»" if u.get("stub_slug") else ""
-        lines.append(f"  • «{u['query']}» → тема «{u['topic']}»{stub}")
+        checked = u.get("chunks_checked")
+        scanned = f"; проверено фрагментов: {checked}" if checked is not None else ""
+        # Кап означает, что корпус просмотрен не весь, и вывод «ответа нет» слабее.
+        capped = " (дошли до предела фрагментов на вопрос)" if u.get("capped") else ""
+        lines.append(
+            f"  • «{u['query']}» → тема «{u['topic']}»{scanned}{capped}{stub}"
+        )
 
     if unresolved:
         topics = list(dict.fromkeys(u["topic"] for u in unresolved))
@@ -248,6 +333,11 @@ async def finalize(state: GapResolverState) -> dict:
     if stubs:
         lines.append(
             f"Создано пустых wiki-страниц: {len(stubs)} ({', '.join(stubs)})."
+        )
+    if state.get("budget_exhausted"):
+        lines.append(
+            "Достигнут потолок вызовов проверки: часть вопросов не разобрана, "
+            "они попадут в следующий прогон."
         )
     if errors:
         lines.append(f"Ошибок: {len(errors)}.")

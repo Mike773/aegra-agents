@@ -1,9 +1,11 @@
-"""Поиск по исходным документам направления (``source_chunk``) под gap-вопрос.
+"""Чтение исходных документов направления (``source_chunk``) для разбора пробелов.
 
-Зеркалит ``easyrag.retrieval._vector_top_k``, но идёт по ``source_chunk`` (сырой
-текст загруженных документов), а не по ``wiki_section``. Нужен, чтобы понять,
-есть ли ответ на вопрос в уже загруженных источниках, даже если в wiki его ещё
-нет. Фильтр по ``direction_key`` — выборка только в пределах направления.
+Векторного отбора здесь больше нет: у чанков нет эмбеддинга (миграция 0004), и
+отбирать «похожие» нечем и незачем. Отдаём чанки направления как есть, а решает,
+есть ли в них ответ, LLM-судья — по каждому чанку отдельно.
+
+Порядок детерминированный (документ, затем позиция в нём): при равных условиях
+прогон должен вести себя одинаково от запуска к запуску.
 """
 from __future__ import annotations
 
@@ -23,29 +25,28 @@ class SourceMatch:
     uri: str
     ord: int
     text: str
-    similarity: float
 
 
-async def search_source_chunks(
+async def load_source_chunks(
     session: AsyncSession,
     *,
     direction_key: str,
-    query_vec: list[float],
-    top_k: int = 5,
+    limit: int = 400,
 ) -> list[SourceMatch]:
-    """Топ-K чанков исходных документов направления по косинусной близости."""
-    if top_k <= 0 or not query_vec:
+    """Чанки исходных документов направления, до ``limit`` штук.
+
+    ``limit`` — не отбор по релевантности, а предохранитель: судья вызывается на
+    каждый чанк, поэтому размер выборки прямо задаёт стоимость разбора одного
+    пробела.
+    """
+    if limit <= 0 or not direction_key:
         return []
-    distance = SourceChunk.embedding.cosine_distance(query_vec).label("distance")
     stmt = (
-        select(SourceChunk, SourceDoc.uri, distance)
+        select(SourceChunk, SourceDoc.uri)
         .join(SourceDoc, SourceDoc.id == SourceChunk.doc_id)
-        .where(
-            SourceChunk.direction_key == direction_key,
-            SourceChunk.embedding.is_not(None),
-        )
-        .order_by(distance.asc())
-        .limit(top_k)
+        .where(SourceChunk.direction_key == direction_key)
+        .order_by(SourceDoc.uri, SourceChunk.ord)
+        .limit(limit)
     )
     rows = (await session.execute(stmt)).all()
     return [
@@ -55,10 +56,9 @@ async def search_source_chunks(
             uri=uri,
             ord=ch.ord,
             text=ch.text,
-            similarity=1.0 - float(dist),
         )
-        for ch, uri, dist in rows
+        for ch, uri in rows
     ]
 
 
-__all__ = ["SourceMatch", "search_source_chunks"]
+__all__ = ["SourceMatch", "load_source_chunks"]

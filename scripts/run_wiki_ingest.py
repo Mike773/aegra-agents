@@ -20,16 +20,20 @@ import re
 import sys
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+# Без этого пакет берётся из site-packages: editable-установка venv может
+# указывать на другой каталог, и скрипт молча прогонит чужой код.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from langgraph_executor.aegra_agents.easyrag.db import get_engine, session_scope
-from langgraph_executor.aegra_agents.easyrag.models import (
+from sqlalchemy import delete, func, select  # noqa: E402
+
+from langgraph_executor.aegra_agents.easyrag.db import get_engine, session_scope  # noqa: E402
+from langgraph_executor.aegra_agents.easyrag.models import (  # noqa: E402
     SourceDoc,
     WikiLink,
     WikiPage,
     WikiSection,
 )
-from langgraph_executor.aegra_agents.wiki_ingest.graph import graph
+from langgraph_executor.aegra_agents.wiki_ingest.graph import graph  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[1]
 _MIGRATION = _ROOT / "migrations" / "wiki_rag" / "0002_ingest.sql"
