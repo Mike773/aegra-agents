@@ -85,6 +85,8 @@ class AnalystOutput(TypedDict, total=False):
     analytics_answer: str | None
     analytics_error: str | None
 
+    knowledge_error: str | None
+
     memory_context: str | None
     memory_error: str | None
     memory_saved: bool | None
@@ -112,6 +114,7 @@ class AnalystState(AnalystOutput, total=False):
     schema_doc: str
     enrichment_block: str
     catalog_block: str
+    knowledge_block: str
 
     # Карта отклонений на весь диалог (пересобирается и дополняется каждый ход).
     deviations: list[dict]

@@ -21,6 +21,9 @@ DEFAULT_TOOL_BUDGET = 18
 # В составном разборе бюджет на КАЖДУЮ задачу меньше: задач несколько.
 DEFAULT_TASK_TOOL_BUDGET = 10
 MAX_TASKS = 8
+# Сколько недостающих трактовок добираем прямо в ходе (остальное — фоновый граф)
+DEFAULT_KNOWLEDGE_MAX_NEW = 10
+DEFAULT_KNOWLEDGE_TIMEOUT = 25.0
 
 
 @dataclass
@@ -39,6 +42,9 @@ class RunConfig:
     gap_on_unanswered: bool = True
     use_peer_aggregates: bool = True
     text2sql_enabled: bool = True
+    knowledge_enabled: bool = True
+    knowledge_max_new: int = DEFAULT_KNOWLEDGE_MAX_NEW
+    knowledge_timeout: float = DEFAULT_KNOWLEDGE_TIMEOUT
 
     emit_progress_messages: bool = True
     describe_answer: bool = False
@@ -81,6 +87,11 @@ class RunConfig:
             gap_on_unanswered=config_flag(config, "gap_on_unanswered", default=True),
             use_peer_aggregates=config_flag(config, "use_peer_aggregates", default=True),
             text2sql_enabled=config_flag(config, "text2sql_enabled", default=True),
+            knowledge_enabled=config_flag(config, "knowledge_enabled", default=True),
+            knowledge_max_new=number("knowledge_max_new", DEFAULT_KNOWLEDGE_MAX_NEW),
+            knowledge_timeout=float(
+                number("knowledge_timeout", int(DEFAULT_KNOWLEDGE_TIMEOUT))
+            ),
             emit_progress_messages=config_flag(
                 config, "emit_progress_messages", default=True
             ),
@@ -105,6 +116,8 @@ def configurable(config: RunnableConfig | None) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_DATASET",
+    "DEFAULT_KNOWLEDGE_MAX_NEW",
+    "DEFAULT_KNOWLEDGE_TIMEOUT",
     "DEFAULT_TASK_TOOL_BUDGET",
     "DEFAULT_TOOL_BUDGET",
     "MAX_TASKS",

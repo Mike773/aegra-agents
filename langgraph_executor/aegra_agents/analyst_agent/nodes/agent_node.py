@@ -124,6 +124,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 schema_doc=schema_doc,
                 enrichment_block=enrichment,
                 catalog_block=catalog,
+                knowledge_block=state.get("knowledge_block") or "",
                 deviations_block=deviations_block(log.select(limit=12)),
                 org_block=_org_block(state),
                 memory_context=state.get("memory_context"),

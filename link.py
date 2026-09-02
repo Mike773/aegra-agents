@@ -27,6 +27,9 @@ from langgraph_executor.aegra_agents.gap_resolver.graph import (
 from langgraph_executor.aegra_agents.json_analyzer_v5.graph import (
     graph as json_analyzer_v5_graph,
 )
+from langgraph_executor.aegra_agents.metric_enricher.graph import (
+    graph as metric_enricher_graph,
+)
 from langgraph_executor.aegra_agents.kb_chat.graph import (
     graph as kb_chat_graph,
 )
@@ -43,5 +46,6 @@ __all__ = [
     "gap_resolver_graph",
     "json_analyzer_v5_graph",
     "kb_chat_graph",
+    "metric_enricher_graph",
     "wiki_ingest_graph",
 ]

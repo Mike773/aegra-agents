@@ -12,6 +12,8 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from ...metric_knowledge import repository as knowledge_repo
+from ...metric_knowledge.sync import sync_knowledge
 from ..config import RunConfig
 from ..contract.messages import final_message, step_update
 from ..db import analytics, core, enrich
@@ -81,6 +83,21 @@ def make_prepare_node():
             }
 
         person_key = focus_person_key(db, state.get("employee_tabnum"))
+
+        # Трактовки показателей из базы знаний: берём известные и дозаполняем
+        # немного недостающих. Недоступность кэша не мешает ходу — просто не
+        # будет справки.
+        knowledge_error: str | None = None
+        if cfg.knowledge_enabled and state.get("direction_key"):
+            sync = await sync_knowledge(
+                knowledge_repo.catalog_entries(db),
+                direction_key=str(state.get("direction_key")),
+                max_new=cfg.knowledge_max_new,
+                timeout_s=cfg.knowledge_timeout,
+            )
+            knowledge_error = sync.error
+            await asyncio.to_thread(knowledge_repo.apply_knowledge, db, sync.rows)
+        blocks["knowledge_block"] = knowledge_repo.knowledge_block(db)
         # Заново пересчитываем блоки под реального фокус-человека.
         blocks["enrichment_block"] = await asyncio.to_thread(
             enrich.enrichment_block, db, person_key=person_key
@@ -117,6 +134,7 @@ def make_prepare_node():
             "task_idx": 0,
             "task_results": [],
             "deviations": deviations,
+            "knowledge_error": knowledge_error,
             "turn_kind": "dashboard" if cfg.dashboard_mode else "initial",
             "reasoning_trace": (state.get("reasoning_trace") or [])
             + [
