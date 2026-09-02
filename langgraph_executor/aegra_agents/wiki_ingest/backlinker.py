@@ -22,6 +22,7 @@ from .llm import LLMClient, get_llm
 from .markdown import parse_page, strip_self_links
 from .merge_utils import (
     reembed_sections,
+    sync_alias_embeddings,
     restore_provenance_by_anchor,
     snapshot_provenance,
 )
@@ -183,6 +184,7 @@ async def backfill_links(
             aliases=new_aliases,
         )
         await reembed_sections(session, updated, embedder)
+        await sync_alias_embeddings(session, updated, embedder)
         await restore_provenance_by_anchor(session, updated.id, prov_snapshot)
         relinked.append(page.slug)
 

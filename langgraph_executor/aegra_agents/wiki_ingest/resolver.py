@@ -37,7 +37,7 @@ from .config import Settings, get_settings
 from .embeddings import EmbeddingClient, get_embeddings
 from .llm import LLMClient, get_llm
 from .markdown import make_slug, strip_self_links
-from .merge_utils import load_existing_catalog, reembed_sections
+from .merge_utils import load_existing_catalog, reembed_sections, sync_alias_embeddings
 from .repository import upsert_page
 from .resolve_prompts import (
     RESOLVE_JUDGE_SCHEMA,
@@ -558,6 +558,8 @@ async def _merge_group(
         page.type = None
     # upsert_page внутри сделал flush — секции уже в БД, можно эмбеддить.
     await reembed_sections(session, page, embedder)
+    # Алиасы страницы — отдельная поисковая сущность: у каждого свой вектор.
+    await sync_alias_embeddings(session, page, embedder)
     _ = forced_new  # для читаемости вызова; upsert_page сам решает INSERT/UPDATE
     return page
 

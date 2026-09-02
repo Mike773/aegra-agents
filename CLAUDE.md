@@ -55,12 +55,14 @@ Every `graph.py` follows: `def build_graph(llm, ...) -> compiled graph` plus mod
 | `metric_enricher` | `load_catalog → enrich → finalize`. Background: fills `wiki_rag.metric_knowledge` with metric interpretations found in the wiki. |
 | `analytic_orchestrator_v4` | Previous product: turn-based chat calling `json_analyzer_v5` and `easyrag` as subgraphs. Kept until `analyst_agent` replaces it in prod. |
 | `json_analyzer_v5` | `gather → synthesize`. Metrics dataset → facts digest (not prose). |
-| `easyrag` | `embed_query → retrieve → maybe_record_gap`. pgvector search over `wiki_rag.wiki_section`, records unanswered queries as `query_gap`. |
+| `easyrag` | `embed_query → retrieve → maybe_record_gap`. Alias lookup over `wiki_rag.wiki_alias` (exact match on a query word, then a per-alias vector) followed by pgvector search over `wiki_rag.wiki_section`; records unanswered queries as `query_gap`. |
 | `wiki_ingest` | `load_pending → process → finalize`. Unprocessed `source_doc` → wiki pages/sections (chunk → LLM extract → resolve/merge → backlink → embed). |
 | `doc_manager` | `classify → upload/list/delete`. Chat CRUD over `source_doc`. |
 | `kb_chat` | `route → (retrieve →) respond`. Small-talk vs KB question via `easyrag`. |
 | `gap_resolver` | `load_gaps → investigate → finalize`. Tries to answer `query_gap`s from source docs, creates stub pages. |
 | `external_doc_loader` | `fetch_documents → load_documents → finalize`. Pulls docs from an external source (`shared/external_source.py`) into `source_doc`. |
+
+Page aliases are a search surface of their own (`wiki_alias`, migration 0005): abbreviations dissolve inside a section vector, so each alias carries its own vector and an exact-match form. An alias hit expands to **all** sections of its page. The alias vector threshold is high on purpose (`DEFAULT_ALIAS_THRESH`): with the current embedding model any unrelated query scores ~0.78 against any alias, while a true match scores 0.96+. Chunks of source documents are **not** embedded (migration 0004) — `gap_resolver` judges them one by one.
 
 All KB graphs share Postgres schema `wiki_rag` and isolate tenants by `direction_key` (state field or configurable). `easyrag/db.py` reuses aegra's `AsyncEngine` when running under aegra, else builds one from `POSTGRES_DSN` — never create a second engine.
 

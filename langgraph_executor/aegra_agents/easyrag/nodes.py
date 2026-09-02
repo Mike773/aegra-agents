@@ -41,6 +41,9 @@ def make_retrieve_node():
                 session,
                 direction_key=direction_key,
                 query_vec=query_vec,
+                # Текст нужен для точного совпадения с алиасами: аббревиатуры
+                # вектором не ловятся.
+                query=(state.get("query") or "").strip(),
                 top_k=top_k,
             )
         return {"snippets": [s.to_dict() for s in sections]}

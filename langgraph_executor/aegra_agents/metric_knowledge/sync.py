@@ -45,11 +45,12 @@ async def fetch_snippets(
     vectors = await embedder.embed_many(queries)
     found: dict[str, dict[str, Any]] = {}
     async with session_scope() as session:
-        for vector in vectors:
+        for query, vector in zip(queries, vectors):
             if not vector:
                 continue
             sections = await retrieve_sections(
-                session, direction_key=direction_key, query_vec=vector, top_k=top_k
+                session, direction_key=direction_key, query_vec=vector,
+                query=query, top_k=top_k,
             )
             for section in sections:
                 data = section.to_dict()

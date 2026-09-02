@@ -89,6 +89,38 @@ class WikiSection(Base):
     page: Mapped[WikiPage] = relationship(back_populates="sections")
 
 
+class WikiAlias(Base):
+    """Алиас страницы как отдельная поисковая сущность.
+
+    Аббревиатуры («AHT», «SL») в векторе секции растворяются: короткая строка
+    среди сотен слов текста почти не двигает вектор, а модель эмбеддингов с
+    аббревиатурами и так работает плохо. Поэтому у каждого алиаса собственный
+    вектор, а ``alias_norm`` даёт точное совпадение со словом из запроса — без
+    обращения к модели вообще.
+
+    Строки синхронизируются с ``wiki_page.aliases`` при каждом upsert страницы.
+    """
+
+    __tablename__ = "wiki_alias"
+    __table_args__ = (
+        UniqueConstraint("page_id", "alias_norm", name="uq_wiki_alias"),
+        Index("ix_wiki_alias_lookup", "direction_key", "alias_norm"),
+        Index("ix_wiki_alias_page", "page_id"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    page_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(f"{SCHEMA}.wiki_page.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    direction_key: Mapped[str] = mapped_column(Text, nullable=False)
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+    alias_norm: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBED_DIM))
+
+
 class WikiLink(Base):
     """Производный индекс рёбер. Пересобирается из wiki_page.body_md."""
 
@@ -315,6 +347,7 @@ __all__ = [
     "Base",
     "WikiPage",
     "WikiSection",
+    "WikiAlias",
     "WikiLink",
     "QueryGap",
     "SourceDoc",
