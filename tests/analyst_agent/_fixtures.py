@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +97,8 @@ def make_synthetic_dataset(
     история periods дат сиблингами, у первого ребёнка каждого корня разрезы."""
 
     def dates(n: int) -> list[str]:
-        return [f"2026-04-{6 + 7 * i:02d}" for i in range(n)]
+        start = date(2026, 4, 6)
+        return [(start + timedelta(days=7 * i)).isoformat() for i in range(n)]
 
     def chain(l1_idx: int, level: int) -> list[dict[str, Any]]:
         if level > depth:
