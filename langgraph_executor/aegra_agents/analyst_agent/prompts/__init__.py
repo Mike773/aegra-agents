@@ -1,28 +1,19 @@
 """Сборка единственного системного промпта агента.
 
-Порядок блоков: кто ты и как думаешь → как работать инструментами → схема
-данных → что в этих данных → карта отклонений → память и брифинг → как писать
-ответ. Бизнес-часть (роль, методология, правила ответа) заменяется целиком
-через ``system_prompt_override``; операционные блоки остаются всегда — без них
-модель не сможет обращаться к данным.
+Порядок блоков: бизнес-промпт (роль, принципы, стиль, структура ответа) → как
+работать инструментами → схема данных → что в этих данных → карта отклонений →
+память и брифинг → подсказка хода. Бизнес-промпт заменяется целиком через
+``system_prompt_override``; операционные блоки остаются всегда — без них модель
+не сможет обращаться к данным.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .business import (
-    ANSWER_STRUCTURE_BLOCK,
-    BUSINESS_BLOCKS,
-    CONTINUATION_BLOCK,
-    METHODOLOGY_BLOCK,
-    PEER_WORDING_BLOCK,
-    ROLE_BLOCK,
-    RULES_BLOCK,
-    STAR_PROSE_BLOCK,
-)
+from .business import BUSINESS_PROMPT, STAR_PROSE_BLOCK
 from .describe import DESCRIBE_ANSWER_PROMPT
 from .misc import LOAD_ERROR_PROMPT, SAVE_INSIGHT_AUTO_FIXED
-from .task_hints import DASHBOARD_TASK_HINT, INITIAL_TASK_HINT, RESPONDER_TASK_HINT
+from .task_hints import DASHBOARD_TASK_HINT
 from .tools_guide import tools_guide_block
 
 # Память-заглушка возвращает эту формулировку — в промпт её тащить незачем.
@@ -69,30 +60,19 @@ def _memory_block(ctx: PromptContext) -> str:
 
 
 def _turn_hint(ctx: PromptContext) -> str:
-    if ctx.turn_kind == "dashboard":
-        return DASHBOARD_TASK_HINT
-    if ctx.turn_kind == "followup":
-        return RESPONDER_TASK_HINT
-    return INITIAL_TASK_HINT
+    """Подсказка есть только у задачи составного разбора: обычный ход ведёт
+    входное сообщение руководителя, ответ на реплику — история диалога."""
+    return DASHBOARD_TASK_HINT if ctx.turn_kind == "dashboard" else ""
 
 
 def compose_system_prompt(ctx: PromptContext) -> str:
     """Собирает системный промпт; пустые блоки просто опускаются."""
-    business: list[str] = (
-        [ctx.system_prompt_override.strip()]
-        if (ctx.system_prompt_override or "").strip()
-        else [ROLE_BLOCK, METHODOLOGY_BLOCK]
-    )
-    tail: list[str] = (
-        []
-        if (ctx.system_prompt_override or "").strip()
-        else [ANSWER_STRUCTURE_BLOCK, PEER_WORDING_BLOCK, CONTINUATION_BLOCK, RULES_BLOCK]
-    )
-    if ctx.has_stars and not (ctx.system_prompt_override or "").strip():
-        tail.append(STAR_PROSE_BLOCK)
+    override = (ctx.system_prompt_override or "").strip()
+    business = override or BUSINESS_PROMPT
+    tail: list[str] = [STAR_PROSE_BLOCK] if ctx.has_stars and not override else []
 
     blocks: list[str] = [
-        *business,
+        business,
         tools_guide_block(ctx.tool_budget),
         ctx.schema_doc,
         ctx.org_block,
@@ -110,19 +90,11 @@ def compose_system_prompt(ctx: PromptContext) -> str:
 
 
 __all__ = [
-    "ANSWER_STRUCTURE_BLOCK",
-    "BUSINESS_BLOCKS",
-    "CONTINUATION_BLOCK",
+    "BUSINESS_PROMPT",
     "DASHBOARD_TASK_HINT",
     "DESCRIBE_ANSWER_PROMPT",
-    "INITIAL_TASK_HINT",
     "LOAD_ERROR_PROMPT",
-    "METHODOLOGY_BLOCK",
-    "PEER_WORDING_BLOCK",
     "PromptContext",
-    "RESPONDER_TASK_HINT",
-    "ROLE_BLOCK",
-    "RULES_BLOCK",
     "SAVE_INSIGHT_AUTO_FIXED",
     "STAR_PROSE_BLOCK",
     "compose_system_prompt",

@@ -1,8 +1,8 @@
 """analyst_agent.prompts.compose_system_prompt: один системный промпт агента.
 
-Порядок блоков фиксирован: роль и методология → как работать инструментами →
-схема данных → что в этих данных → карта отклонений → правила ответа. Бизнес-
-часть заменяется через system_prompt_override, операционная остаётся всегда.
+Порядок блоков фиксирован: бизнес-промпт → как работать инструментами →
+схема данных → что в этих данных → карта отклонений → подсказка хода. Бизнес-
+промпт заменяется через system_prompt_override, операционная часть остаётся всегда.
 """
 from __future__ import annotations
 
@@ -30,24 +30,25 @@ def _ctx(**kw):
 def test_block_order():
     text = prompts.compose_system_prompt(_ctx())
     positions = [
-        text.index("## Роль и задача"),
-        text.index("## Методология"),
+        text.index("# Роль и Миссия"),
+        text.index("# Структура отчета"),
         text.index("КАК РАБОТАТЬ"),
         text.index("СХЕМА ДАННЫХ"),
         text.index("СОСТАВ ДАННЫХ"),
         text.index("КАТАЛОГ ПОКАЗАТЕЛЕЙ"),
         text.index("КАРТА ОТКЛОНЕНИЙ"),
-        text.index("## Структура итогового ответа"),
     ]
     assert positions == sorted(positions), positions
 
 
-def test_business_rules_present():
+def test_business_prompt_is_single_block():
+    """Бизнес-промпт — одна переменная и входит в системный промпт целиком."""
     text = prompts.compose_system_prompt(_ctx())
+    assert prompts.BUSINESS_PROMPT in text
     for marker in (
-        "## Как говорить про сравнение с коллегами",
-        "## Предложение продолжить разговор",
-        "## Правила",
+        "# Принципы аналитического мышления",
+        "# Стиль и Язык",
+        "# Диалог и Свободная форма",
     ):
         assert marker in text
 
@@ -55,8 +56,8 @@ def test_business_rules_present():
 def test_override_replaces_business_but_keeps_operational():
     text = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
     assert "ТЫ ПРОСТО БОТ" in text
-    assert "## Роль и задача" not in text
-    assert "## Правила" not in text
+    assert "# Роль и Миссия" not in text
+    assert "# Структура отчета" not in text
     # Операционные блоки остаются: без них модель не сможет работать с данными.
     assert "СХЕМА ДАННЫХ" in text
     assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" in text
@@ -79,11 +80,18 @@ def test_memory_block_filtered_when_empty():
     )
 
 
-def test_turn_hints_differ():
+def test_no_turn_hint_outside_dashboard():
+    """Первый ход ведёт входное сообщение, последующие — история диалога:
+    отдельных подсказок хода у них нет, промпт одинаковый."""
     initial = prompts.compose_system_prompt(_ctx(turn_kind="initial"))
     followup = prompts.compose_system_prompt(_ctx(turn_kind="followup"))
-    assert initial != followup
+    assert initial == followup
     assert "Брифинг руководителя" in initial
+    assert "первичный разбор" not in initial
+    assert "реплику руководителя" not in followup
+    assert prompts.DASHBOARD_TASK_HINT not in initial
+    dashboard = prompts.compose_system_prompt(_ctx(turn_kind="dashboard"))
+    assert prompts.DASHBOARD_TASK_HINT in dashboard
 
 
 def test_dashboard_task_block():
