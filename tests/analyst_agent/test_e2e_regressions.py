@@ -57,6 +57,30 @@ def test_metric_card_handles_empty_object_argument():
     assert "Продажи" in out
 
 
+def test_peer_context_handles_empty_object_argument():
+    db = _db(make_dataset_obj([make_metric("Продажи", fact=80.0, plan=100.0)]))
+    ctx = _ctx(db)
+    ctx.use_peer_aggregates = True
+    out = _call(build_tools(ctx), "peer_context", metric={}, person="")
+    assert "не указано название" in out.lower()
+
+
+def test_tool_schemas_declare_string_parameters():
+    """GigaChat-3-Ultra следует схеме буквально: параметр без типа уходит в
+    модель как `object`, и она шлёт `{}` вместо названия показателя. Схема
+    каждого инструмента должна объявлять строки явно."""
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    db = _db(make_dataset_obj([make_metric("Продажи", fact=80.0, plan=100.0)]))
+    ctx = _ctx(db)
+    ctx.use_peer_aggregates = True
+    for tool in build_tools(ctx):
+        props = convert_to_openai_tool(tool)["function"]["parameters"]["properties"]
+        for name, spec in props.items():
+            types = {spec.get("type")} | {a.get("type") for a in spec.get("anyOf", [])}
+            assert types & {"string", "integer"}, f"{tool.name}.{name}: {spec}"
+
+
 # --- 2. вид показателя без базы знаний ------------------------------------
 
 def test_kind_guessed_from_name_without_knowledge_cache():
