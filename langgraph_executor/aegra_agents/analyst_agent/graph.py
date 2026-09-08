@@ -13,7 +13,6 @@ from langchain_gigachat import GigaChat
 from langgraph.graph import END, START, StateGraph
 
 from ..easyrag.graph import graph as easyrag_graph
-from ..long_term_memory.nodes import make_load_memory_node, make_save_memory_node
 from ..shared.clients import create_gigachat_client
 from .nodes.agent_node import make_agent_node
 from .nodes.insight import make_auto_insight_node
@@ -30,22 +29,21 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g = StateGraph(AnalystState, output_schema=AnalystOutput)
 
     g.add_node("load_data", make_load_data_node())
-    g.add_node("load_memory", make_load_memory_node(llm))
     g.add_node("prepare", make_prepare_node())
     g.add_node("begin_turn", make_begin_turn_node())
     g.add_node("plan_tasks", make_plan_tasks_node(llm))
     g.add_node("agent", make_agent_node(llm, easyrag_graph))
     g.add_node("summarize", make_summarize_node(llm))
     g.add_node("auto_insight", make_auto_insight_node())
-    g.add_node("save_memory", make_save_memory_node())
 
     # Первый ход треда грузит данные и готовит базу; дальше состояние берётся
     # из чекпойнтера, и ход начинается сразу с агента.
     g.add_conditional_edges(
         START, need_load, {"load_data": "load_data", "begin_turn": "begin_turn"}
     )
-    g.add_edge("load_data", "load_memory")
-    g.add_edge("load_memory", "prepare")
+    # Долгосрочная память отключена: узлы load_memory/save_memory из
+    # ..long_term_memory в граф не подключены, memory_context остаётся пустым.
+    g.add_edge("load_data", "prepare")
     g.add_conditional_edges(
         "prepare",
         after_prepare,
@@ -64,12 +62,11 @@ def build_graph(llm: GigaChat, checkpointer=None):
             "agent": "agent",
             "summarize": "summarize",
             "auto_insight": "auto_insight",
-            "save_memory": "save_memory",
+            END: END,
         },
     )
     g.add_edge("summarize", "auto_insight")
     g.add_edge("auto_insight", END)
-    g.add_edge("save_memory", END)
 
     return g.compile(checkpointer=checkpointer)
 

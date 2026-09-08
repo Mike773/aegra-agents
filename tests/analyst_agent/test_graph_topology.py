@@ -33,8 +33,7 @@ def _nodes():
 def test_first_turn_path():
     edges = _edges()
     assert ("__start__", "load_data") in edges
-    assert ("load_data", "load_memory") in edges
-    assert ("load_memory", "prepare") in edges
+    assert ("load_data", "prepare") in edges
     assert ("prepare", "agent") in edges
     assert ("agent", "auto_insight") in edges
     assert ("auto_insight", "__end__") in edges
@@ -44,8 +43,7 @@ def test_followup_turn_path():
     edges = _edges()
     assert ("__start__", "begin_turn") in edges
     assert ("begin_turn", "agent") in edges
-    assert ("agent", "save_memory") in edges
-    assert ("save_memory", "__end__") in edges
+    assert ("agent", "__end__") in edges
 
 
 def test_dashboard_path():
@@ -81,7 +79,7 @@ def test_after_prepare_routes_dashboard_only_with_tasks():
 
 def test_after_agent_loops_over_tasks_then_summarizes():
     assert after_agent({"turn_kind": "initial"}) == "auto_insight"
-    assert after_agent({"turn_kind": "followup"}) == "save_memory"
+    assert after_agent({"turn_kind": "followup"}) == "__end__"
     dashboard = {"turn_kind": "dashboard", "tasks": [{"id": "t1"}, {"id": "t2"}]}
     assert after_agent({**dashboard, "task_idx": 1}) == "agent"
     assert after_agent({**dashboard, "task_idx": 2}) == "summarize"
