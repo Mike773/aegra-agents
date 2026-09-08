@@ -190,3 +190,24 @@ def test_repeat_key_ignores_absent_and_empty_args():
     assert guards.is_repeat("metric_card", clean_args({"metric": "", "person": None}))
     # Осмысленный вызов повтором не считается.
     assert not guards.is_repeat("metric_card", clean_args({"metric": "Продажи"}))
+
+
+# --- 6. подсказки по инструментам живут в самих инструментах ---------------
+
+def test_tool_descriptions_carry_their_own_hints():
+    """Как пользоваться конкретным инструментом, модель читает в его описании,
+    а не в системном промпте: гид там оставляет только сквозные правила."""
+    db = _db(make_dataset_obj([make_metric("Продажи", fact=80.0, plan=100.0)]))
+    ctx = _ctx(db)
+    ctx.use_peer_aggregates = True
+    ctx.easyrag_enabled = True
+    ctx.easyrag_graph = object()
+    desc = {t.name: t.description for t in build_tools(ctx)}
+    assert "первый инструмент" in desc["metric_card"]
+    assert "element" in desc["metric_card"] and "худшие разрезы" in desc["metric_card"]
+    assert "LIKE" in desc["query_sql"] and "LIMIT" in desc["query_sql"]
+    assert "purpose" in desc["query_sql"]
+    assert "не источник чисел" in desc["search_wiki"].lower()
+    assert "от узкой к широкой" in desc["peer_context"]
+    assert "отранжирован" in desc["list_deviations"]
+    assert "следующие вопросы" in desc["note_deviation"]
