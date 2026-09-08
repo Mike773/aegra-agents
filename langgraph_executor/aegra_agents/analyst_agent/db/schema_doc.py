@@ -91,46 +91,57 @@ _RULES = """ПРАВИЛА РАБОТЫ С ДАННЫМИ
   Считай даты и остатки до срока запросом, а не в уме. Оконные функции
   (LAG, SUM() OVER) доступны — приросты и накопления считай ими."""
 
-_EXAMPLES = """ПРИМЕРЫ ЗАПРОСОВ
--- Показатели верхнего уровня, отстающие от плана (последние значения серий):
-SELECT metric, date, fact, plan, plan_dev_pct, pop_status
+# Примеры запросов: (что просит руководитель, SQL). Идут в GigaChat как
+# few_shot_examples функции query_sql и текстом — в справку для отладки.
+# {person} и {metric} подставляются из датасета.
+SQL_EXAMPLES: list[tuple[str, str]] = [
+    (
+        "Показатели верхнего уровня, отстающие от плана (последние значения серий)",
+        """SELECT metric, date, fact, plan, plan_dev_pct, pop_status
 FROM v_fact_latest
 WHERE person_key = '{person}' AND depth = 1 AND element IS NULL
   AND plan_status = 'хуже_плана'
-ORDER BY ABS(plan_dev_pct) DESC;
-
--- История одного показателя с изменением к прошлому периоду:
-SELECT date, fact, plan, ex, rr, pop_change_pct, pop_status
+ORDER BY ABS(plan_dev_pct) DESC;""",
+    ),
+    (
+        "История одного показателя с изменением к прошлому периоду",
+        """SELECT date, fact, plan, ex, rr, pop_change_pct, pop_status
 FROM v_fact
 WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NULL
-ORDER BY period_idx;
-
--- Худшие разрезы показателя с учётом направления:
-SELECT element, fact, plan, plan_dev_pct, plan_status
+ORDER BY period_idx;""",
+    ),
+    (
+        "Худшие разрезы показателя с учётом направления",
+        """SELECT element, fact, plan, plan_dev_pct, plan_status
 FROM v_fact_latest
 WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NOT NULL
 ORDER BY CASE WHEN direction = 'обратная' THEN -fact ELSE fact END
-LIMIT 10;
-
--- Состав ветки дерева этого человека с весами влияния:
-SELECT child, influent_percent, share_pct, child_depth
+LIMIT 10;""",
+    ),
+    (
+        "Состав ветки дерева этого человека с весами влияния",
+        """SELECT child, influent_percent, share_pct, child_depth
 FROM v_tree WHERE person_key = '{person}' AND parent = '{metric}'
-ORDER BY share_pct DESC;
-
--- Найти разрез по части имени (разрезов сотни — фильтруй и ограничивай):
-SELECT element, date, fact, plan, plan_status
+ORDER BY share_pct DESC;""",
+    ),
+    (
+        "Найти разрез по части имени (разрезов сотни — фильтруй и ограничивай)",
+        """SELECT element, date, fact, plan, plan_status
 FROM v_fact_latest
 WHERE person_key = '{person}' AND metric = '{metric}'
   AND element IS NOT NULL AND ru_lower(element) LIKE '%часть имени%'
-LIMIT 20;
-
--- Есть ли у показателей собственный итог и сколько у них разрезов:
-SELECT metric, has_aggregate, n_elements
-FROM v_metric_person WHERE person_key = '{person}' AND n_elements > 0;
--- Сколько недель осталось от последней даты данных до срока (например, конца
--- квартала) и сколько нужно в неделю, чтобы закрыть разрыв до цели (срок и
--- цель — числа из вопроса, подставляй литералами; здесь цель 312):
-WITH last AS (
+LIMIT 20;""",
+    ),
+    (
+        "Есть ли у показателей собственный итог и сколько у них разрезов",
+        """SELECT metric, has_aggregate, n_elements
+FROM v_metric_person WHERE person_key = '{person}' AND n_elements > 0;""",
+    ),
+    (
+        "Сколько недель осталось от последней даты данных до срока (конец "
+        "квартала) и сколько нужно в неделю, чтобы закрыть разрыв до цели 312 "
+        "(срок и цель — числа из вопроса, подставляй литералами)",
+        """WITH last AS (
   SELECT date, fact FROM v_fact_latest
   WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NULL
 )
@@ -138,12 +149,16 @@ SELECT date, fact,
        CAST((julianday('2026-06-30') - julianday(date)) / 7 AS INTEGER) AS weeks_left,
        ROUND((312 - fact) / ((julianday('2026-06-30') - julianday(date)) / 7), 2)
          AS need_per_week
-FROM last;
--- Прирост к прошлому периоду своими руками (например, для накопительных серий):
-SELECT date, fact, fact - LAG(fact) OVER (ORDER BY period_idx) AS fact_delta
+FROM last;""",
+    ),
+    (
+        "Прирост к прошлому периоду своими руками (например, для накопительных серий)",
+        """SELECT date, fact, fact - LAG(fact) OVER (ORDER BY period_idx) AS fact_delta
 FROM v_fact
 WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NULL
-ORDER BY period_idx;"""
+ORDER BY period_idx;""",
+    ),
+]
 
 
 def _views(conn) -> list[str]:
@@ -157,10 +172,13 @@ def _columns(conn, view: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({view})").fetchall()]
 
 
-def build_schema_doc(db: Any) -> str:
-    """Справка по схеме: вью с колонками, семантика, факты датасета, примеры."""
+def build_schema_doc(db: Any, *, examples: bool = True) -> str:
+    """Справка по схеме: вью с колонками, семантика, правила, примеры.
+
+    ``examples=False`` — без текстовых примеров: инструмент query_sql отдаёт их
+    модели структурно, через ``sql_examples``."""
     conn = db.conn
-    views = [v for v in _views(conn) if v != "v_deviation" or _has_rows(conn, "deviation")]
+    views = [v for v in _views(conn) if _view_has_data(db, v)]
 
     lines = [
         "СХЕМА ДАННЫХ (SQLite, только чтение)",
@@ -168,65 +186,74 @@ def build_schema_doc(db: Any) -> str:
         "период и готовые вердикты. Базовые таблицы служебные.",
         "",
     ]
+    # Список колонок v_fact — полсотни имён; v_fact_latest и v_series
+    # состоят из тех же колонок, и печатать их трижды незачем.
+    base_cols = _columns(conn, "v_fact")
     for view in views:
         cols = _columns(conn, view)
         if not cols:
             continue
-        lines.append(f"{view}({', '.join(cols)})")
+        extra = [c for c in cols if c not in base_cols]
+        if view != "v_fact" and base_cols and len(cols) - len(extra) == len(base_cols):
+            tail = f", плюс {', '.join(extra)}" if extra else ""
+            lines.append(f"{view}: те же колонки, что v_fact{tail}")
+        else:
+            lines.append(f"{view}({', '.join(cols)})")
         for col in cols:
             doc = COLUMN_DOCS.get((view, col))
             if doc:
                 lines.append(f"  - {col}: {doc}")
         lines.append("")
 
-    lines.append(_facts_block(db))
-    lines.append("")
     lines.append(_RULES)
-    lines.append("")
-    lines.append(_examples_block(conn))
+    dataset_rules = _dataset_rules(db)
+    if dataset_rules:
+        lines.append(dataset_rules)
+    if examples:
+        lines.append("")
+        lines.append(_examples_block(conn))
     return "\n".join(lines).strip()
+
+
+def _view_has_data(db: Any, view: str) -> bool:
+    """Вью, за которыми в этом датасете нет данных, в справку не идут — модель
+    не должна звать несуществующее."""
+    conn = db.conn
+    if view == "v_deviation":
+        return _has_rows(conn, "deviation")
+    if view in ("v_star", "v_star_metric"):
+        return bool(db.has_stars)
+    if view == "v_peer_latest":
+        return bool(db.has_aggregates) or _has_rows(conn, "ranking")
+    return True
 
 
 def _has_rows(conn, table: str) -> bool:
     return bool(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def _facts_block(db: Any) -> str:
+def _dataset_rules(db: Any) -> str:
+    """Подсказки про вью, которые есть не в каждом датасете. Состав данных
+    (люди, периоды, число показателей) здесь не повторяется — он в блоке
+    «СОСТАВ ДАННЫХ»."""
     conn = db.conn
-    people = conn.execute(
-        "SELECT person_key, fio, is_me FROM person ORDER BY is_me DESC, person_id"
-    ).fetchall()
-    dates = conn.execute("SELECT date FROM period ORDER BY period_idx").fetchall()
-    n_metrics = conn.execute("SELECT COUNT(*) FROM metric").fetchone()[0]
-    max_depth = conn.execute("SELECT MAX(depth) FROM metric").fetchone()[0] or 1
-
-    who = ", ".join(
-        f"{r['fio'] or r['person_key']} ({r['person_key']}"
-        + (", руководитель)" if r["is_me"] else ")")
-        for r in people
-    )
-    parts = [
-        "ЧТО В ЭТОЙ БАЗЕ",
-        f"- Люди: {who or 'нет'}.",
-        f"- Показателей в каталоге: {n_metrics}, глубина дерева: {max_depth}.",
-    ]
-    if dates:
-        parts.append(
-            f"- Периоды: {len(dates)}, от {dates[0]['date']} до {dates[-1]['date']} "
-            "(у разных показателей последняя дата может отличаться)."
-        )
-    levels = conn.execute(
-        "SELECT DISTINCT level_name, level_order FROM peer_aggregate "
-        "WHERE level_name IS NOT NULL ORDER BY level_order"
-    ).fetchall()
-    if levels:
-        parts.append(
-            "- Группы сравнения (от узкой к широкой): "
-            + ", ".join(r["level_name"] for r in levels)
-            + "."
-        )
-    elif db.has_aggregates:
-        parts.append("- Группы сравнения есть, но без названий — называй их обезличенно.")
+    parts = []
+    if db.has_aggregates:
+        levels = conn.execute(
+            "SELECT DISTINCT level_name FROM peer_aggregate "
+            "WHERE level_name IS NOT NULL ORDER BY level_order"
+        ).fetchall()
+        if levels:
+            parts.append(
+                "- Группы сравнения (v_peer_latest, от узкой к широкой): "
+                + ", ".join(r["level_name"] for r in levels)
+                + "."
+            )
+        else:
+            parts.append(
+                "- Группы сравнения (v_peer_latest) есть, но без названий — "
+                "называй их обезличенно."
+            )
     if _has_rows(conn, "ranking"):
         parts.append("- Есть места в больших группах коллег (v_peer_latest.rank_raw).")
     if db.has_stars:
@@ -238,17 +265,35 @@ def _facts_block(db: Any) -> str:
     return "\n".join(parts)
 
 
-def _examples_block(conn) -> str:
+def _example_slots(conn) -> dict[str, str]:
     person = conn.execute(
         "SELECT person_key FROM person ORDER BY is_me, person_id LIMIT 1"
     ).fetchone()
     metric = conn.execute(
         "SELECT name FROM metric WHERE depth = 1 ORDER BY metric_id LIMIT 1"
     ).fetchone()
-    return _EXAMPLES.format(
-        person=person["person_key"] if person else "…",
-        metric=metric["name"] if metric else "…",
-    )
+    return {
+        "person": person["person_key"] if person else "…",
+        "metric": metric["name"] if metric else "…",
+    }
 
 
-__all__ = ["COLUMN_DOCS", "build_schema_doc"]
+def _examples_block(conn) -> str:
+    slots = _example_slots(conn)
+    parts = ["ПРИМЕРЫ ЗАПРОСОВ"]
+    for request, sql in SQL_EXAMPLES:
+        parts.append(f"-- {request}:\n{sql.format(**slots)}")
+    return "\n\n".join(parts)
+
+
+def sql_examples(db: Any) -> list[dict[str, Any]]:
+    """Примеры для few_shot_examples функции query_sql: запрос руководителя →
+    аргументы вызова, с подставленными человеком и показателем из датасета."""
+    slots = _example_slots(db.conn)
+    return [
+        {"request": request, "params": {"sql": sql.format(**slots), "purpose": request}}
+        for request, sql in SQL_EXAMPLES
+    ]
+
+
+__all__ = ["COLUMN_DOCS", "SQL_EXAMPLES", "build_schema_doc", "sql_examples"]

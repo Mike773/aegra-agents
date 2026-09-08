@@ -51,9 +51,13 @@ def test_final_message_markdown_when_html_disabled():
     assert "orchestrator_markdown" not in msg.additional_kwargs
 
 
-def test_final_message_renders_tables():
-    msg = messages.final_message("| a | b |\n| --- | --- |\n| 1 | 2 |", _cfg())
-    assert "<table>" in msg.content
+def test_final_message_renders_tables_with_borders():
+    """Клиент показывает HTML как есть, без своих стилей: таблица без рамок
+    сливается в текст, поэтому бордер ставим прямо в разметке."""
+    md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\nтекст\n\n| c |\n| --- |\n| 3 |"
+    msg = messages.final_message(md, _cfg())
+    assert msg.content.count('<table border="1">') == 2
+    assert "<table>" not in msg.content
 
 
 # --- история для LLM ------------------------------------------------------

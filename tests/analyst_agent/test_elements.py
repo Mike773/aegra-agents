@@ -289,14 +289,18 @@ def test_schema_doc_states_missing_total_rule():
     assert "v_metric_person" in doc
 
 
-def test_tools_guide_mentions_element_workflow():
+def test_element_workflow_split_between_guide_and_tools():
+    """Сквозное правило «разрезов сотни, списком не запрашивай» — в гиде;
+    как искать разрез по части имени (LIKE + LIMIT) — в описании query_sql."""
     from langgraph_executor.aegra_agents.analyst_agent.prompts.tools_guide import (
         tools_guide_block,
     )
+    from langgraph_executor.aegra_agents.analyst_agent.tools.query_sql import make_query_sql
 
     text = tools_guide_block(18)
     assert "разрез" in text.lower()
-    assert "LIMIT" in text or "лимит" in text.lower()
+    sql_desc = make_query_sql(_ctx(_many_metrics_with_elements(n_metrics=1, n_elements=2))).description
+    assert "LIKE" in sql_desc and "LIMIT" in sql_desc
 
 
 def test_prompt_block_puts_metrics_before_their_elements():

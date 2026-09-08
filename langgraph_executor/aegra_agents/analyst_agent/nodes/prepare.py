@@ -30,7 +30,6 @@ def build_run_state(
     """Собирает базу и текстовые блоки промпта. Синхронно — зовётся в потоке."""
     db = core.build_run_db(metrics, aggregates)
     blocks = {
-        "schema_doc": core.schema_doc(db),
         "enrichment_block": enrich.enrichment_block(db, person_key=person_key),
         "catalog_block": enrich.catalog_block(db, person_key=person_key),
     }

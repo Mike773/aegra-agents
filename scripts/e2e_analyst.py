@@ -134,16 +134,20 @@ class UsageTracker(BaseCallbackHandler):
         for gen in response.generations:
             for g in gen:
                 meta = getattr(g.message, "response_metadata", {}) or {}
-                usage = meta.get("token_usage") or usage
+                usage = dict(meta.get("token_usage") or usage)
+                um = getattr(g.message, "usage_metadata", None) or {}
+                details = um.get("input_token_details") or {}
+                usage["cache_read"] = int(details.get("cache_read") or 0)
         self.calls.append(usage or {})
 
     def report(self) -> str:
         total_in = sum(int(c.get("prompt_tokens") or 0) for c in self.calls)
         total_out = sum(int(c.get("completion_tokens") or 0) for c in self.calls)
         peak = max((int(c.get("prompt_tokens") or 0) for c in self.calls), default=0)
+        cached = sum(int(c.get("cache_read") or 0) for c in self.calls)
         return (
-            f"вызовов модели: {len(self.calls)}; токенов на вход: {total_in}, "
-            f"на выход: {total_out}; пик входа: {peak}"
+            f"вызовов модели: {len(self.calls)}; токенов на вход: {total_in} "
+            f"(из кэша префикса: {cached}), на выход: {total_out}; пик входа: {peak}"
         )
 
 

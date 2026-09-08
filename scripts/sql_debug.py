@@ -103,7 +103,7 @@ def main() -> int:
     parser.add_argument("--param", action="append", default=[], metavar="ИМЯ=ЗНАЧЕНИЕ")
     parser.add_argument("--sql", help="свободный SELECT (через ту же защиту, что у агента)")
     parser.add_argument("--list", action="store_true", help="показать шаблоны и выйти")
-    parser.add_argument("--schema", action="store_true", help="справка по схеме для промпта")
+    parser.add_argument("--schema", action="store_true", help="справка по схеме (описание инструмента query_sql)")
     parser.add_argument("--enrichment", action="store_true", help="блоки обогащения промпта")
     parser.add_argument("--person", help="person_key для блоков обогащения")
     parser.add_argument("--format", choices=("md", "csv", "json", "kv"), default="md")

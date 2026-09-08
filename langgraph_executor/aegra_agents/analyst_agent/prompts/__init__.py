@@ -1,8 +1,9 @@
 """Сборка единственного системного промпта агента.
 
 Порядок блоков: бизнес-промпт (роль, принципы, стиль, структура ответа) → как
-работать инструментами → схема данных → что в этих данных → карта отклонений →
-память и брифинг → подсказка хода. Бизнес-промпт заменяется целиком через
+работать инструментами → что в этих данных → карта отклонений → память и
+брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
+инструмента query_sql. Бизнес-промпт заменяется целиком через
 ``system_prompt_override``; операционные блоки остаются всегда — без них модель
 не сможет обращаться к данным.
 """
@@ -25,7 +26,6 @@ _BRIEFING_CAP = 4000
 class PromptContext:
     """Всё, из чего собирается системный промпт одного хода."""
 
-    schema_doc: str = ""
     enrichment_block: str = ""
     catalog_block: str = ""
     deviations_block: str = ""
@@ -37,6 +37,7 @@ class PromptContext:
     turn_kind: str = "initial"          # initial | followup | dashboard
     has_stars: bool = False
     tool_budget: int = 18
+    has_sql: bool = True
     system_prompt_override: str | None = None
 
 
@@ -73,8 +74,7 @@ def compose_system_prompt(ctx: PromptContext) -> str:
 
     blocks: list[str] = [
         business,
-        tools_guide_block(ctx.tool_budget),
-        ctx.schema_doc,
+        tools_guide_block(ctx.tool_budget, has_sql=ctx.has_sql),
         ctx.org_block,
         ctx.enrichment_block,
         ctx.catalog_block,

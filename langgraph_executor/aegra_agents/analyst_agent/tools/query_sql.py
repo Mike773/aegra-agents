@@ -1,7 +1,9 @@
 """Свободный SQL от модели (text2sql).
 
-Модель пишет обычный SELECT по схеме из промпта. Безопасность — на стороне
-базы (SafeQueryRunner), а не промпта: запись, DDL и мультизапросы отклоняются,
+Модель пишет обычный SELECT. Схема базы — в описании самого инструмента, а
+примеры запросов — его few_shot_examples: схема нужна только тому, кто пишет
+SQL, и в системном промпте её нет. Безопасность — на стороне базы
+(SafeQueryRunner), а не промпта: запись, DDL и мультизапросы отклоняются,
 тяжёлый запрос прерывается по таймауту.
 
 Аргумент ``purpose`` обязателен: он идёт в шаговое сообщение руководителю и в
@@ -13,14 +15,28 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from ..db import core
 from ..db.sqlrunner import render_markdown
 from ..db.text2sql import SafeQueryRunner
 
 # Строк на один запрос: больше в контекст модели тащить бессмысленно.
 _ROW_CAP = 60
 
+_DESCRIPTION = (
+    "Выполнить один read-only SELECT по схеме ниже, когда нужен срез, "
+    "которого нет в карточке показателя: ранжирование, фильтр, сравнение "
+    "нескольких показателей, история. Разрез по части имени ищи через "
+    "LIKE и всегда ставь LIMIT — разрезов бывают сотни. Аргументы: sql — "
+    "запрос (только SELECT/WITH, до 60 строк в выдаче); purpose — "
+    "обязательная короткая цель запроса по-русски, её увидит руководитель."
+)
+
 
 def make_query_sql(ctx: Any) -> StructuredTool:
+    # Справка по схеме читает PRAGMA, которые авторизатор потом запретит, —
+    # собираем её до установки защиты.
+    description = _DESCRIPTION + "\n\n" + core.schema_doc(ctx.db, examples=False)
+    examples = core.sql_examples(ctx.db)
     runner = SafeQueryRunner(ctx.db.conn, max_rows=_ROW_CAP)
     runner.install()
     # База должна знать о защите, чтобы наши собственные записи (карта
@@ -37,12 +53,8 @@ def make_query_sql(ctx: Any) -> StructuredTool:
     return StructuredTool.from_function(
         func=query_sql,
         name="query_sql",
-        description=(
-            "Выполнить один read-only SELECT по схеме данных из системного "
-            "промпта: ранжирование, фильтры, сравнение показателей, история. "
-            "Аргументы: sql — запрос (только SELECT/WITH, до 60 строк в выдаче); "
-            "purpose — короткая цель запроса по-русски, её увидит руководитель."
-        ),
+        description=description,
+        extras={"few_shot_examples": examples},
     )
 
 

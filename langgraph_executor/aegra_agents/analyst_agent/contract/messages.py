@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 import markdown2
+from bs4 import BeautifulSoup
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
@@ -71,10 +72,17 @@ def step_updates(config: RunnableConfig | None, texts: list[str]) -> list[AIMess
 
 
 def render_answer_html(text: str) -> str:
-    """Markdown итога → HTML. Детерминированно, без LLM."""
-    return markdown2.markdown(
+    """Markdown итога → HTML. Детерминированно, без LLM.
+
+    Таблицам ставится border="1" прямо в разметке: клиент показывает HTML без
+    своих стилей, и таблица без рамок сливается с текстом."""
+    html = markdown2.markdown(
         text, extras=["tables", "fenced-code-blocks", "cuddled-lists"]
     ).strip()
+    soup = BeautifulSoup(html, "html.parser")
+    for table in soup.find_all("table"):
+        table["border"] = "1"
+    return str(soup)
 
 
 def final_message(text: str, config: RunnableConfig | None) -> AIMessage:

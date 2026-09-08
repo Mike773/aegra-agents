@@ -22,6 +22,7 @@ dependencies = [
     "python-slugify>=8.0",
     "cydifflib>=1.1",
     "markdown2>=2.5.5",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
