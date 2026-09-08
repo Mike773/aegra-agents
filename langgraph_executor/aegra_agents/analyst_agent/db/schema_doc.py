@@ -16,8 +16,8 @@ COLUMN_DOCS: dict[tuple[str, str], str] = {
     ("v_fact", "metric"): "название показателя (как в данных)",
     ("v_fact", "direction"): "'прямая' (больше = лучше) | 'обратная' (меньше = лучше)",
     ("v_fact", "kind"): "'уровень' | 'вклад' | 'индекс'; у не-'уровня' проценты подавлены",
-    ("v_fact", "depth"): "уровень в дереве показателей: 1 = верхний",
-    ("v_fact", "path"): "путь по дереву: 'Родитель > Ребёнок'",
+    ("v_fact", "depth"): "уровень в дереве показателей ЭТОГО человека: 1 = верхний",
+    ("v_fact", "path"): "путь по дереву этого человека: 'Родитель > Ребёнок'",
     ("v_fact", "element"): (
         "разрез показателя; NULL = собственный итог показателя. Смотри итог, "
         "разрезы — для декомпозиции. Разрезов у показателя бывают сотни"
@@ -48,7 +48,15 @@ COLUMN_DOCS: dict[tuple[str, str], str] = {
     ("v_fact", "plan_rigidity"): "жёсткий_план | обычный_план | мягкий_план",
     ("v_fact", "is_anomaly"): "1 = выброс относительно коллег (|z| ≥ порога)",
     ("v_fact", "star_received"): "результат звезды: 1 получена, 0 нет; NULL = не звезда",
+    ("v_tree", "person_key"): "чьё дерево: у каждого человека состав показателей свой",
     ("v_tree", "share_pct"): "доля влияния ребёнка среди детей родителя, %",
+    ("v_metric", "depth"): "уровень в СВОДНОМ дереве по всем людям; для человека бери v_fact/v_tree",
+    ("v_star", "received"): "1 = звезда получена, 0 = нет (на последнюю дату)",
+    ("v_star", "n_below_plan"): "сколько влияющих показателей звезды хуже плана",
+    ("v_star", "metrics"): (
+        "влияющие показатели одной строкой: имя, факт, план, выполнение %, вердикт"
+    ),
+    ("v_star_metric", "completion_pct"): "выполнение плана, % (факт / план)",
     ("v_peer_latest", "level_order"): "1 = самая узкая группа сравнения",
     ("v_peer_latest", "level_name"): "человеческое название группы — только его и называй",
     ("v_deviation", "priority"): "приоритет отклонения: влияние × масштаб × управляемость",
@@ -64,7 +72,9 @@ _RULES = """ПРАВИЛА РАБОТЫ С ДАННЫМИ
   (is_last_of_series = 1 или v_fact_latest) и всегда сверяй колонку date — не
   предполагай, что у всех показателей дата общая, и не отбрасывай показатель
   из-за того, что его дата старше.
-- Дерево показателей (v_tree, path, depth) от дат не зависит вовсе.
+- Дерево показателей (v_tree, path, depth) от дат не зависит вовсе. Дерево у
+  КАЖДОГО человека своё — фильтруй v_tree по person_key, а depth/path бери из
+  v_fact того человека, о ком говоришь.
 - element IS NULL — СОБСТВЕННЫЙ ИТОГ показателя. Его и бери за значение
   показателя; разрезы нужны, чтобы объяснить, из чего итог сложился.
 - Если у показателя нет строки с element IS NULL (v_metric_person.has_aggregate = 0),
@@ -72,7 +82,14 @@ _RULES = """ПРАВИЛА РАБОТЫ С ДАННЫМИ
   складывать проценты, средние и ранги бессмысленно. Говори про разрезы и
   честно отмечай, что общего значения у показателя нет.
 - Разрезов бывают СОТНИ. Не перечисляй их и не тяни целиком: фильтруй по имени
-  (LIKE) и всегда ставь LIMIT, либо бери верхушку через metric_card."""
+  (LIKE) и всегда ставь LIMIT, либо бери верхушку через metric_card.
+- Диалект — SQLite: таблицы DUAL нет (SELECT без FROM допустим), функций
+  DATEDIFF / WEEKS_BETWEEN / DATE_ADD нет. Даты — строки ISO 'YYYY-MM-DD'; с ними
+  работают date(), julianday(), strftime(). Разница в днях —
+  julianday(d2) - julianday(d1); в неделях — делить на 7; сдвиг —
+  date(d, '+7 days'), date(d, 'start of month', '+1 month', '-1 day').
+  Считай даты и остатки до срока запросом, а не в уме. Оконные функции
+  (LAG, SUM() OVER) доступны — приросты и накопления считай ими."""
 
 _EXAMPLES = """ПРИМЕРЫ ЗАПРОСОВ
 -- Показатели верхнего уровня, отстающие от плана (последние значения серий):
@@ -95,9 +112,10 @@ WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NOT NULL
 ORDER BY CASE WHEN direction = 'обратная' THEN -fact ELSE fact END
 LIMIT 10;
 
--- Состав ветки дерева с весами влияния:
+-- Состав ветки дерева этого человека с весами влияния:
 SELECT child, influent_percent, share_pct, child_depth
-FROM v_tree WHERE parent = '{metric}' ORDER BY share_pct DESC;
+FROM v_tree WHERE person_key = '{person}' AND parent = '{metric}'
+ORDER BY share_pct DESC;
 
 -- Найти разрез по части имени (разрезов сотни — фильтруй и ограничивай):
 SELECT element, date, fact, plan, plan_status
@@ -108,7 +126,24 @@ LIMIT 20;
 
 -- Есть ли у показателей собственный итог и сколько у них разрезов:
 SELECT metric, has_aggregate, n_elements
-FROM v_metric_person WHERE person_key = '{person}' AND n_elements > 0;"""
+FROM v_metric_person WHERE person_key = '{person}' AND n_elements > 0;
+-- Сколько недель осталось от последней даты данных до срока (например, конца
+-- квартала) и сколько нужно в неделю, чтобы закрыть разрыв до цели (срок и
+-- цель — числа из вопроса, подставляй литералами; здесь цель 312):
+WITH last AS (
+  SELECT date, fact FROM v_fact_latest
+  WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NULL
+)
+SELECT date, fact,
+       CAST((julianday('2026-06-30') - julianday(date)) / 7 AS INTEGER) AS weeks_left,
+       ROUND((312 - fact) / ((julianday('2026-06-30') - julianday(date)) / 7), 2)
+         AS need_per_week
+FROM last;
+-- Прирост к прошлому периоду своими руками (например, для накопительных серий):
+SELECT date, fact, fact - LAG(fact) OVER (ORDER BY period_idx) AS fact_delta
+FROM v_fact
+WHERE person_key = '{person}' AND metric = '{metric}' AND element IS NULL
+ORDER BY period_idx;"""
 
 
 def _views(conn) -> list[str]:
@@ -196,8 +231,9 @@ def _facts_block(db: Any) -> str:
         parts.append("- Есть места в больших группах коллег (v_peer_latest.rank_raw).")
     if db.has_stars:
         parts.append(
-            "- Есть звёзды: именные показатели без чисел (получена/не получена), "
-            "их влияющие показатели — в v_star."
+            "- Есть звёзды: именные показатели без чисел (получена/не получена). "
+            "v_star — строка на звезду с влияющими показателями одной строкой, "
+            "v_star_metric — те же показатели построчно."
         )
     return "\n".join(parts)
 

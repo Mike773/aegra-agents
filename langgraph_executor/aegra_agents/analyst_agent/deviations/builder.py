@@ -32,7 +32,9 @@ SELECT v.person_key, v.metric, v.ext_id, v.element, v.date, v.depth, v.root_name
        (SELECT COUNT(*) FROM fact f
          JOIN metric m ON m.metric_id = f.metric_id
         WHERE m.name = v.metric AND f.plan IS NOT NULL AND f.plan <> 0) > 0 AS has_plan,
-       (SELECT t.share_pct FROM v_tree t WHERE t.child = v.metric LIMIT 1) AS share_pct
+       (SELECT t.share_pct FROM v_tree t
+         WHERE t.person_key = v.person_key AND t.child = v.metric
+           AND t.parent = v.parent_name LIMIT 1) AS share_pct
 FROM v_fact_latest v
 WHERE v.person_key = :person_key
 """

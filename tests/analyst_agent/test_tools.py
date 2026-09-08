@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 
-from _fixtures import make_dataset_obj, make_metric  # noqa: F401
+from _fixtures import make_dataset_obj, make_metric, make_person  # noqa: F401
 
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
@@ -111,6 +111,28 @@ def test_metric_card_shows_own_date_for_lagging_child():
     ])
     out = _call(build_tools(_ctx(dataset)), "metric_card", metric="Ребёнок")
     assert "2026-04-14" in out
+
+
+def test_metric_card_children_follow_person_tree():
+    """Состав показателя — из дерева ТОГО человека, о ком спрашивают: у второго
+    сотрудника у «Продажи» другой единственный ребёнок, чужой не подмешивается."""
+    first = make_metric("Продажи", date="2026-04-13", fact=70.0, plan=100.0, children=[
+        make_metric("Звонки", date="2026-04-13", fact=30.0, plan=50.0, influent_percent=60),
+        make_metric("Встречи", date="2026-04-13", fact=3.0, plan=5.0, influent_percent=40),
+    ])
+    second = make_metric("Продажи", date="2026-04-13", fact=90.0, plan=100.0, children=[
+        make_metric("Письма", date="2026-04-13", fact=12.0, plan=10.0),
+    ])
+    dataset = make_dataset_obj(
+        [first], employees_extra=[make_person([second], tabnum=200600, fio="Второй Сотрудник")],
+    )
+    tools = build_tools(_ctx(dataset))
+    out_first = _call(tools, "metric_card", metric="Продажи")
+    assert "Звонки" in out_first and "Встречи" in out_first and "Письма" not in out_first
+    assert out_first.count("Звонки") == 1
+    out_second = _call(tools, "metric_card", metric="Продажи", person="Второй")
+    assert "Письма" in out_second
+    assert "Звонки" not in out_second and "Встречи" not in out_second
 
 
 def test_list_deviations_renders_map():

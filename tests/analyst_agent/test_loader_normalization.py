@@ -50,7 +50,7 @@ def test_edges_independent_of_dates_first_influent_wins():
     child_new = make_metric("HOLD", date="2026-03-30", fact=6.0, influent_percent=None)
     parent = make_metric("AHT", date="2026-04-20", children=[child_old, child_new])
     parsed = loader.parse_dataset(make_dataset_obj([parent]))
-    key = (loader.norm_text("AHT"), loader.norm_text("HOLD"))
+    key = ("100500", loader.norm_text("AHT"), loader.norm_text("HOLD"))
     assert parsed.edges == {key: 60.0}
     # Факты ребёнка с отстающими датами присутствуют оба.
     hold_dates = sorted(

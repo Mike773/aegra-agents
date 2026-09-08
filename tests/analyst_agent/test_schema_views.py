@@ -14,7 +14,7 @@ from _fixtures import load_sample, make_dataset_obj, make_metric, make_person  #
 from langgraph_executor.aegra_agents.analyst_agent.db import core
 
 EXPECTED_TABLES = {
-    "person", "metric", "metric_edge", "period", "fact", "fact_analytics",
+    "person", "metric", "metric_edge", "metric_tree", "period", "fact", "fact_analytics",
     "ranking", "peer_aggregate", "person_peer", "deviation",
 }
 EXPECTED_VIEWS = {
@@ -103,16 +103,85 @@ def test_period_idx_and_series_lag():
     assert [tuple(r) for r in rows] == [("2026-04-07", 4.0, None), ("2026-04-14", 5.0, 4.0)]
 
 
+def test_tree_is_per_person():
+    """Дерево у каждого сотрудника своё: у одного HOLD лежит под AHT, у другого
+    HOLD — самостоятельный показатель. Чужая структура не должна протекать."""
+    hold_a = make_metric("HOLD", date="2026-04-14", fact=5.0, plan=4.0, influent_percent=60)
+    talk_a = make_metric("TALK", date="2026-04-14", fact=7.0, plan=8.0, influent_percent=40)
+    aht_a = make_metric("AHT", date="2026-04-20", fact=12.0, plan=10.0, children=[hold_a, talk_a])
+    hold_b = make_metric("HOLD", date="2026-04-14", fact=3.0, plan=4.0)
+    aht_b = make_metric("AHT", date="2026-04-20", fact=9.0, plan=10.0)
+    data = make_dataset_obj(
+        [aht_a], tabnum=1, fio="Первый",
+        employees_extra=[make_person([aht_b, hold_b], tabnum=2, fio="Второй")],
+    )
+    db = core.build_run_db(data)
+    tree = db.conn.execute(
+        "SELECT person_key, parent, child, share_pct FROM v_tree ORDER BY person_key, child"
+    ).fetchall()
+    assert [tuple(r) for r in tree] == [("1", "AHT", "HOLD", 60.0), ("1", "AHT", "TALK", 40.0)]
+    facts = db.conn.execute(
+        "SELECT person_key, depth, path, parent_name FROM v_fact_latest "
+        "WHERE metric = 'HOLD' ORDER BY person_key"
+    ).fetchall()
+    assert [tuple(r) for r in facts] == [
+        ("1", 2, "AHT > HOLD", "AHT"),
+        ("2", 1, "HOLD", None),
+    ]
+    # Сводный каталог сохраняет доминирующего родителя.
+    row = db.conn.execute("SELECT depth, path FROM v_metric WHERE name = 'HOLD'").fetchone()
+    assert tuple(row) == (2, "AHT > HOLD")
+
+
 def test_star_view_and_flags():
+    """Строка на звезду: только влияющие показатели (is_star_metric), одной
+    строкой с фактом, планом и процентом выполнения."""
     child = make_metric("Влияющий", fact=1.0, plan=2.0, is_star_metric=True)
-    star = make_metric("Звезда", fact=None, star_received=False, children=[child])
-    db = core.build_run_db(make_dataset_obj([star]))
+    plain = make_metric("Справочный", fact=44.0, plan=None)
+    star = make_metric("Звезда", fact=None, star_received=False, children=[child, plain])
+    won = make_metric("Звезда продаж", fact=None, star_received=True, children=[
+        make_metric("Конверсия", fact=13.4, plan=12.0, is_star_metric=True),
+        make_metric("Кросс", fact=1.3, plan=1.2, ex=108.3, is_star_metric=True),
+    ])
+    db = core.build_run_db(make_dataset_obj([star, won]))
     assert db.has_stars is True
-    row = db.conn.execute(
-        "SELECT star, received, child, child_is_influencing FROM v_star"
-    ).fetchone()
-    assert tuple(row) == ("Звезда", 0, "Влияющий", 1)
+    rows = db.conn.execute(
+        "SELECT star, received, n_metrics, metrics FROM v_star ORDER BY star"
+    ).fetchall()
+    assert len(rows) == 2
+    assert tuple(rows[0])[:3] == ("Звезда", 0, 1)
+    assert rows[0]["metrics"] == "Влияющий: факт 1 при плане 2, выполнение 50 %, хуже плана"
+    assert "Справочный" not in rows[0]["metrics"]
+    assert tuple(rows[1])[:3] == ("Звезда продаж", 1, 2)
+    assert rows[1]["metrics"] == (
+        "Конверсия: факт 13.4 при плане 12, выполнение 111.7 %, лучше плана; "
+        "Кросс: факт 1.3 при плане 1.2, выполнение 108.3 %, лучше плана"
+    )
     assert core.build_run_db(_tree_dataset()).has_stars is False
+
+
+def test_star_view_only_star_rows_and_own_children():
+    """Обычные показатели в v_star не попадают, а состав звезды берётся из
+    дерева ЭТОГО человека: у второго сотрудника у звезды другой набор."""
+    star_a = make_metric("Звезда", fact=None, star_received=False, children=[
+        make_metric("CSI", fact=4.1, plan=4.5, is_star_metric=True),
+    ])
+    star_b = make_metric("Звезда", fact=None, star_received=True, children=[
+        make_metric("FCR", fact=78.0, plan=75.0, is_star_metric=True),
+    ])
+    plain = make_metric("AHT", fact=12.0, plan=10.0)
+    data = make_dataset_obj(
+        [star_a, plain], tabnum=1,
+        employees_extra=[make_person([star_b, plain], tabnum=2, fio="Второй")],
+    )
+    db = core.build_run_db(data)
+    rows = db.conn.execute(
+        "SELECT person_key, star, received, metrics FROM v_star ORDER BY person_key"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("1", "Звезда", 0, "CSI: факт 4.1 при плане 4.5, выполнение 91.1 %, хуже плана"),
+        ("2", "Звезда", 1, "FCR: факт 78 при плане 75, выполнение 104 %, лучше плана"),
+    ]
 
 
 def test_rankings_loaded():

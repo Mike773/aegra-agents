@@ -7,6 +7,11 @@
 Дерево метрик строится ТОЛЬКО из структуры JSON: даты узлов на каталог не
 влияют. «Последний период» считается на серию (персона × метрика × разрез) —
 см. ``fact.is_last_of_series`` и вью ``v_fact_latest``.
+
+Дерево у каждого человека своё (``metric_edge``/``metric_tree`` с person_id):
+у руководителя и сотрудников состав и вложенность показателей могут
+отличаться. На каталоге ``metric`` лежит сводное дерево по всем людям — для
+каталога в промпте и резолва имён.
 """
 from __future__ import annotations
 
@@ -56,11 +61,24 @@ def _pct(a: Any, b: Any) -> Any:
         return None
 
 
+def _fmt_num(value: Any) -> Any:
+    """Число для текста: до двух знаков, без хвостовых нулей (1.0 → '1')."""
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{num:.2f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.create_function("ru_lower", 1, _ru_lower, deterministic=True)
     conn.create_function("pct", 2, _pct, deterministic=True)
+    conn.create_function("fmt_num", 1, _fmt_num, deterministic=True)
     conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
     return conn
 
@@ -85,11 +103,15 @@ def _dominant_parents(
 def _build_hierarchy(
     metrics: dict[str, MetricRec],
     edges: dict[tuple[str, str], float | None],
+    scope: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """depth / path / root по доминирующим родителям. Циклы разрываются:
-    узел, уже встреченный на пути, считается корнем."""
+    узел, уже встреченный на пути, считается корнем.
+
+    ``scope`` — какие метрики считать (дерево одного человека); None = все."""
     dominant = _dominant_parents(edges)
     out: dict[str, dict[str, Any]] = {}
+    names = scope if scope is not None else set(metrics)
 
     def resolve(norm: str, seen: frozenset[str]) -> dict[str, Any]:
         cached = out.get(norm)
@@ -97,7 +119,7 @@ def _build_hierarchy(
             return cached
         rec = metrics[norm]
         parent = dominant.get(norm)
-        if parent is None or parent[0] not in metrics or parent[0] in seen:
+        if parent is None or parent[0] not in names or parent[0] in seen:
             info = {
                 "depth": 1,
                 "path": rec.name,
@@ -117,8 +139,22 @@ def _build_hierarchy(
         out[norm] = info
         return info
 
-    for norm in metrics:
-        resolve(norm, frozenset())
+    for norm in names:
+        if norm in metrics:
+            resolve(norm, frozenset())
+    return out
+
+
+def _union_edges(
+    edges: dict[tuple[str, str, str], float | None],
+) -> dict[tuple[str, str], float | None]:
+    """Рёбра всех людей → сводные (родитель, ребёнок): первый вес, известный
+    вес предпочтительнее None. Нужны только для сводного дерева каталога."""
+    out: dict[tuple[str, str], float | None] = {}
+    for (_, parent, child), infl in edges.items():
+        key = (parent, child)
+        if key not in out or (out[key] is None and infl is not None):
+            out[key] = infl
     return out
 
 
@@ -142,7 +178,8 @@ def _insert_dataset(conn: sqlite3.Connection, parsed: ParsedDataset, report: Bui
         )
         person_ids[p.person_key] = i
 
-    hierarchy = _build_hierarchy(parsed.metrics, parsed.edges)
+    # Сводное дерево каталога — по объединённым рёбрам всех людей.
+    hierarchy = _build_hierarchy(parsed.metrics, _union_edges(parsed.edges))
     metric_ids: dict[str, int] = {}
     for i, (norm, rec) in enumerate(parsed.metrics.items(), start=1):
         h = hierarchy[norm]
@@ -174,13 +211,41 @@ def _insert_dataset(conn: sqlite3.Connection, parsed: ParsedDataset, report: Bui
         )
         metric_ids[norm] = i
 
-    for (parent, child), infl in parsed.edges.items():
-        if parent in metric_ids and child in metric_ids:
+    # Рёбра и позиция в дереве — на каждого человека отдельно.
+    for (person_key, parent, child), infl in parsed.edges.items():
+        if person_key in person_ids and parent in metric_ids and child in metric_ids:
             conn.execute(
-                "INSERT OR IGNORE INTO metric_edge (parent_id, child_id, influent_percent) "
-                "VALUES (?, ?, ?)",
-                (metric_ids[parent], metric_ids[child], infl),
+                "INSERT OR IGNORE INTO metric_edge "
+                "(person_id, parent_id, child_id, influent_percent) VALUES (?, ?, ?, ?)",
+                (person_ids[person_key], metric_ids[parent], metric_ids[child], infl),
             )
+    for person_key, owned in parsed.person_metrics.items():
+        if person_key not in person_ids:
+            continue
+        own_edges = {
+            (parent, child): infl
+            for (pk, parent, child), infl in parsed.edges.items()
+            if pk == person_key
+        }
+        own_tree = _build_hierarchy(parsed.metrics, own_edges, scope=set(owned))
+        conn.executemany(
+            "INSERT OR IGNORE INTO metric_tree "
+            "(person_id, metric_id, depth, root_name, path, parent_name, influent_percent) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    person_ids[person_key],
+                    metric_ids[norm],
+                    h["depth"],
+                    h["root_name"],
+                    h["path"],
+                    h["parent_name"],
+                    h["influent_percent"],
+                )
+                for norm, h in own_tree.items()
+                if norm in metric_ids
+            ],
+        )
 
     dates = sorted({f.date for f in parsed.facts if f.date})
     period_ids: dict[str, int] = {}

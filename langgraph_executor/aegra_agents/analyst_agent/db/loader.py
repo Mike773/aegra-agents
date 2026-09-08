@@ -10,10 +10,14 @@
 
 Отличие от v5: вместо одной широкой строки на узел дерева здесь три
 независимых результата — КАТАЛОГ метрик (дедуп по имени), РЁБРА дерева
-(родитель → ребёнок, вес influent_percent) и ФАКТЫ (персона × метрика × дата ×
-разрез). Дерево строится только из структуры JSON: даты узлов на него не
-влияют, поэтому дочерний показатель с отстающей датой (родитель на 20-е, ребёнок
-на 14-е) остаётся и в дереве, и в фактах.
+(персона × родитель → ребёнок, вес influent_percent) и ФАКТЫ (персона ×
+метрика × дата × разрез). Дерево строится только из структуры JSON: даты узлов
+на него не влияют, поэтому дочерний показатель с отстающей датой (родитель на
+20-е, ребёнок на 14-е) остаётся и в дереве, и в фактах.
+
+Дерево у КАЖДОГО человека своё: набор показателей и их вложенность у
+руководителя и сотрудников могут отличаться, поэтому рёбра привязаны к
+person_key. Каталог остаётся общим — показатель с одним именем один и тот же.
 
 Хелперы нормализации (флаги, направление, пустой факт, разбор ранга) —
 копия v5: новый пакет не импортирует старые (их удалят).
@@ -185,7 +189,8 @@ class LoadReport:
 class ParsedDataset:
     people: list[PersonRec]
     metrics: dict[str, MetricRec]          # norm(name) → запись каталога
-    edges: dict[tuple[str, str], float | None]  # (parent_norm, child_norm) → influent_percent
+    edges: dict[tuple[str, str, str], float | None]  # (person_key, parent_norm, child_norm) → influent_percent
+    person_metrics: dict[str, list[str]]   # person_key → norm-имена его показателей в порядке JSON
     facts: list[FactRec]
     person_peer: list[tuple[str, str]]     # (person_key, aggregate_id)
     report: LoadReport
@@ -211,7 +216,9 @@ def _people(data: dict[str, Any]) -> list[dict[str, Any]]:
 class _Parser:
     def __init__(self) -> None:
         self.metrics: dict[str, MetricRec] = {}
-        self.edges: dict[tuple[str, str], float | None] = {}
+        self.edges: dict[tuple[str, str, str], float | None] = {}
+        self.person_metrics: dict[str, list[str]] = {}
+        self._owned: dict[str, set[str]] = {}
         self.facts: list[FactRec] = []
         self.report = LoadReport()
         self._ord = 0
@@ -278,8 +285,12 @@ class _Parser:
             rec = self._catalog(node, star_of)
             if rec is None:
                 continue
+            owned = self._owned.setdefault(person_key, set())
+            if rec.norm not in owned:
+                owned.add(rec.norm)
+                self.person_metrics.setdefault(person_key, []).append(rec.norm)
             if parent is not None and parent.norm != rec.norm:
-                key = (parent.norm, rec.norm)
+                key = (person_key, parent.norm, rec.norm)
                 infl = _to_float(node.get("influent_percent"))
                 if key not in self.edges or (self.edges[key] is None and infl is not None):
                     self.edges[key] = infl
@@ -337,6 +348,7 @@ def parse_dataset(data: dict[str, Any]) -> ParsedDataset:
         people=people,
         metrics=parser.metrics,
         edges=parser.edges,
+        person_metrics=parser.person_metrics,
         facts=parser.facts,
         person_peer=person_peer,
         report=parser.report,

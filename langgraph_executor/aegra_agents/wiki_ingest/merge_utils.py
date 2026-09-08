@@ -12,7 +12,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..easyrag.models import SectionProvenance, WikiPage, WikiSection
+from ..easyrag.aliases import alias_norm
+from ..easyrag.models import SectionProvenance, WikiAlias, WikiPage, WikiSection
 from .embeddings import EmbeddingClient
 
 EMBED_BATCH_SIZE = 128
@@ -158,7 +159,56 @@ __all__ = [
     "embed_batched",
     "load_existing_catalog",
     "reembed_sections",
+    "sync_alias_embeddings",
     "restore_provenance_by_anchor",
     "section_embed_text",
     "snapshot_provenance",
 ]
+
+
+async def sync_alias_embeddings(
+    session: AsyncSession, page: WikiPage, embedder: EmbeddingClient
+) -> int:
+    """Привести ``wiki_alias`` в соответствие с ``page.aliases``.
+
+    Каждый алиас получает СВОЙ вектор: аббревиатура вроде «AHT» в векторе секции
+    растворяется среди сотен слов текста, и поиск её не находит. Эмбеддим только
+    новые алиасы — у существующих вектор переиспользуется.
+
+    Возвращает число новых строк. Транзакцию ведёт вызывающий код.
+    """
+    wanted: dict[str, str] = {}
+    for raw in page.aliases or []:
+        norm = alias_norm(raw)
+        if norm:
+            wanted.setdefault(norm, str(raw).strip())
+
+    existing = (
+        await session.execute(
+            select(WikiAlias).where(WikiAlias.page_id == page.id)
+        )
+    ).scalars().all()
+    by_norm = {row.alias_norm: row for row in existing}
+
+    for norm, row in by_norm.items():
+        if norm not in wanted:
+            await session.delete(row)
+
+    fresh = [norm for norm in wanted if norm not in by_norm]
+    if not fresh:
+        await session.flush()
+        return 0
+
+    vectors = await embed_batched(embedder, [wanted[n] for n in fresh])
+    for norm, vec in zip(fresh, vectors):
+        session.add(
+            WikiAlias(
+                page_id=page.id,
+                direction_key=page.direction_key,
+                alias=wanted[norm],
+                alias_norm=norm,
+                embedding=vec,
+            )
+        )
+    await session.flush()
+    return len(fresh)
