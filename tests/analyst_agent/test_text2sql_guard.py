@@ -139,3 +139,19 @@ def test_schema_doc_mentions_views_and_rules(db):
     # Правило о разных датах уровней обязано быть в документации схемы.
     assert "дат" in doc.lower()
     assert "element" in doc
+
+
+def test_schema_doc_names_dialect_and_date_functions(db):
+    """Модель считала «оставшиеся недели» в уме и каждый раз по-разному, а при
+    попытке в SQL звала DUAL и WEEKS_BETWEEN: справка обязана назвать диалект и
+    функции дат, а сами функции — проходить через охрану запросов."""
+    doc = core.schema_doc(db)
+    assert "SQLite" in doc
+    assert "julianday" in doc and "LAG" in doc
+    runner = SafeQueryRunner(db.conn)
+    runner.install()
+    res = runner.run(
+        "SELECT CAST((julianday('2026-06-30') - julianday('2026-05-11')) / 7 AS INTEGER) AS w"
+    )
+    assert res.error is None
+    assert res.rows[0][0] == 7

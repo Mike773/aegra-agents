@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..agent.guards import blank_to_none
 from ..db.sqlrunner import run_template
 
 
@@ -18,12 +19,19 @@ def _num(value: Any, digits: int = 2) -> str:
     return str(value)
 
 
-def peer_context_text(ctx: Any, *, metric: str, person: str | None = None) -> str:
+def peer_context_text(
+    ctx: Any, *, metric: str | None, person: str | None = None
+) -> str:
     ctx.used_data_tools = True
+    # Модель присылает «не задано» и пустой строкой, и пустым объектом.
+    metric = blank_to_none(metric)
+    if not isinstance(metric, str) or not metric.strip():
+        return "Не указано название показателя. Назови показатель и повтори вызов."
     ref = ctx.db.resolve_metric(metric)
     if ref is None:
         return f"Показатель «{metric}» не найден в данных."
     person_key = ctx.person_key
+    person = blank_to_none(person)
     if person:
         resolved = ctx.db.resolve_person(person)
         if resolved:

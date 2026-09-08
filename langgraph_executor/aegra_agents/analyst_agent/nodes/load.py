@@ -77,7 +77,7 @@ def make_load_data_node():
             "loaded": True,
         }
 
-        if not cfg.boss_tabnum or not cfg.employee_tabnum:
+        if not cfg.boss_tabnum and not cfg.employee_tabnum:
             return {
                 **base,
                 "metrics": None,

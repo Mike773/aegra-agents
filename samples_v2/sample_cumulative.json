@@ -1,0 +1,409 @@
+{
+  "me": null,
+  "employees": [
+    {
+      "tabnum": 4032085,
+      "fio": "Петров Никита Сергеевич",
+      "post": "Менеджер",
+      "depart": "Сектор 1",
+      "metrics": [
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-04-06",
+          "calc_period": "квартал (накопительно)",
+          "fact": 30,
+          "plan": 24,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-06",
+              "calc_period": "квартал (накопительно)",
+              "fact": 12,
+              "plan": 10,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-06",
+              "calc_period": "квартал (накопительно)",
+              "fact": 10,
+              "plan": 8,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-06",
+              "calc_period": "квартал (накопительно)",
+              "fact": 8,
+              "plan": 6,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-04-06",
+          "calc_period": "неделя",
+          "fact": 300,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        },
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-04-13",
+          "calc_period": "квартал (накопительно)",
+          "fact": 58,
+          "plan": 48,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-13",
+              "calc_period": "квартал (накопительно)",
+              "fact": 24,
+              "plan": 20,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-13",
+              "calc_period": "квартал (накопительно)",
+              "fact": 19,
+              "plan": 16,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-13",
+              "calc_period": "квартал (накопительно)",
+              "fact": 15,
+              "plan": 12,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-04-13",
+          "calc_period": "неделя",
+          "fact": 295,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        },
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-04-20",
+          "calc_period": "квартал (накопительно)",
+          "fact": 83,
+          "plan": 72,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-20",
+              "calc_period": "квартал (накопительно)",
+              "fact": 35,
+              "plan": 30,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-20",
+              "calc_period": "квартал (накопительно)",
+              "fact": 27,
+              "plan": 24,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-20",
+              "calc_period": "квартал (накопительно)",
+              "fact": 21,
+              "plan": 18,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-04-20",
+          "calc_period": "неделя",
+          "fact": 290,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        },
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-04-27",
+          "calc_period": "квартал (накопительно)",
+          "fact": 103,
+          "plan": 96,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-27",
+              "calc_period": "квартал (накопительно)",
+              "fact": 44,
+              "plan": 40,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-27",
+              "calc_period": "квартал (накопительно)",
+              "fact": 34,
+              "plan": 32,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-04-27",
+              "calc_period": "квартал (накопительно)",
+              "fact": 25,
+              "plan": 24,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-04-27",
+          "calc_period": "неделя",
+          "fact": 310,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        },
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-05-04",
+          "calc_period": "квартал (накопительно)",
+          "fact": 117,
+          "plan": 120,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-04",
+              "calc_period": "квартал (накопительно)",
+              "fact": 49,
+              "plan": 50,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-04",
+              "calc_period": "квартал (накопительно)",
+              "fact": 40,
+              "plan": 40,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-04",
+              "calc_period": "квартал (накопительно)",
+              "fact": 28,
+              "plan": 30,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-05-04",
+          "calc_period": "неделя",
+          "fact": 305,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        },
+        {
+          "id": "cum_sales",
+          "metric_name": "Продажи УП",
+          "metric_description": "Количество проданных условных продуктов. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+          "metric_type": "прямая",
+          "measure_type": "шт.",
+          "date": "2026-05-11",
+          "calc_period": "квартал (накопительно)",
+          "fact": 127,
+          "plan": 144,
+          "element": null,
+          "child_metrics": [
+            {
+              "id": "cum_credits",
+              "metric_name": "Кредиты",
+              "metric_description": "Продано кредиты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-11",
+              "calc_period": "квартал (накопительно)",
+              "fact": 52,
+              "plan": 60,
+              "element": null,
+              "influent_percent": 45
+            },
+            {
+              "id": "cum_cards",
+              "metric_name": "Карты",
+              "metric_description": "Продано карты, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-11",
+              "calc_period": "квартал (накопительно)",
+              "fact": 45,
+              "plan": 48,
+              "element": null,
+              "influent_percent": 35
+            },
+            {
+              "id": "cum_deposits",
+              "metric_name": "Вклады",
+              "metric_description": "Продано вклады, шт. Накопительный итог с начала квартала: факт и план на дату — сумма с 1 апреля по эту дату включительно, а не результат одной недели.",
+              "metric_type": "прямая",
+              "measure_type": "шт.",
+              "date": "2026-05-11",
+              "calc_period": "квартал (накопительно)",
+              "fact": 30,
+              "plan": 36,
+              "element": null,
+              "influent_percent": 20
+            }
+          ]
+        },
+        {
+          "id": "aht",
+          "metric_name": "AHT",
+          "metric_description": "Среднее время обработки звонка за неделю, сек.",
+          "metric_type": "обратная",
+          "measure_type": "сек",
+          "date": "2026-05-11",
+          "calc_period": "неделя",
+          "fact": 298,
+          "plan": 320,
+          "element": null,
+          "child_metrics": []
+        }
+      ]
+    }
+  ]
+}
