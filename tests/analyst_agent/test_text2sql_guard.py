@@ -155,3 +155,32 @@ def test_schema_doc_names_dialect_and_date_functions(db):
     )
     assert res.error is None
     assert res.rows[0][0] == 7
+
+
+def test_schema_doc_prints_shared_columns_once(db):
+    """v_fact_latest и v_series — те же колонки, что v_fact; печатать список из
+    полусотни имён трижды незачем: это треть всей схемы в промпте."""
+    doc = core.schema_doc(db)
+    assert doc.count("fact_id, person_key, fio") == 1
+    assert "v_fact_latest: те же колонки, что v_fact" in doc
+    assert "v_series: те же колонки, что v_fact, плюс prev_fact, prev_date, first_fact" in doc
+
+
+def test_schema_doc_has_no_dataset_facts_block(db):
+    """Люди, периоды и число показателей уже есть в блоке «СОСТАВ ДАННЫХ»;
+    в схеме их дублировать не нужно."""
+    doc = core.schema_doc(db)
+    assert "ЧТО В ЭТОЙ БАЗЕ" not in doc
+    assert "Люди:" not in doc
+
+
+def test_schema_doc_star_and_rank_hints_survive_without_facts_block():
+    """Подсказки про v_star и rank_raw жили в блоке фактов — после его удаления
+    они должны остаться в правилах, но только когда такие данные есть."""
+    plain = core.build_run_db(make_dataset_obj([make_metric("AHT", fact=1.0, plan=1.0)]))
+    assert "v_star" not in core.schema_doc(plain)
+    child = make_metric("CSI", fact=4.1, plan=4.5, is_star_metric=True)
+    star = make_metric("Звезда качества", fact=None, star_received=False, children=[child])
+    starred = core.build_run_db(make_dataset_obj([star]))
+    doc = core.schema_doc(starred)
+    assert "v_star — строка на звезду" in doc

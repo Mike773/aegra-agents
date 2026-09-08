@@ -160,7 +160,7 @@ def _columns(conn, view: str) -> list[str]:
 def build_schema_doc(db: Any) -> str:
     """Справка по схеме: вью с колонками, семантика, факты датасета, примеры."""
     conn = db.conn
-    views = [v for v in _views(conn) if v != "v_deviation" or _has_rows(conn, "deviation")]
+    views = [v for v in _views(conn) if _view_has_data(db, v)]
 
     lines = [
         "СХЕМА ДАННЫХ (SQLite, только чтение)",
@@ -168,65 +168,73 @@ def build_schema_doc(db: Any) -> str:
         "период и готовые вердикты. Базовые таблицы служебные.",
         "",
     ]
+    # Список колонок v_fact — полсотни имён; v_fact_latest и v_series
+    # состоят из тех же колонок, и печатать их трижды незачем.
+    base_cols = _columns(conn, "v_fact")
     for view in views:
         cols = _columns(conn, view)
         if not cols:
             continue
-        lines.append(f"{view}({', '.join(cols)})")
+        extra = [c for c in cols if c not in base_cols]
+        if view != "v_fact" and base_cols and len(cols) - len(extra) == len(base_cols):
+            tail = f", плюс {', '.join(extra)}" if extra else ""
+            lines.append(f"{view}: те же колонки, что v_fact{tail}")
+        else:
+            lines.append(f"{view}({', '.join(cols)})")
         for col in cols:
             doc = COLUMN_DOCS.get((view, col))
             if doc:
                 lines.append(f"  - {col}: {doc}")
         lines.append("")
 
-    lines.append(_facts_block(db))
-    lines.append("")
     lines.append(_RULES)
+    dataset_rules = _dataset_rules(db)
+    if dataset_rules:
+        lines.append(dataset_rules)
     lines.append("")
     lines.append(_examples_block(conn))
     return "\n".join(lines).strip()
+
+
+def _view_has_data(db: Any, view: str) -> bool:
+    """Вью, за которыми в этом датасете нет данных, в справку не идут — модель
+    не должна звать несуществующее."""
+    conn = db.conn
+    if view == "v_deviation":
+        return _has_rows(conn, "deviation")
+    if view in ("v_star", "v_star_metric"):
+        return bool(db.has_stars)
+    if view == "v_peer_latest":
+        return bool(db.has_aggregates) or _has_rows(conn, "ranking")
+    return True
 
 
 def _has_rows(conn, table: str) -> bool:
     return bool(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
 
-def _facts_block(db: Any) -> str:
+def _dataset_rules(db: Any) -> str:
+    """Подсказки про вью, которые есть не в каждом датасете. Состав данных
+    (люди, периоды, число показателей) здесь не повторяется — он в блоке
+    «СОСТАВ ДАННЫХ»."""
     conn = db.conn
-    people = conn.execute(
-        "SELECT person_key, fio, is_me FROM person ORDER BY is_me DESC, person_id"
-    ).fetchall()
-    dates = conn.execute("SELECT date FROM period ORDER BY period_idx").fetchall()
-    n_metrics = conn.execute("SELECT COUNT(*) FROM metric").fetchone()[0]
-    max_depth = conn.execute("SELECT MAX(depth) FROM metric").fetchone()[0] or 1
-
-    who = ", ".join(
-        f"{r['fio'] or r['person_key']} ({r['person_key']}"
-        + (", руководитель)" if r["is_me"] else ")")
-        for r in people
-    )
-    parts = [
-        "ЧТО В ЭТОЙ БАЗЕ",
-        f"- Люди: {who or 'нет'}.",
-        f"- Показателей в каталоге: {n_metrics}, глубина дерева: {max_depth}.",
-    ]
-    if dates:
-        parts.append(
-            f"- Периоды: {len(dates)}, от {dates[0]['date']} до {dates[-1]['date']} "
-            "(у разных показателей последняя дата может отличаться)."
-        )
-    levels = conn.execute(
-        "SELECT DISTINCT level_name, level_order FROM peer_aggregate "
-        "WHERE level_name IS NOT NULL ORDER BY level_order"
-    ).fetchall()
-    if levels:
-        parts.append(
-            "- Группы сравнения (от узкой к широкой): "
-            + ", ".join(r["level_name"] for r in levels)
-            + "."
-        )
-    elif db.has_aggregates:
-        parts.append("- Группы сравнения есть, но без названий — называй их обезличенно.")
+    parts = []
+    if db.has_aggregates:
+        levels = conn.execute(
+            "SELECT DISTINCT level_name FROM peer_aggregate "
+            "WHERE level_name IS NOT NULL ORDER BY level_order"
+        ).fetchall()
+        if levels:
+            parts.append(
+                "- Группы сравнения (v_peer_latest, от узкой к широкой): "
+                + ", ".join(r["level_name"] for r in levels)
+                + "."
+            )
+        else:
+            parts.append(
+                "- Группы сравнения (v_peer_latest) есть, но без названий — "
+                "называй их обезличенно."
+            )
     if _has_rows(conn, "ranking"):
         parts.append("- Есть места в больших группах коллег (v_peer_latest.rank_raw).")
     if db.has_stars:
