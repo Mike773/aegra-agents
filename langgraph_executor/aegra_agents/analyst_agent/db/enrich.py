@@ -225,7 +225,8 @@ def catalog_block(
     if not rows:
         return ""
     counts = run_template(
-        db.conn, "enrich_deeper_counts", max_rows=5000, max_level=2, row_limit=5000
+        db.conn, "enrich_deeper_counts", max_rows=5000,
+        person_key=person_key, max_level=2, row_limit=5000,
     )
     deeper: dict[str, list[tuple[int, int]]] = {}
     for r in _rows(counts):
@@ -319,24 +320,14 @@ def stars_block(db: Any, *, person_key: str | None = None) -> str:
     rows = _rows(run_template(db.conn, "enrich_stars", person_key=person_key))
     if not rows:
         return ""
-    by_star: dict[str, list[dict[str, Any]]] = {}
-    received: dict[str, Any] = {}
-    dates: dict[str, Any] = {}
+    lines = ["ЗВЁЗДЫ (строка на звезду; после двоеточия — её влияющие показатели)"]
     for r in rows:
-        by_star.setdefault(r["star"], []).append(r)
-        received[r["star"]] = r["received"]
-        dates[r["star"]] = r["star_date"]
-    lines = ["ЗВЁЗДЫ"]
-    for star, items in by_star.items():
-        status = "получена" if received[star] else "не получена"
-        lines.append(f"- {star} ({dates[star]}): {status}.")
-        missed = [
-            f"{r['child']} — факт {_num(r['child_fact'])} при плане {_num(r['child_plan'])}"
-            for r in items
-            if r["child"] and r["child_plan_status"] == "хуже_плана"
-        ]
-        if missed:
-            lines.append("  ниже плана: " + "; ".join(missed[:5]) + ".")
+        status = "получена" if r["received"] else "не получена"
+        head = f"- {r['star']} ({r['star_date']}): {status}"
+        if r["metrics"]:
+            lines.append(f"{head}. Показатели: {r['metrics']}.")
+        else:
+            lines.append(f"{head}. Влияющих показателей в данных нет.")
     return _trim("\n".join(lines), BUDGET_STARS)
 
 

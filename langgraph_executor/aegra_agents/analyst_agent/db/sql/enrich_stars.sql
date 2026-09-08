@@ -1,9 +1,12 @@
 -- name: enrich_stars
--- summary: Звёзды человека и их влияющие показатели за последние даты серий
+-- summary: Звёзды человека — строка на звезду с её влияющими показателями
 -- params: person_key:str
--- returns: star, received, star_date, child, child_fact, child_plan, child_plan_status, child_date
+-- returns: star, received, star_date, n_metrics, n_below_plan, metrics
 -- render: table
-SELECT star, received, star_date, child, child_fact, child_plan, child_plan_status, child_date
+--
+-- Влияющие показатели (is_star_metric) берутся из дерева ЭТОГО человека и
+-- идут одной строкой: «имя: факт X при плане Y, выполнение Z %, вердикт; …».
+SELECT star, received, star_date, n_metrics, n_below_plan, metrics
 FROM v_star
 WHERE person_key = :person_key
-ORDER BY star, child_plan_status DESC, child;
+ORDER BY received, star;

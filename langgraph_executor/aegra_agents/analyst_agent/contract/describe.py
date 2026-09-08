@@ -116,7 +116,7 @@ def _metrics_source_line(metrics: Any) -> str:
         return "- Метрики: датасет не разобран."
     if not parsed.facts:
         return "- Метрики: датасет пуст."
-    children = {child for _, child in parsed.edges}
+    children = {child for _, _, child in parsed.edges}
     top_names = [rec.name for norm, rec in parsed.metrics.items() if norm not in children]
     periods: dict[str, set[str]] = {}
     for f in parsed.facts:

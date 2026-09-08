@@ -57,7 +57,21 @@ def _person_info(ctx: Any, person: str, name: str) -> dict[str, Any]:
     return {"has_aggregate": row["has_aggregate"], "n_elements": row["n_elements"]}
 
 
-def _header(ctx: Any, name: str, info: dict[str, Any] | None = None) -> list[str]:
+def _person_path(ctx: Any, person: str, name: str) -> str | None:
+    """Место показателя в дереве ЭТОГО человека; None, если у него показателя нет."""
+    row = ctx.db.conn.execute(
+        "SELECT t.path FROM metric_tree t "
+        "JOIN person p ON p.person_id = t.person_id "
+        "JOIN metric m ON m.metric_id = t.metric_id "
+        "WHERE p.person_key = ? AND m.name = ?",
+        (person, name),
+    ).fetchone()
+    return row["path"] if row else None
+
+
+def _header(
+    ctx: Any, name: str, info: dict[str, Any] | None = None, person: str | None = None
+) -> list[str]:
     row = ctx.db.conn.execute(
         "SELECT name, description, unit, direction, kind, depth, path, parent_name, "
         "is_star, is_star_metric, star_of, kn_summary, kn_aliases, kn_cumulative, "
@@ -66,6 +80,9 @@ def _header(ctx: Any, name: str, info: dict[str, Any] | None = None) -> list[str
     ).fetchone()
     if row is None:
         return [name]
+    # Дерево у каждого человека своё: путь берём из его дерева, сводный
+    # путь каталога — только если у человека этого показателя нет.
+    path = (_person_path(ctx, person, name) if person else None) or row["path"]
     lines = [f"ПОКАЗАТЕЛЬ: {row['name']}"]
     if row["description"]:
         lines.append(f"Описание: {row['description']}")
@@ -78,8 +95,8 @@ def _header(ctx: Any, name: str, info: dict[str, Any] | None = None) -> list[str
         )
     if row["kind"] and row["kind"] != "уровень":
         facts.append(f"вид — {row['kind']}")
-    if row["path"]:
-        facts.append(f"место в дереве — {row['path']}")
+    if path:
+        facts.append(f"место в дереве — {path}")
     if row["is_star"]:
         facts.append("это звезда: числа нет, только получена или нет")
     if row["star_of"]:
@@ -348,7 +365,7 @@ def metric_card_text(
 
     info = _person_info(ctx, person_key, ref.name)
     blocks = [
-        "\n".join(_header(ctx, ref.name, info)),
+        "\n".join(_header(ctx, ref.name, info, person_key)),
         "\n".join(_periods(ctx, person_key, ref.name, date, info)),
     ]
     for part in (

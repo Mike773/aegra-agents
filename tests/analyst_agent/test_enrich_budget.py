@@ -114,6 +114,18 @@ def test_stars_block_only_with_stars(simple_db):
     db = _db(make_dataset_obj([star]))
     text = enrich.stars_block(db)
     assert "Звезда качества" in text and "не получена" in text.lower()
+    assert "Влияющий: факт 1 при плане 2, выполнение 50 %, хуже плана" in text
+
+
+def test_stars_block_lists_only_influencing_metrics():
+    good = make_metric("Хороший", fact=3.0, plan=2.0, is_star_metric=True)
+    bad = make_metric("Плохой", fact=1.0, plan=2.0, is_star_metric=True)
+    plain = make_metric("Справочный", fact=44.0)
+    star = make_metric("Звезда", fact=None, star_received=True, children=[good, bad, plain])
+    text = enrich.stars_block(_db(make_dataset_obj([star])))
+    assert "получена" in text
+    assert "Хороший" in text and "Плохой" in text
+    assert "Справочный" not in text
 
 
 def test_peer_block_only_with_aggregates(simple_db):
@@ -147,3 +159,26 @@ def test_enrichment_block_on_samples():
         person = db.conn.execute("SELECT person_key FROM person LIMIT 1").fetchone()[0]
         text = enrich.enrichment_block(db, person_key=person)
         assert text.strip(), sample
+
+
+def _two_person_trees():
+    """У первого HOLD лежит под AHT, у второго HOLD — корень, а AHT без детей."""
+    hold_a = make_metric("HOLD", date="2026-04-14", fact=5.0, plan=4.0, influent_percent=60)
+    talk_a = make_metric("TALK", date="2026-04-14", fact=7.0, plan=8.0, influent_percent=40)
+    aht_a = make_metric("AHT", date="2026-04-20", fact=12.0, plan=10.0, children=[hold_a, talk_a])
+    hold_b = make_metric("HOLD", date="2026-04-14", fact=3.0, plan=4.0)
+    aht_b = make_metric("AHT", date="2026-04-20", fact=9.0, plan=10.0)
+    return make_dataset_obj(
+        [aht_a], tabnum=1, fio="Первый",
+        employees_extra=[make_person([aht_b, hold_b], tabnum=2, fio="Второй")],
+    )
+
+
+def test_catalog_block_follows_person_tree():
+    db = _db(_two_person_trees())
+    first = enrich.catalog_block(db, person_key="1")
+    second = enrich.catalog_block(db, person_key="2")
+    assert "  - HOLD" in first and "  - TALK" in first
+    # У второго HOLD — самостоятельный показатель верхнего уровня, TALK показан
+    # по сводному дереву каталога (у него самого TALK нет).
+    assert "- HOLD" in second and "  - HOLD" not in second
