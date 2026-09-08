@@ -184,3 +184,49 @@ def test_schema_doc_star_and_rank_hints_survive_without_facts_block():
     starred = core.build_run_db(make_dataset_obj([star]))
     doc = core.schema_doc(starred)
     assert "v_star — строка на звезду" in doc
+
+
+# --- схема живёт в описании query_sql, а не в системном промпте -----------
+
+def _sql_ctx(db):
+    from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
+    from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
+
+    devs = builder.build_deviations(db, focus_person_key="100500")
+    return RunContext(db=db, person_key="100500", direction_key="d",
+                      ledger=ledger.DeviationLedger(db, devs, turn=1))
+
+
+def test_query_sql_description_carries_schema(db):
+    """Схема нужна только тому, кто пишет SQL: она в описании инструмента."""
+    from langgraph_executor.aegra_agents.analyst_agent.tools.query_sql import make_query_sql
+
+    desc = make_query_sql(_sql_ctx(db)).description
+    assert "СХЕМА ДАННЫХ" in desc
+    assert "v_fact(" in desc and "v_fact_latest" in desc
+    assert "julianday" in desc and "SQLite" in desc
+    # Примеры — не текстом в описании, а few-shot примерами функции.
+    assert "ПРИМЕРЫ ЗАПРОСОВ" not in desc
+
+
+def test_query_sql_few_shot_examples_run_on_the_db(db):
+    """Примеры уходят в GigaChat как few_shot_examples функции: запрос
+    руководителя → аргументы вызова. Каждый пример обязан исполняться."""
+    from langchain_gigachat.utils.function_calling import convert_to_gigachat_function
+
+    from langgraph_executor.aegra_agents.analyst_agent.tools.query_sql import make_query_sql
+
+    tool = make_query_sql(_sql_ctx(db))
+    spec = convert_to_gigachat_function(tool)
+    examples = spec["few_shot_examples"]
+    assert len(examples) >= 6
+    for ex in examples:
+        assert ex["request"] and set(ex["params"]) == {"sql", "purpose"}
+        assert "100500" in ex["params"]["sql"]      # подставлен реальный человек
+        out = tool.invoke(ex["params"])
+        assert not out.startswith("ОШИБКА SQL"), (ex["request"], out)
+
+
+def test_schema_doc_can_omit_examples(db):
+    assert "ПРИМЕРЫ ЗАПРОСОВ" in core.schema_doc(db)
+    assert "ПРИМЕРЫ ЗАПРОСОВ" not in core.schema_doc(db, examples=False)

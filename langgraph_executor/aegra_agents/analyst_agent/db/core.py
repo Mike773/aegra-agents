@@ -27,6 +27,7 @@ from . import analytics as analytics_mod
 from . import loader
 from .loader import MetricRec, ParsedDataset
 from .schema_doc import build_schema_doc as schema_doc
+from .schema_doc import sql_examples
 
 _SCHEMA_PATH = Path(__file__).with_name("sql") / "schema.sql"
 # Порог нечёткого совпадения имени метрики/персоны (лестница резолва).
@@ -561,4 +562,4 @@ def build_run_db(
     return db
 
 
-__all__ = ["BuildReport", "MetricRef", "RunDb", "build_run_db", "schema_doc"]
+__all__ = ["BuildReport", "MetricRef", "RunDb", "build_run_db", "schema_doc", "sql_examples"]

@@ -12,7 +12,7 @@ TOOLS_GUIDE_TEMPLATE = """КАК РАБОТАТЬ С ДАННЫМИ И ИНСТ�
 
 - Начинай с карты отклонений: она уже посчитана по данным и отранжирована по
   важности (в промпте — верхушка, целиком — `list_deviations`). Разбираться в
-  показателе начинай с `metric_card`; SQL — когда нужен срез, которого там нет.
+  показателе начинай с `metric_card`{sql_hint}.
 - Один вызов инструмента за шаг. Не повторяй вызов с теми же аргументами: если
   данных не хватило, меняй параметры или инструмент.
 - Бюджет вызовов на этот ответ — {budget}. Уложись и переходи к ответу; лучше
@@ -33,8 +33,14 @@ TOOLS_GUIDE_TEMPLATE = """КАК РАБОТАТЬ С ДАННЫМИ И ИНСТ�
   увидит руководитель."""
 
 
-def tools_guide_block(budget: int) -> str:
-    return TOOLS_GUIDE_TEMPLATE.format(budget=budget)
+_SQL_HINT = (
+    "; SQL — когда нужен срез, которого там нет (схема базы и примеры "
+    "запросов — в описании `query_sql`)"
+)
+
+
+def tools_guide_block(budget: int, *, has_sql: bool = True) -> str:
+    return TOOLS_GUIDE_TEMPLATE.format(budget=budget, sql_hint=_SQL_HINT if has_sql else "")
 
 
 __all__ = ["TOOLS_GUIDE_TEMPLATE", "tools_guide_block"]

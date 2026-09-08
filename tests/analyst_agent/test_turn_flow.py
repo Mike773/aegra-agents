@@ -129,7 +129,10 @@ def test_first_turn_prompt_carries_data_blocks(monkeypatch):
     app = _build(llm)
     asyncio.run(app.ainvoke({"messages": [HumanMessage(content="Разбери")]}, _cfg()))
     system_prompt = llm.prompts[0][0].content
-    assert "СХЕМА ДАННЫХ" in system_prompt
+    # Схема базы — в описании query_sql, в системном промпте её нет.
+    assert "СХЕМА ДАННЫХ" not in system_prompt
+    assert "описании `query_sql`" in system_prompt
+    assert "СХЕМА ДАННЫХ" in next(t for t in llm.tools if t.name == "query_sql").description
     assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" in system_prompt
     assert "КАРТА ОТКЛОНЕНИЙ" in system_prompt
     assert "Продажи" in system_prompt

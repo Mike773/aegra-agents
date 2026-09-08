@@ -1,7 +1,8 @@
 """analyst_agent.prompts.compose_system_prompt: один системный промпт агента.
 
 Порядок блоков фиксирован: бизнес-промпт → как работать инструментами →
-схема данных → что в этих данных → карта отклонений → подсказка хода. Бизнес-
+что в этих данных → карта отклонений → подсказка хода. Схема базы — в описании
+инструмента query_sql, в системный промпт она не входит. Бизнес-
 промпт заменяется через system_prompt_override, операционная часть остаётся всегда.
 """
 from __future__ import annotations
@@ -14,7 +15,6 @@ from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
 
 def _ctx(**kw):
     base = dict(
-        schema_doc="СХЕМА ДАННЫХ\nv_fact(...)",
         enrichment_block="СОСТАВ ДАННЫХ\n- В анализе: Иванов.",
         catalog_block="КАТАЛОГ ПОКАЗАТЕЛЕЙ\n- Продажи",
         deviations_block="КАРТА ОТКЛОНЕНИЙ\n- Продажи — хуже плана.",
@@ -33,7 +33,6 @@ def test_block_order():
         text.index("# Роль и Миссия"),
         text.index("# Структура отчета"),
         text.index("КАК РАБОТАТЬ"),
-        text.index("СХЕМА ДАННЫХ"),
         text.index("СОСТАВ ДАННЫХ"),
         text.index("КАТАЛОГ ПОКАЗАТЕЛЕЙ"),
         text.index("КАРТА ОТКЛОНЕНИЙ"),
@@ -59,7 +58,6 @@ def test_override_replaces_business_but_keeps_operational():
     assert "# Роль и Миссия" not in text
     assert "# Структура отчета" not in text
     # Операционные блоки остаются: без них модель не сможет работать с данными.
-    assert "СХЕМА ДАННЫХ" in text
     assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" in text
     assert "КАК РАБОТАТЬ" in text
 
@@ -134,7 +132,6 @@ def test_fits_budget_on_production_scale():
     db = core.build_run_db(make_synthetic_dataset(n_level1=100, depth=5, periods=6))
     text = prompts.compose_system_prompt(
         _ctx(
-            schema_doc=core.schema_doc(db),
             enrichment_block=enrich.enrichment_block(db, person_key="100500"),
             catalog_block=enrich.catalog_block(db),
             has_stars=db.has_stars,

@@ -93,7 +93,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         is_dashboard = turn_kind == "dashboard" and task_idx < len(tasks)
 
         # Блоки промпта: посчитанные на первом ходе плюс свежая карта отклонений.
-        schema_doc = state.get("schema_doc") or core.schema_doc(db)
         enrichment = state.get("enrichment_block") or enrich.enrichment_block(
             db, person_key=person_key
         )
@@ -120,7 +119,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
 
         prompt = compose_system_prompt(
             PromptContext(
-                schema_doc=schema_doc,
                 enrichment_block=enrichment,
                 catalog_block=catalog,
                 knowledge_block=state.get("knowledge_block") or "",
@@ -132,6 +130,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 turn_kind="dashboard" if is_dashboard else turn_kind,
                 has_stars=db.has_stars,
                 tool_budget=budget,
+                has_sql=cfg.text2sql_enabled,
                 system_prompt_override=cfg.system_prompt_override,
             )
         )

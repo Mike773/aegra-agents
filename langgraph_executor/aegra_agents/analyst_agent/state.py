@@ -111,7 +111,6 @@ class AnalystState(AnalystOutput, total=False):
     turn_no: int
 
     # Готовые блоки системного промпта, посчитанные один раз на первом ходе.
-    schema_doc: str
     enrichment_block: str
     catalog_block: str
     knowledge_block: str
