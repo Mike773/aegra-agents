@@ -30,13 +30,13 @@
 ## Топология
 
 ```
-START ──need_load──▶ load_data ─▶ load_memory ─▶ prepare ─┬─▶ plan_tasks ─▶ agent
-      └─(уже загружено)─▶ begin_turn ─────────────────────┴─▶ agent
+START ──need_load──▶ load_data ─▶ prepare ─┬─▶ plan_tasks ─▶ agent
+      └─(уже загружено)─▶ begin_turn ──────────────────┴─▶ agent
                                                               │
                        agent ─┬─(ещё есть задачи)─▶ agent ────┘
                               ├─(задачи кончились)─▶ summarize ─▶ auto_insight ─▶ END
                               ├─(первый ход)───────▶ auto_insight ─▶ END
-                              └─(ход 2+)───────────▶ save_memory ─▶ END
+                              └─(ход 2+)───────────▶ END
 ```
 
 Ход turn-based, без `interrupt()`: один вызов графа = одно входящее сообщение →

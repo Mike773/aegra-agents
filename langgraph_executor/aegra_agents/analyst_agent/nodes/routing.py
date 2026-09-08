@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from langgraph.graph import END
+
 
 def need_load(state: Any) -> str:
     """Первый ход треда грузит данные; дальше состояние берётся из чекпойнтера."""
@@ -25,7 +27,7 @@ def after_prepare(state: Any) -> str:
 
 
 def after_agent(state: Any) -> str:
-    """После ответа агента: следующая задача, сводка, инсайт или память."""
+    """После ответа агента: следующая задача, сводка, инсайт или конец хода."""
     state = state or {}
     if state.get("turn_kind") == "dashboard":
         tasks = state.get("tasks") or []
@@ -33,7 +35,7 @@ def after_agent(state: Any) -> str:
             return "agent"
         return "summarize"
     if state.get("turn_kind") == "followup":
-        return "save_memory"
+        return END
     return "auto_insight"
 
 
