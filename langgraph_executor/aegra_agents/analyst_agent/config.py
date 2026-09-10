@@ -4,7 +4,8 @@
 шлёт. Новых ровно три: dashboard_mode (составной разбор), text2sql_enabled
 (рубильник свободного SQL) и debug_dump (выгрузка базы для отладки).
 ``format_first_answer`` принимается ради совместимости, но ничего не делает:
-правила формата первого ответа теперь в самом промпте.
+правила формата первого ответа теперь в самом промпте. ``run_mode="signal"``
+включает сигнальный режим инсайтов (см. ``shared/insight_signal.py``).
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from ..shared.insight_signal import RUN_MODE_SIGNAL
 from .contract.messages import config_flag, config_value
 
 DEFAULT_DATASET = "metrics_for_agent_analyst"
@@ -36,6 +38,7 @@ class RunConfig:
     source_type: str | None = None
     source_id: str | None = None
     thread_id: str | None = None
+    run_mode: str | None = None
 
     easyrag_enabled: bool = True
     easyrag_top_k: int = DEFAULT_EASYRAG_TOP_K
@@ -82,6 +85,7 @@ class RunConfig:
             source_type=text("source_type"),
             source_id=text("source_id"),
             thread_id=text("thread_id"),
+            run_mode=text("run_mode"),
             easyrag_enabled=config_flag(config, "easyrag_enabled", default=True),
             easyrag_top_k=number("easyrag_top_k", DEFAULT_EASYRAG_TOP_K),
             gap_on_unanswered=config_flag(config, "gap_on_unanswered", default=True),
@@ -108,6 +112,10 @@ class RunConfig:
     def has_source(self) -> bool:
         """Инсайты пишем только когда известны и тип, и идентификатор источника."""
         return bool(self.source_type and self.source_id)
+
+    def is_signal_mode(self) -> bool:
+        """Сигнальный режим: инсайт с вердиктом о проблеме и текстом ответа."""
+        return (self.run_mode or "").strip().lower() == RUN_MODE_SIGNAL
 
 
 def configurable(config: RunnableConfig | None) -> dict[str, Any]:

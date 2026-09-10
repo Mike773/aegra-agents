@@ -34,7 +34,7 @@ def build_graph(llm: GigaChat, checkpointer=None):
     g.add_node("plan_tasks", make_plan_tasks_node(llm))
     g.add_node("agent", make_agent_node(llm, easyrag_graph))
     g.add_node("summarize", make_summarize_node(llm))
-    g.add_node("auto_insight", make_auto_insight_node())
+    g.add_node("auto_insight", make_auto_insight_node(llm))
 
     # Первый ход треда грузит данные и готовит базу; дальше состояние берётся
     # из чекпойнтера, и ход начинается сразу с агента.

@@ -24,6 +24,12 @@ from ..shared.agent_dataset import (
     GetBatchAgentDatasetByFiltersComponent,
 )
 from ..shared.assignments_service import SendAssignmentsComponent
+from ..shared.insight_signal import (
+    detect_signal,
+    empty_norm_insight,
+    is_signal_mode,
+    signal_insight,
+)
 from ..shared.offload import run_blocking
 from ..shared.orgstructure import IsuEmployeeOrgstructureInfo
 from .prompts import (
@@ -1012,6 +1018,11 @@ def make_auto_insight_node(llm: GigaChat):
     configurable. Их нет — узел ничего не делает. Пользователю узел не пишет:
     итоговое сообщение хода уже отдал initial_analysis. Любой сбой изолирован —
     первичный разбор руководитель получает в любом случае.
+
+    Сигнальный режим (configurable.run_mode=signal): к инсайту добавляются
+    author/confirmed/signal/signal_description; вердикт signal даёт отдельный
+    LLM-вызов по брифингу и первичному разбору. Если классификатор ничего не
+    выделил, всё равно пишем запись «в норме» с signal=false.
     """
 
     async def auto_insight(state: OrchestratorState, config: RunnableConfig) -> dict:
@@ -1031,13 +1042,27 @@ def make_auto_insight_node(llm: GigaChat):
                 "summary": "Первичный разбор не собран — стартовый инсайт не пишу.",
             }])}
 
+        signal_mode = is_signal_mode(config)
         insights = await _classify_insights(llm, state.get("metrics"), summary)
         chosen = _first_insight(_enforce_single_main_problem(insights))
         if chosen is None:
-            return {"reasoning_trace": _append_trace(state, [{
-                "stage": "assignments", "kind": "decision",
-                "summary": "Из первичного разбора не выделился инсайт для фиксации.",
-            }])}
+            if not signal_mode:
+                return {"reasoning_trace": _append_trace(state, [{
+                    "stage": "assignments", "kind": "decision",
+                    "summary": "Из первичного разбора не выделился инсайт для фиксации.",
+                }])}
+            chosen = empty_norm_insight()
+
+        signal_detail: dict[str, Any] = {}
+        if signal_mode:
+            # Вопрос — брифинг первого хода (он же первая реплика руководителя).
+            question = (state.get("briefing") or "").strip() or _last_user_text(state)
+            signal = await detect_signal(
+                llm, question, summary,
+                fallback=chosen.get("type") in ("main_problem", "problem"),
+            )
+            chosen = signal_insight(chosen, signal=signal, description=summary)
+            signal_detail = {"run_mode": "signal", "signal": signal}
 
         err = await _submit_insight(state, config, chosen)
         if err:
@@ -1057,6 +1082,7 @@ def make_auto_insight_node(llm: GigaChat):
                     "metric_name": chosen.get("metric_name"),
                     "source_type": state.get("source_type"),
                     "source_id": state.get("source_id"),
+                    **signal_detail,
                 },
             }]),
         }

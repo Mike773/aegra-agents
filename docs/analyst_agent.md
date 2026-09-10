@@ -52,7 +52,7 @@ START ──need_load──▶ load_data ─▶ prepare ─┬─▶ plan_tasks 
 | `plan_tasks` | 1 | только `dashboard_mode`: брифинг → список задач |
 | `agent` | 1 цикл | единственный цикл инструментов; в составном разборе — одна задача за вызов |
 | `summarize` | 1 | сводит результаты задач в один ответ |
-| `auto_insight` | нет | пишет главный вывод в сервис инсайтов |
+| `auto_insight` | только в `run_mode=signal` | пишет главный вывод в сервис инсайтов |
 
 \* `prepare` может сделать несколько служебных вызовов модели при холодном кэше
 трактовок показателей (ограничены числом и таймаутом).
@@ -148,6 +148,15 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 авто-записи помечаются resolved. Главный вывод для сервиса инсайтов берётся с её
 вершины детерминированно (`deviations/insight.py`), без отдельного LLM-вызова.
 
+Сигнальный режим `configurable.run_mode=signal` (общая логика для обоих
+агентов — `shared/insight_signal.py`): к инсайту добавляются `author`
+(`"Agent"`), `confirmed` (`true`), `signal` — есть ли проблема относительно
+входного запроса — и `signal_description` — markdown-текст ответа агента.
+Вердикт `signal` даёт единственный LLM-вызов узла (вопрос + ответ → JSON); при
+сбое модели берётся тип инсайта (`main_problem` → `true`). Если карта отклонений
+пуста, всё равно уходит запись `type=norm`, `signal=false`; если ответа нет
+(данные не загрузились) — не уходит ничего. Без `run_mode` payload прежний.
+
 **Задачи из брифинга.** Нумерованные и маркированные строки первого сообщения
 разбираются без модели (`deviations/tasks.py`) и смещают фокус карты: показатели
 задач поднимаются в приоритете, остальные приглушаются, невыполненная числовая
@@ -178,7 +187,7 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 
 Ключи и дефолты те же, что у `analytic_orchestrator_v4`: `boss_tabnum`,
 `employee_tabnum`, `position`, `dataset_name`, `direction_key`,
-`source_type`/`source_id`, `easyrag_enabled`, `easyrag_top_k`,
+`source_type`/`source_id`, `run_mode`, `easyrag_enabled`, `easyrag_top_k`,
 `gap_on_unanswered`, `use_peer_aggregates`, `emit_progress_messages`,
 `describe_answer`, `answer_html`, `system_prompt_override`, `thread_id`.
 
