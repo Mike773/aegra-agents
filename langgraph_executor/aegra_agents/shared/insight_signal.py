@@ -116,6 +116,8 @@ def empty_norm_insight() -> dict[str, Any]:
         "type": "norm",
         "metric_id": None,
         "metric_name": None,
+        "fact": None,
+        "plan": None,
         "text": EMPTY_INSIGHT_TEXT,
     }
 

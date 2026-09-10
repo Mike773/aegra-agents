@@ -147,6 +147,9 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 `deviation` и сливается с предыдущей: заметки модели живут, исчезнувшие
 авто-записи помечаются resolved. Главный вывод для сервиса инсайтов берётся с её
 вершины детерминированно (`deviations/insight.py`), без отдельного LLM-вызова.
+Помимо `type`/`metric_id`/`metric_name`/`text` инсайт несёт `fact` и `plan`
+метрики — последний срез, по которому сформулирован вывод (в v4 они берутся
+из датасета по `metric_id`); у записи «в норме» без метрики они `null`.
 
 Сигнальный режим `configurable.run_mode=signal` (общая логика для обоих
 агентов — `shared/insight_signal.py`): к инсайту добавляются `author`

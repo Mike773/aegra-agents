@@ -10,7 +10,9 @@ from typing import Any
 
 from . import rules
 
-# Типы, которые понимает сервис инсайтов (контракт v4).
+# Типы, которые понимает сервис инсайтов (контракт v4). Помимо type/metric_id/
+# metric_name/text инсайт несёт fact и plan метрики — последний срез, по
+# которому и сформулирован вывод.
 TYPE_MAIN_PROBLEM = "main_problem"
 TYPE_ACHIEVEMENT = "achievement"
 TYPE_NORM = "norm"
@@ -64,6 +66,8 @@ def _fallback_norm(db: Any) -> dict[str, Any] | None:
         "type": TYPE_NORM,
         "metric_id": row["ext_id"],
         "metric_name": row["metric"],
+        "fact": row["fact"],
+        "plan": row["plan"],
         "text": text,
     }
 
@@ -89,6 +93,8 @@ def pick_main_insight(
             "type": TYPE_MAIN_PROBLEM,
             "metric_id": top.get("metric_ext_id"),
             "metric_name": top["metric_name"],
+            "fact": top.get("fact"),
+            "plan": top.get("plan"),
             "text": _describe(top),
         }
 
@@ -102,6 +108,8 @@ def pick_main_insight(
             "type": TYPE_ACHIEVEMENT,
             "metric_id": top.get("metric_ext_id"),
             "metric_name": top["metric_name"],
+            "fact": top.get("fact"),
+            "plan": top.get("plan"),
             "text": _describe(top),
         }
 

@@ -248,7 +248,8 @@ def test_insight_written_once_with_source(monkeypatch):
     assert len(sent) == 1
     insight = sent[0]["insight"]
     assert insight["type"] in ("main_problem", "achievement", "norm")
-    assert insight["metric_name"]
+    assert insight["metric_name"] == "Продажи"
+    assert insight["fact"] == 70.0 and insight["plan"] == 100.0
     assert out["reasoning_trace"][-1]["stage"] == "assignments"
 
 
@@ -408,6 +409,7 @@ def test_signal_mode_norm_when_no_deviations(monkeypatch):
     insight = sent[0]["insight"]
     assert insight["type"] == "norm"
     assert insight["metric_id"] is None and insight["metric_name"] is None
+    assert insight["fact"] is None and insight["plan"] is None
     assert insight["signal"] is False
     assert insight["signal_description"] == "Всё в норме."
 

@@ -185,3 +185,19 @@ def test_main_insight_carries_metric_id():
 
 def test_main_insight_none_without_data():
     assert insight.pick_main_insight([]) is None
+
+
+def test_main_insight_carries_fact_and_plan():
+    db = _db(make_dataset_obj([make_metric("Продажи", fact=50.0, plan=100.0)]))
+    devs = builder.build_deviations(db, focus_person_key=PERSON)
+    ins = insight.pick_main_insight(devs)
+    assert ins["fact"] == 50.0
+    assert ins["plan"] == 100.0
+
+
+def test_main_insight_norm_carries_fact_and_plan():
+    db = _db(make_dataset_obj([make_metric("Продажи", fact=100.0, plan=100.0)]))
+    devs = builder.build_deviations(db, focus_person_key=PERSON)
+    ins = insight.pick_main_insight(devs, db=db)
+    assert ins["type"] == "norm"
+    assert ins["fact"] == 100.0 and ins["plan"] == 100.0
