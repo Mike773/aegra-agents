@@ -250,3 +250,95 @@ def test_service_stub_legacy_list_mode():
         "type": "problem", "metric_id": "1", "metric_name": "AHT", "text": "...",
     }]}
     assert "insight" not in payload["content"]
+
+
+# --- Сигнальный режим (run_mode=signal) --------------------------------------
+
+class _QueueLLM:
+    """Ответы по очереди: первый — классификатору инсайтов, второй — вердикту."""
+
+    def __init__(self, *contents):
+        self._contents = list(contents)
+        self.calls: list[list] = []
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        return _AIMsg(self._contents.pop(0) if self._contents else "")
+
+
+_SIGNAL_CFG = {"configurable": {"thread_id": "t-1", "run_mode": "signal"}}
+_SIGNAL_KEYS = ("author", "confirmed", "signal", "signal_description")
+
+
+def test_signal_mode_adds_fields_to_insight(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM(_insights_json(), '{"signal": true}')
+    out = asyncio.run(make_auto_insight_node(llm)(_state(), _SIGNAL_CFG))
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["source_type"] == "meeting" and call["source_id"] == "mtg-77"
+    ins = call["insight"]
+    assert ins["type"] == "main_problem"
+    assert ins["metric_name"] == "Производительность"
+    assert ins["author"] == "Agent"
+    assert ins["confirmed"] is True
+    assert ins["signal"] is True
+    assert ins["signal_description"] == "Производительность 12 при плане 18."
+    assert len(llm.calls) == 2
+    verdict_prompt = llm.calls[1][-1].content
+    assert "что происходит?" in verdict_prompt
+    assert "Производительность 12" in verdict_prompt
+    assert out["reasoning_trace"][-1]["detail"]["signal"] is True
+
+
+def test_signal_mode_sends_norm_when_classifier_empty(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM("[]", '{"signal": false}')
+    asyncio.run(make_auto_insight_node(llm)(_state(), _SIGNAL_CFG))
+
+    assert len(calls) == 1
+    ins = calls[0]["insight"]
+    assert ins["type"] == "norm"
+    assert ins["metric_id"] is None and ins["metric_name"] is None
+    assert ins["signal"] is False
+    assert ins["signal_description"] == "Производительность 12 при плане 18."
+
+
+def test_signal_mode_verdict_failure_falls_back_to_type(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM(_insights_json(), "затрудняюсь")
+    asyncio.run(make_auto_insight_node(llm)(_state(), _SIGNAL_CFG))
+    assert calls[0]["insight"]["signal"] is True
+
+
+def test_signal_mode_is_case_insensitive(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM(_insights_json(), '{"signal": true}')
+    cfg = {"configurable": {"thread_id": "t-1", "run_mode": " SIGNAL "}}
+    asyncio.run(make_auto_insight_node(llm)(_state(), cfg))
+    assert calls[0]["insight"]["signal"] is True
+
+
+def test_no_signal_fields_without_run_mode(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = FakeLLM(_insights_json())
+    asyncio.run(make_auto_insight_node(llm)(_state(), {"configurable": {"thread_id": "t-1"}}))
+    assert not any(k in calls[0]["insight"] for k in _SIGNAL_KEYS)
+    assert len(llm.calls) == 1
+
+
+def test_signal_mode_skips_when_no_summary(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM()
+    asyncio.run(make_auto_insight_node(llm)(_state(metrics_summary=""), _SIGNAL_CFG))
+    assert calls == []
+    assert llm.calls == []
+
+
+def test_signal_mode_skips_without_source(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    llm = _QueueLLM()
+    asyncio.run(make_auto_insight_node(llm)(_state(source_id=None), _SIGNAL_CFG))
+    assert calls == []
+    assert llm.calls == []

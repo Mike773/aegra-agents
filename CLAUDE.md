@@ -14,8 +14,8 @@ Several modules here are **stubs replaced by the production `langgraph_executor`
 uv sync                                  # or: pip install -e .   (Python >=3.11; .venv is 3.12)
 uv sync --extra causal                   # dowhy/pandas — only for the (removed) causal layer
 
-# Tests — only these suites are live (419 tests, ~3s, no network):
-.venv/bin/python -m pytest tests/analyst_agent tests/metric_enricher tests/analytic_orchestrator_v4 tests/json_analyzer_v5 tests/long_term_memory tests/test_agent_dataset_prod.py -q
+# Tests — only these suites are live (~500 tests, ~3s, no network):
+.venv/bin/python -m pytest tests/analyst_agent tests/metric_enricher tests/analytic_orchestrator_v4 tests/json_analyzer_v5 tests/long_term_memory tests/shared tests/test_agent_dataset_prod.py -q
 .venv/bin/python -m pytest tests/json_analyzer_v5/test_star_metrics_v5.py -q            # one file
 .venv/bin/python -m pytest tests/json_analyzer_v5/test_star_metrics_v5.py -k star -q    # one test by name
 ```
@@ -88,7 +88,7 @@ Replaces `analytic_orchestrator_v4` + `json_analyzer_v5`; both stay registered u
 - **Message contract**: working nodes emit short step messages tagged `additional_kwargs.orchestrator_step`; the final answer is tagged `orchestrator_final` and is always last (`emit_progress_messages=false` disables steps). `reasoning_trace` is per-turn: the first node of a turn overwrites it, downstream nodes concatenate explicitly (no reducer).
 - **Sticky context**: `briefing` (first message, kept for the whole dialog), `metrics_summary` (broad first-turn analysis, never overwritten), `analytics_answer` (latest narrow answer, overwritten per analytics turn).
 - Data comes from `shared/agent_dataset.py` (`GetBatchAgentDatasetByFiltersComponent`) + `shared/orgstructure.py` filters; peer aggregates are per-person via `aggregates_ids`. Blocking data clients are called through `shared/offload.py` (dedicated thread pool + timeout) — use it for any sync external I/O from async nodes; never `asyncio.to_thread` them directly.
-- Configurable keys: `boss_tabnum`, `employee_tabnum`, `position`, `dataset_name`, `direction_key`, `source_type`/`source_id` (both required for insights to be written), `easyrag_enabled`, `easyrag_top_k`, `wiki_grounding_enabled`, `wiki_max_queries`, `use_peer_aggregates`, `gap_on_unanswered`, `emit_progress_messages`, `describe_answer`, `answer_html`, `system_prompt_override`.
+- Configurable keys: `boss_tabnum`, `employee_tabnum`, `position`, `dataset_name`, `direction_key`, `source_type`/`source_id` (both required for insights to be written), `run_mode` (`signal` → insight gets `author`/`confirmed`/`signal`/`signal_description`, shared logic in `shared/insight_signal.py`), `easyrag_enabled`, `easyrag_top_k`, `wiki_grounding_enabled`, `wiki_max_queries`, `use_peer_aggregates`, `gap_on_unanswered`, `emit_progress_messages`, `describe_answer`, `answer_html`, `system_prompt_override`.
 - The orchestrator's `BUSINESS_SYSTEM_PROMPT` writes the prose; the analyzer only supplies facts+verdicts. Wording rules live in one place — the orchestrator.
 
 ### `json_analyzer_v5`

@@ -337,3 +337,168 @@ def test_dashboard_falls_back_to_plain_turn(monkeypatch):
     )
     assert out["tasks"] == []
     assert out["messages"][-1].additional_kwargs["orchestrator_markdown"] == "Обычный ответ."
+
+
+def _capture_insights(monkeypatch):
+    sent = []
+
+    class FakeComponent:
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def submit(self):
+            sent.append(self.kw)
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        "langgraph_executor.aegra_agents.analyst_agent.nodes.insight."
+        "SendAssignmentsComponent",
+        FakeComponent,
+    )
+    return sent
+
+
+_SIGNAL_KEYS = ("author", "confirmed", "signal", "signal_description")
+
+
+def test_signal_mode_adds_fields(monkeypatch):
+    _patch_load(monkeypatch)
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM(["Продажи просели до 70 при плане 100.", '{"signal": true}'])
+    app = _build(llm)
+    out = asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Что с продажами?")]},
+            _cfg(source_type="task", source_id="42", run_mode="signal"),
+        )
+    )
+    assert len(sent) == 1
+    insight = sent[0]["insight"]
+    assert insight["type"] == "main_problem"
+    assert insight["metric_name"] == "Продажи"
+    assert insight["author"] == "Agent"
+    assert insight["confirmed"] is True
+    assert insight["signal"] is True
+    assert insight["signal_description"] == out["analytics_answer"]
+    assert "<p>" not in insight["signal_description"]      # markdown, не HTML
+    assert llm.calls == 2                                   # ответ + вердикт
+    verdict_prompt = llm.prompts[1][-1].content
+    assert "Что с продажами?" in verdict_prompt
+    assert "Продажи просели" in verdict_prompt
+    trace = out["reasoning_trace"][-1]
+    assert trace["stage"] == "assignments"
+    assert trace["detail"]["signal"] is True
+
+
+def test_signal_mode_norm_when_no_deviations(monkeypatch):
+    flat = make_dataset_obj([
+        make_metric("Продажи", date="2026-04-13", fact=100.0, plan=100.0),
+    ])
+    _patch_load(monkeypatch, dataset=flat)
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM(["Всё в норме.", '{"signal": false}'])
+    app = _build(llm)
+    asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Разбери")]},
+            _cfg(source_type="task", source_id="42", run_mode="signal"),
+        )
+    )
+    assert len(sent) == 1
+    insight = sent[0]["insight"]
+    assert insight["type"] == "norm"
+    assert insight["metric_id"] is None and insight["metric_name"] is None
+    assert insight["signal"] is False
+    assert insight["signal_description"] == "Всё в норме."
+
+
+def test_no_signal_fields_without_run_mode(monkeypatch):
+    _patch_load(monkeypatch)
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM(["Ответ."])
+    app = _build(llm)
+    asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Разбери")]},
+            _cfg(source_type="task", source_id="42"),
+        )
+    )
+    assert len(sent) == 1
+    assert not any(k in sent[0]["insight"] for k in _SIGNAL_KEYS)
+    assert llm.calls == 1                                   # без вердикта
+
+
+def test_signal_mode_no_deviations_and_no_run_mode_sends_nothing(monkeypatch):
+    flat = make_dataset_obj([
+        make_metric("Продажи", date="2026-04-13", fact=100.0, plan=100.0),
+    ])
+    _patch_load(monkeypatch, dataset=flat)
+    sent = _capture_insights(monkeypatch)
+    app = _build(FakeLLM(["Всё в норме."]))
+    asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Разбери")]},
+            _cfg(source_type="task", source_id="42"),
+        )
+    )
+    assert sent == []
+
+
+def test_signal_mode_verdict_failure_falls_back_to_type(monkeypatch):
+    _patch_load(monkeypatch)
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM(["Продажи просели.", "не могу сказать"])
+    app = _build(llm)
+    asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Разбери")]},
+            _cfg(source_type="task", source_id="42", run_mode="signal"),
+        )
+    )
+    insight = sent[0]["insight"]
+    assert insight["type"] == "main_problem"
+    assert insight["signal"] is True
+
+
+def test_signal_mode_without_source_sends_nothing(monkeypatch):
+    _patch_load(monkeypatch)
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM(["Ответ."])
+    app = _build(llm)
+    asyncio.run(
+        app.ainvoke({"messages": [HumanMessage(content="Разбери")]}, _cfg(run_mode="signal"))
+    )
+    assert sent == []
+    assert llm.calls == 1
+
+
+def test_signal_mode_sends_nothing_when_data_failed(monkeypatch):
+    """Анализа не было — сигналить нечем, даже в сигнальном режиме."""
+    from langgraph_executor.aegra_agents.analyst_agent.nodes import load as load_mod
+
+    def fake_node():
+        async def load_data(state, config):
+            return {
+                "boss_tabnum": "1", "employee_tabnum": "100500",
+                "direction_key": "test-dir", "metrics": None, "aggregates": None,
+                "metrics_error": "сервис данных недоступен", "briefing": "Разбери",
+                "reasoning_trace": [], "turn_no": 1, "loaded": True,
+            }
+        return load_data
+
+    monkeypatch.setattr(load_mod, "make_load_data_node", fake_node)
+    monkeypatch.setattr(
+        "langgraph_executor.aegra_agents.analyst_agent.graph.make_load_data_node", fake_node
+    )
+    sent = _capture_insights(monkeypatch)
+    llm = FakeLLM()
+    app = _build(llm)
+    out = asyncio.run(
+        app.ainvoke(
+            {"messages": [HumanMessage(content="Разбери")]},
+            _cfg(source_type="task", source_id="42", run_mode="signal"),
+        )
+    )
+    assert sent == []
+    assert llm.calls == 0
+    assert "ответа нет" in out["reasoning_trace"][-1]["summary"]
