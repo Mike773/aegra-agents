@@ -1053,6 +1053,11 @@ def make_auto_insight_node(llm: GigaChat):
                 }])}
             chosen = empty_norm_insight()
 
+        fact, plan = _latest_fact_plan(
+            state.get("metrics"), chosen.get("metric_id"), state.get("employee_tabnum")
+        )
+        chosen = {**chosen, "fact": fact, "plan": plan}
+
         signal_detail: dict[str, Any] = {}
         if signal_mode:
             # Вопрос — брифинг первого хода (он же первая реплика руководителя).
@@ -1844,6 +1849,34 @@ def _collect_metric_catalog(metrics: Any) -> list[dict]:
             "description": str(r.get("metric_description") or "").strip(),
         })
     return catalog
+
+
+def _latest_fact_plan(
+    metrics: Any, metric_id: str | None, employee_tabnum: str | None
+) -> tuple[Any, Any]:
+    """``(fact, plan)`` последнего общего среза метрики (без element) у сотрудника.
+
+    Строки сотрудника (по табельному) предпочтительнее чужих; среди них берём
+    самую позднюю дату. Метрика не найдена / датасет не разобран → (None, None).
+    """
+    mid = str(metric_id or "").strip()
+    if not mid or metrics is None:
+        return None, None
+    try:
+        rows = load_dataset_obj(metrics)
+    except Exception:  # noqa: BLE001 — датасет от внешнего клиента, форма не гарантирована
+        return None, None
+    tab = str(employee_tabnum or "").strip()
+    candidates = [
+        r for r in rows
+        if str(r.get("metric_id") or "").strip() == mid and r.get("element") is None
+    ]
+    if not candidates:
+        return None, None
+    own = [r for r in candidates if tab and str(r.get("person_tabnum") or "").strip() == tab]
+    pool = own or candidates
+    latest = max(pool, key=lambda r: str(r.get("date") or ""))
+    return latest.get("fact"), latest.get("plan")
 
 
 def _format_metric_catalog(catalog: list[dict]) -> str:

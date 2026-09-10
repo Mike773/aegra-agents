@@ -105,4 +105,5 @@ def test_empty_norm_insight_shape():
     ins = empty_norm_insight()
     assert ins["type"] == "norm"
     assert ins["metric_id"] is None and ins["metric_name"] is None
+    assert ins["fact"] is None and ins["plan"] is None
     assert ins["text"]

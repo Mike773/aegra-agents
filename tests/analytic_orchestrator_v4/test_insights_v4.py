@@ -126,6 +126,7 @@ def test_auto_insight_submits_single_main_insight(monkeypatch):
     # ОДИН главный инсайт объектом, легаси-массив не передаётся.
     assert call["insight"]["type"] == "main_problem"
     assert call["insight"]["metric_name"] == "Производительность"
+    assert call["insight"]["fact"] == 12 and call["insight"]["plan"] == 18
     assert "insights" not in call
     # Дедуп-механики больше нет — узел не копит committed_insights.
     assert "committed_insights" not in out
@@ -301,6 +302,7 @@ def test_signal_mode_sends_norm_when_classifier_empty(monkeypatch):
     ins = calls[0]["insight"]
     assert ins["type"] == "norm"
     assert ins["metric_id"] is None and ins["metric_name"] is None
+    assert ins["fact"] is None and ins["plan"] is None
     assert ins["signal"] is False
     assert ins["signal_description"] == "Производительность 12 при плане 18."
 
@@ -342,3 +344,33 @@ def test_signal_mode_skips_without_source(monkeypatch):
     asyncio.run(make_auto_insight_node(llm)(_state(source_id=None), _SIGNAL_CFG))
     assert calls == []
     assert llm.calls == []
+
+
+# --- plan/fact метрики в инсайте ---------------------------------------------
+
+def test_insight_fact_plan_take_latest_row_of_employee(monkeypatch):
+    """Несколько дат и разрез по element: берём последний общий срез сотрудника."""
+    calls = _fake_service(monkeypatch)
+    data = _dataset()
+    m = data["employees"][0]["metrics"]
+    m.append({**m[0], "date": "2026-05-04", "fact": 9, "plan": 17})
+    m.append({**m[0], "date": "2026-05-18", "fact": 14, "plan": 19})
+    m.append({**m[0], "date": "2026-05-25", "fact": 3, "plan": 5, "element": "Офис А"})
+    asyncio.run(make_auto_insight_node(FakeLLM(_insights_json()))(
+        _state(metrics=data), {"configurable": {"thread_id": "t-1"}}
+    ))
+    ins = calls[0]["insight"]
+    assert ins["fact"] == 14 and ins["plan"] == 19
+
+
+def test_insight_fact_plan_none_when_metric_unknown(monkeypatch):
+    calls = _fake_service(monkeypatch)
+    payload = json.dumps({"insights": [
+        {"type": "norm", "metric_id": "", "metric_name": "",
+         "text": "Ситуация в норме."},
+    ]})
+    asyncio.run(make_auto_insight_node(FakeLLM(payload))(
+        _state(), {"configurable": {"thread_id": "t-1"}}
+    ))
+    ins = calls[0]["insight"]
+    assert ins["fact"] is None and ins["plan"] is None
