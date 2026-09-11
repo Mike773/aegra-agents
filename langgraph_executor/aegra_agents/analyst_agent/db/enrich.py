@@ -328,7 +328,31 @@ def stars_block(db: Any, *, person_key: str | None = None) -> str:
             lines.append(f"{head}. Показатели: {r['metrics']}.")
         else:
             lines.append(f"{head}. Влияющих показателей в данных нет.")
+    rating = _rating_line(db, person_key=person_key)
+    if rating:
+        lines.append(rating)
     return _trim("\n".join(lines), BUDGET_STARS)
+
+
+def _rating_line(db: Any, *, person_key: str) -> str:
+    """Место в рейтинге по звёздам за последний квартал — только если рейтинг
+    пришёл (а он приходит только вместе со звёздами). Полная история — в
+    инструменте star_rating."""
+    if not db.has_ratings:
+        return ""
+    rows = _rows(run_template(db.conn, "enrich_rating", person_key=person_key))
+    rows = [r for r in rows if r["is_latest"]]
+    if not rows:
+        return ""
+    bits = []
+    for r in rows:
+        size = f" из {r['staff']}" if r["staff"] else ""
+        bits.append(f"{r['level_name']} {r['place']}{size}")
+    period = f"{rows[0]['quarter']} квартал {rows[0]['year']}"
+    return (
+        f"- Рейтинг по звёздам за {period} (место, от узкой группы к широкой): "
+        + ", ".join(bits) + "."
+    )
 
 
 def gaps_block(db: Any, *, person_key: str) -> str:

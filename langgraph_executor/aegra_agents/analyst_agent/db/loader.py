@@ -2,7 +2,11 @@
 
 Вход тот же, что у json_analyzer_v5 (см. его loader.py):
     {"me": <person>, "employees": [<person>, ...]}
-    person  = {tabnum, fio, post, depart, [aggregates_ids], metrics: [<metric>]}
+    person  = {tabnum, fio, post, depart, [aggregates_ids], [rating], metrics: [<metric>]}
+    rating  = [{year, quarter, level, place, staff}, ...] — место сотрудника в
+              рейтинге по звёздам на уровне level (код: GOSB/TB/SBER) за квартал;
+              приходит только вместе со звёздами. Названия уровней в рейтинге
+              нет — они берутся из агрегатов (см. core._insert_ratings).
     metric  = {id, metric_name, metric_description, metric_type, measure_type,
                date, calc_period, fact, plan, benchmark, [ex], [rr],
                [influent_percent], element, [rankings],
@@ -179,6 +183,18 @@ class FactRec:
 
 
 @dataclass
+class RatingRec:
+    """Место в рейтинге по звёздам: персона × уровень × квартал."""
+
+    person_key: str
+    level: str
+    year: int
+    quarter: int
+    place: int
+    staff: int | None
+
+
+@dataclass
 class LoadReport:
     skipped_empty_leaves: int = 0
     description_conflicts: int = 0
@@ -194,6 +210,48 @@ class ParsedDataset:
     facts: list[FactRec]
     person_peer: list[tuple[str, str]]     # (person_key, aggregate_id)
     report: LoadReport
+    ratings: list[RatingRec] = field(default_factory=list)
+
+
+def _to_int(value: Any) -> int | None:
+    """'2' → 2, 3.0 → 3; нераспознанное → None."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if num != int(num):
+        return None
+    return int(num)
+
+
+def parse_ratings(person_key: str, raw: Any) -> list[RatingRec]:
+    """Поле ``rating`` персоны → записи рейтинга. Битые элементы (без уровня,
+    квартала или с нечисловым местом) пропускаются — рейтинг опционален."""
+    out: list[RatingRec] = []
+    if not isinstance(raw, list):
+        return out
+    seen: set[tuple[str, int, int]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        level = item.get("level")
+        level = str(level).strip() if level is not None else ""
+        year = _to_int(item.get("year"))
+        quarter = _to_int(item.get("quarter"))
+        place = _to_int(item.get("place"))
+        if not level or year is None or quarter is None or place is None:
+            continue
+        key = (level, year, quarter)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(RatingRec(
+            person_key=person_key, level=level, year=year, quarter=quarter,
+            place=place, staff=_to_int(item.get("staff")),
+        ))
+    return out
 
 
 # --- разбор датасета ------------------------------------------------------
@@ -323,8 +381,10 @@ def parse_dataset(data: dict[str, Any]) -> ParsedDataset:
     people: list[PersonRec] = []
     person_peer: list[tuple[str, str]] = []
     seen_pairs: set[tuple[str, str]] = set()
+    ratings: list[RatingRec] = []
     for person in _people(data if isinstance(data, dict) else {}):
         key = person["_key"]
+        ratings.extend(parse_ratings(key, person.get("rating")))
         people.append(
             PersonRec(
                 person_key=key,
@@ -352,6 +412,7 @@ def parse_dataset(data: dict[str, Any]) -> ParsedDataset:
         facts=parser.facts,
         person_peer=person_peer,
         report=parser.report,
+        ratings=ratings,
     )
 
 
@@ -442,6 +503,7 @@ __all__ = [
     "MetricRec",
     "ParsedDataset",
     "PersonRec",
+    "RatingRec",
     "metric_key",
     "name_key",
     "norm_text",
@@ -450,5 +512,6 @@ __all__ = [
     "parse_aggregates",
     "parse_dataset",
     "parse_rank",
+    "parse_ratings",
     "guess_kind",
 ]

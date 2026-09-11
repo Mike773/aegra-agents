@@ -129,6 +129,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 task_block=task_block,
                 turn_kind="dashboard" if is_dashboard else turn_kind,
                 has_stars=db.has_stars,
+                has_ratings=db.has_ratings,
                 tool_budget=budget,
                 has_sql=cfg.text2sql_enabled,
                 system_prompt_override=cfg.system_prompt_override,

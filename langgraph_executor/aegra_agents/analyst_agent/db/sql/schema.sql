@@ -146,6 +146,22 @@ CREATE TABLE person_peer (
     PRIMARY KEY (person_id, aggregate_id)
 );
 
+-- Рейтинг по звёздам: место человека среди сотрудников уровня (ГОСБ/ТБ/Сбер)
+-- за квартал. Приходит полем rating персоны только вместе со звёздами; без
+-- звёзд таблица пуста. level_name/level_order подтягиваются из peer_aggregate
+-- по коду уровня (в самом рейтинге названий нет); без агрегатов имя = код.
+CREATE TABLE rating (
+    person_id   INTEGER NOT NULL REFERENCES person(person_id),
+    level       TEXT NOT NULL,          -- код уровня как в данных
+    level_name  TEXT NOT NULL,          -- человеческое название (из агрегатов) либо код
+    level_order INTEGER,                -- 1 = самая узкая группа
+    year        INTEGER NOT NULL,
+    quarter     INTEGER NOT NULL,       -- 1..4
+    place       INTEGER NOT NULL,       -- место, 1 = лучший
+    staff       INTEGER,                -- сколько сотрудников в рейтинге уровня
+    PRIMARY KEY (person_id, level, year, quarter)
+);
+
 -- Кэш отклонений треда: материализуется из state каждый ход, чтобы SQL мог
 -- по нему ходить (v_deviation).
 CREATE TABLE deviation (
@@ -354,6 +370,16 @@ JOIN metric sm ON sm.metric_id = sf.metric_id AND sm.is_star = 1
 JOIN person p ON p.person_id = sf.person_id
 JOIN period d ON d.period_id = sf.period_id
 WHERE sf.is_last_of_series = 1 AND sf.star_received IS NOT NULL;
+
+-- Рейтинг по звёздам: строка на (человек, уровень, квартал). is_latest —
+-- последний квартал, по которому у ЭТОГО человека есть рейтинг.
+CREATE VIEW v_rating AS
+SELECT p.person_key, p.fio, r.level, r.level_name, r.level_order,
+       r.year, r.quarter, r.year || ' Q' || r.quarter AS period, r.place, r.staff,
+       (r.year * 10 + r.quarter) = (SELECT MAX(r2.year * 10 + r2.quarter) FROM rating r2
+                                     WHERE r2.person_id = r.person_id) AS is_latest
+FROM rating r
+JOIN person p ON p.person_id = r.person_id;
 
 CREATE VIEW v_deviation AS
 SELECT d.*, m.unit, m.path, m.direction

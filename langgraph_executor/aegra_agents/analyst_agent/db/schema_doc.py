@@ -57,6 +57,11 @@ COLUMN_DOCS: dict[tuple[str, str], str] = {
         "влияющие показатели одной строкой: имя, факт, план, выполнение %, вердикт"
     ),
     ("v_star_metric", "completion_pct"): "выполнение плана, % (факт / план)",
+    ("v_rating", "level_name"): "название уровня рейтинга — только его и называй",
+    ("v_rating", "level_order"): "1 = самая узкая группа (ГОСБ), дальше шире (ТБ, Сбер)",
+    ("v_rating", "place"): "место сотрудника в рейтинге по звёздам, 1 = лучший",
+    ("v_rating", "staff"): "сколько сотрудников в рейтинге этого уровня",
+    ("v_rating", "is_latest"): "1 = последний квартал, за который у человека есть рейтинг",
     ("v_peer_latest", "level_order"): "1 = самая узкая группа сравнения",
     ("v_peer_latest", "level_name"): "человеческое название группы — только его и называй",
     ("v_deviation", "priority"): "приоритет отклонения: влияние × масштаб × управляемость",
@@ -223,6 +228,8 @@ def _view_has_data(db: Any, view: str) -> bool:
         return _has_rows(conn, "deviation")
     if view in ("v_star", "v_star_metric"):
         return bool(db.has_stars)
+    if view == "v_rating":
+        return bool(db.has_ratings)
     if view == "v_peer_latest":
         return bool(db.has_aggregates) or _has_rows(conn, "ranking")
     return True
@@ -261,6 +268,11 @@ def _dataset_rules(db: Any) -> str:
             "- Есть звёзды: именные показатели без чисел (получена/не получена). "
             "v_star — строка на звезду с влияющими показателями одной строкой, "
             "v_star_metric — те же показатели построчно."
+        )
+    if db.has_ratings:
+        parts.append(
+            "- Есть рейтинг по звёздам (v_rating): место сотрудника среди коллег по "
+            "уровням за квартал; уровни называй по level_name, место — вместе со staff."
         )
     return "\n".join(parts)
 
