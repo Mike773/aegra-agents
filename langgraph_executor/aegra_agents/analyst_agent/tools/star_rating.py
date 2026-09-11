@@ -33,17 +33,71 @@ def _period(year: Any, quarter: Any) -> str:
     return f"{quarter} квартал {year}"
 
 
+def rating_levels(db: Any) -> list[tuple[str, str]]:
+    """Уровни рейтинга (код, название) от узкой группы к широкой — как в базе."""
+    rows = db.conn.execute(
+        "SELECT level, MIN(level_name) AS level_name, MIN(level_order) AS level_order "
+        "FROM rating GROUP BY level ORDER BY level_order, level"
+    ).fetchall()
+    return [(str(r["level"]), str(r["level_name"])) for r in rows]
+
+
+def levels_text(db: Any) -> str:
+    """«ГОСБ (GOSB), ТБ (TB), Сбер (SBER)»; если названия нет — только код."""
+    parts = []
+    for code, name in rating_levels(db):
+        parts.append(code if name.casefold() == code.casefold() else f"{name} ({code})")
+    return ", ".join(parts)
+
+
+def resolve_level(db: Any, text: Any) -> str | None:
+    """Название или код уровня → код из базы: точное совпадение, затем
+    подстрока в обе стороны (модель пишет «в ГОСБ», «по территории»)."""
+    text = blank_to_none(text)
+    if not isinstance(text, str) or not text.strip():
+        return None
+    norm = " ".join(text.split()).casefold()
+    levels = rating_levels(db)
+    for code, name in levels:
+        if norm in (code.casefold(), name.casefold()):
+            return code
+    hits = [
+        code for code, name in levels
+        if any(k and (k in norm or norm in k) for k in (code.casefold(), name.casefold()))
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def star_rating_text(
-    ctx: Any, *, person: str | None = None, quarter: str | None = None
+    ctx: Any,
+    *,
+    person: str | None = None,
+    quarter: str | None = None,
+    level: str | None = None,
 ) -> str:
     ctx.used_data_tools = True
+    db = ctx.db
     person_key = ctx.person_key
     person = blank_to_none(person)
+    level = blank_to_none(level)
     if person:
-        resolved = ctx.db.resolve_person(person)
+        resolved = db.resolve_person(person)
         if resolved is None:
-            return f"Сотрудник «{person}» не найден в данных."
-        person_key = resolved
+            # Модель кладёт название уровня («ГОСБ») в person — это уровень, не человек.
+            as_level = resolve_level(db, person)
+            if as_level is None or level:
+                return (
+                    f"Сотрудник «{person}» не найден в данных. Если это уровень "
+                    f"рейтинга, передай его аргументом level; уровни: {levels_text(db)}."
+                )
+            level = as_level
+        else:
+            person_key = resolved
+    level_code: str | None = None
+    if level:
+        level_code = resolve_level(db, level)
+        if level_code is None:
+            return f"Уровня «{level}» в рейтинге нет. Уровни: {levels_text(db)}."
     year, q = parse_quarter(quarter)
     if quarter and year is None and q is None:
         return (
@@ -52,7 +106,8 @@ def star_rating_text(
         )
 
     res = run_template(
-        ctx.db.conn, "enrich_rating", person_key=person_key, year=year, quarter=q,
+        db.conn, "enrich_rating", person_key=person_key, year=year, quarter=q,
+        level=level_code,
     )
     rows = [dict(zip(res.columns, row)) for row in res.rows]
     fio_row = ctx.db.conn.execute(
@@ -76,4 +131,4 @@ def star_rating_text(
     return "\n".join(lines)
 
 
-__all__ = ["parse_quarter", "star_rating_text"]
+__all__ = ["levels_text", "parse_quarter", "rating_levels", "resolve_level", "star_rating_text"]

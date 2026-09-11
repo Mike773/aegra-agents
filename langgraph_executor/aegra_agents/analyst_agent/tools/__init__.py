@@ -19,7 +19,7 @@ from .metric_card import metric_card_text
 from .peer_context import peer_context_text
 from .query_sql import make_query_sql
 from .search_wiki import make_search_wiki
-from .star_rating import star_rating_text
+from .star_rating import levels_text, star_rating_text
 
 
 class _ToolArgs(BaseModel):
@@ -56,7 +56,16 @@ class PeerContextArgs(_ToolArgs):
 
 
 class StarRatingArgs(_ToolArgs):
-    person: str | None = Field(None, description="Чей рейтинг; по умолчанию — тот, кого разбираем")
+    person: str | None = Field(
+        None, description="Чей рейтинг (ФИО или табельный); по умолчанию — тот, кого разбираем"
+    )
+    level: str | None = Field(
+        None,
+        description=(
+            "Уровень рейтинга (ГОСБ, ТБ, Сбер и т.п. — название или код из описания "
+            "инструмента), если нужен один; по умолчанию — все уровни"
+        ),
+    )
     quarter: str | None = Field(
         None, description="Квартал, если нужен один, например «3 квартал 2026»"
     )
@@ -136,9 +145,15 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
     # Рейтинг по звёздам приходит только вместе со звёздами — без него
     # инструмента нет, и набор инструментов для прежних датасетов не меняется.
     if ctx.db.has_ratings:
-        def star_rating(person: str | None = None, quarter: str | None = None) -> str:
-            return star_rating_text(ctx, person=person, quarter=quarter)
+        def star_rating(
+            person: str | None = None,
+            level: str | None = None,
+            quarter: str | None = None,
+        ) -> str:
+            return star_rating_text(ctx, person=person, level=level, quarter=quarter)
 
+        # Уровни — из базы этого запуска: модель должна знать, что «ГОСБ» — это
+        # уровень рейтинга (аргумент level), а не имя сотрудника или показателя.
         tools.append(
             StructuredTool.from_function(
                 func=star_rating,
@@ -148,8 +163,10 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
                     "Рейтинг по звёздам: какое место сотрудник занял среди коллег на "
                     "каждом уровне (от узкой группы к широкой) за квартал и сколько "
                     "человек в рейтинге уровня. Отвечает на «какое место по звёздам», "
-                    "«как выглядит на фоне банка/территории». Аргументы: person — "
-                    "чей рейтинг; quarter — квартал, если нужен один."
+                    "«какой рейтинг в ГОСБ / по банку». Уровни рейтинга в этих данных "
+                    f"(от узкой группы к широкой): {levels_text(ctx.db)}. Аргументы: "
+                    "person — чей рейтинг (ФИО или табельный); level — уровень из "
+                    "списка выше, если нужен один; quarter — квартал, если нужен один."
                 ),
             )
         )
