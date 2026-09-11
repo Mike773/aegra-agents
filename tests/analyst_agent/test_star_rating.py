@@ -241,3 +241,46 @@ def test_sample_star_carries_rating():
     assert db.has_stars and db.has_ratings
     tools = build_tools(_ctx(db))
     assert "star_rating" in _names(tools)
+
+
+# --- уровни в описании и фильтр по уровню ------------------------------------
+
+def _rating_tool(db):
+    return next(t for t in build_tools(_ctx(db)) if t.name == "star_rating")
+
+
+def test_star_rating_description_lists_levels_from_db():
+    db = core.build_run_db(_dataset(aggregates_ids=["a-GOSB", "a-TB", "a-SBER"]), AGGREGATES)
+    desc = _rating_tool(db).description
+    # Названия из агрегатов и коды из данных — оба, от узкой группы к широкой.
+    assert "ГОСБ" in desc and "ТБ" in desc and "Сбер" in desc
+    assert "GOSB" in desc and "TB" in desc and "SBER" in desc
+    assert desc.index("ГОСБ") < desc.index("ТБ") < desc.index("Сбер")
+    # Без агрегатов — коды.
+    plain = _rating_tool(core.build_run_db(_dataset())).description
+    assert "GOSB" in plain and "SBER" in plain
+
+
+def test_star_rating_level_filter_accepts_name_or_code():
+    db = core.build_run_db(_dataset(aggregates_ids=["a-GOSB", "a-TB", "a-SBER"]), AGGREGATES)
+    tool = _rating_tool(db)
+    out = tool.invoke({"level": "ГОСБ"})
+    assert "ГОСБ" in out and "2 место из 77" in out
+    assert "ТБ" not in out and "Сбер" not in out
+    out = tool.invoke({"level": "sber"})
+    assert "Сбер" in out and "5 место из 7777" in out and "ГОСБ" not in out
+    out = tool.invoke({"level": "в госб"})
+    assert "ГОСБ" in out
+
+
+def test_star_rating_level_unknown_lists_levels():
+    db = core.build_run_db(_dataset(aggregates_ids=["a-GOSB", "a-TB", "a-SBER"]), AGGREGATES)
+    out = _rating_tool(db).invoke({"level": "Марс"})
+    assert "Марс" in out and "ГОСБ" in out and "Сбер" in out
+
+
+def test_star_rating_level_name_is_not_taken_for_person():
+    db = core.build_run_db(_dataset(aggregates_ids=["a-GOSB", "a-TB", "a-SBER"]), AGGREGATES)
+    # Модель кладёт название уровня в person — инструмент понимает и отвечает по уровню.
+    out = _rating_tool(db).invoke({"person": "ГОСБ"})
+    assert "не найден" not in out and "2 место из 77" in out

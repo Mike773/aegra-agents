@@ -64,7 +64,7 @@ START ──need_load──▶ load_data ─▶ prepare ─┬─▶ plan_tasks 
 | `query_sql(sql, purpose)` | свободный read-only SELECT; `purpose` идёт в шаг и трассу |
 | `metric_card(metric, person, date, depth, element)` | всё об одном показателе: периоды, худшие разрезы, состав с весами, коллеги, справка; с `element` — ряд одного разреза |
 | `peer_context(metric, person)` | группы сравнения от узкой к широкой |
-| `star_rating(person, quarter)` | рейтинг по звёздам: место среди коллег по уровням (ГОСБ → ТБ → Сбер) за квартал |
+| `star_rating(person, level, quarter)` | рейтинг по звёздам: место среди коллег по уровням (ГОСБ → ТБ → Сбер) за квартал; список уровней (название и код) подставляется в описание из базы |
 | `search_wiki(query)` | методика и расшифровка аббревиатур (справка, не источник чисел) |
 | `list_deviations(scope, metric)` | полная карта отклонений |
 | `note_deviation(metric, kind, text)` | зафиксировать свою находку на будущие ходы |
