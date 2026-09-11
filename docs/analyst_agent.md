@@ -64,23 +64,25 @@ START ──need_load──▶ load_data ─▶ prepare ─┬─▶ plan_tasks 
 | `query_sql(sql, purpose)` | свободный read-only SELECT; `purpose` идёт в шаг и трассу |
 | `metric_card(metric, person, date, depth, element)` | всё об одном показателе: периоды, худшие разрезы, состав с весами, коллеги, справка; с `element` — ряд одного разреза |
 | `peer_context(metric, person)` | группы сравнения от узкой к широкой |
+| `star_rating(person, quarter)` | рейтинг по звёздам: место среди коллег по уровням (ГОСБ → ТБ → Сбер) за квартал |
 | `search_wiki(query)` | методика и расшифровка аббревиатур (справка, не источник чисел) |
 | `list_deviations(scope, metric)` | полная карта отклонений |
 | `note_deviation(metric, kind, text)` | зафиксировать свою находку на будущие ходы |
 
 Набор зависит от флагов: без `text2sql_enabled` нет `query_sql`, без агрегатов —
-`peer_context`, без `easyrag_enabled` — `search_wiki`.
+`peer_context`, без `easyrag_enabled` — `search_wiki`, без рейтинга —
+`star_rating`.
 
 ## Данные (`db/`)
 
 Схема — `db/sql/schema.sql`: `person`, `metric` (каталог + трактовки `kn_*`),
 `metric_edge` и `metric_tree` (рёбра и место показателя в дереве — на каждого
 человека), `period`, `fact`, `fact_analytics`, `ranking`, `peer_aggregate`,
-`person_peer`, `deviation`. Агент ходит во вью: `v_fact` (главная; `depth`,
-`path`, `parent_name` — из дерева этого человека), `v_fact_latest`
+`person_peer`, `rating`, `deviation`. Агент ходит во вью: `v_fact` (главная;
+`depth`, `path`, `parent_name` — из дерева этого человека), `v_fact_latest`
 (последнее значение каждой серии), `v_series`, `v_metric`, `v_tree` (с
-`person_key`), `v_peer_latest`, `v_star`, `v_star_metric`, `v_element`,
-`v_deviation`.
+`person_key`), `v_peer_latest`, `v_star`, `v_star_metric`, `v_rating`,
+`v_element`, `v_deviation`.
 
 Звёзды: `v_star` — одна строка на (человек, звезда) за последнюю дату серии.
 Колонка `metrics` — влияющие показатели одной строкой («имя: факт X при плане
@@ -88,6 +90,17 @@ Y, выполнение Z %, вердикт; …»). Влияющие — тол
 человека с признаком `is_star_metric`; обычные показатели рядом со звездой
 (например, «Количество оценок») в неё не попадают. Построчно те же показатели
 даёт `v_star_metric`.
+
+Рейтинг по звёздам: поле `rating` на персоне (`[{year, quarter, level, place,
+staff}]`) — место сотрудника среди коллег уровня за квартал. Приходит только
+вместе со звёздами, поэтому и грузится только в базу со звёздами: без них
+таблица `rating` пуста, инструмент `star_rating` не привязывается, блок промпта
+и справка схемы не меняются. В самом рейтинге уровни — коды (`GOSB`, `TB`,
+`SBER`); названия и порядок уровней берутся из агрегатов по коду
+(`peer_aggregate.level_name`/`level_order`), без агрегатов имя = код, порядок —
+по размеру группы. `v_rating` — строка на (человек, уровень, квартал),
+`is_latest` — последний квартал этого человека. В блоке звёзд промпта — одна
+строка с местами за последний квартал; история — в инструменте.
 
 `build_run_db(...)` отдаёт готовую базу: загрузка → производные поля
 (`analytics.compute_analytics`, построчный порт формул из `json_analyzer_v5`) →

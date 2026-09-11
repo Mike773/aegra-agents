@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .business import BUSINESS_PROMPT, STAR_PROSE_BLOCK
+from .business import BUSINESS_PROMPT, RATING_PROSE_BLOCK, STAR_PROSE_BLOCK
 from .describe import DESCRIBE_ANSWER_PROMPT
 from .misc import LOAD_ERROR_PROMPT, SAVE_INSIGHT_AUTO_FIXED
 from .task_hints import DASHBOARD_TASK_HINT
@@ -36,6 +36,7 @@ class PromptContext:
     task_block: str = ""
     turn_kind: str = "initial"          # initial | followup | dashboard
     has_stars: bool = False
+    has_ratings: bool = False           # рейтинг по звёздам: только вместе со звёздами
     tool_budget: int = 18
     has_sql: bool = True
     system_prompt_override: str | None = None
@@ -70,7 +71,11 @@ def compose_system_prompt(ctx: PromptContext) -> str:
     """Собирает системный промпт; пустые блоки просто опускаются."""
     override = (ctx.system_prompt_override or "").strip()
     business = override or BUSINESS_PROMPT
-    tail: list[str] = [STAR_PROSE_BLOCK] if ctx.has_stars and not override else []
+    tail: list[str] = []
+    if ctx.has_stars and not override:
+        tail.append(STAR_PROSE_BLOCK)
+        if ctx.has_ratings:
+            tail.append(RATING_PROSE_BLOCK)
 
     blocks: list[str] = [
         business,
@@ -95,6 +100,7 @@ __all__ = [
     "DESCRIBE_ANSWER_PROMPT",
     "LOAD_ERROR_PROMPT",
     "PromptContext",
+    "RATING_PROSE_BLOCK",
     "SAVE_INSIGHT_AUTO_FIXED",
     "STAR_PROSE_BLOCK",
     "compose_system_prompt",

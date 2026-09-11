@@ -19,6 +19,7 @@ from .metric_card import metric_card_text
 from .peer_context import peer_context_text
 from .query_sql import make_query_sql
 from .search_wiki import make_search_wiki
+from .star_rating import star_rating_text
 
 
 class _ToolArgs(BaseModel):
@@ -52,6 +53,13 @@ class MetricCardArgs(_ToolArgs):
 class PeerContextArgs(_ToolArgs):
     metric: str | None = Field(None, description="Название показателя")
     person: str | None = Field(None, description="Чей результат")
+
+
+class StarRatingArgs(_ToolArgs):
+    person: str | None = Field(None, description="Чей рейтинг; по умолчанию — тот, кого разбираем")
+    quarter: str | None = Field(
+        None, description="Квартал, если нужен один, например «3 квартал 2026»"
+    )
 
 
 class ListDeviationsArgs(_ToolArgs):
@@ -121,6 +129,27 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
                     "среднее и медиана группы, уровень сильнейших, доля выполняющих "
                     "план, место сотрудника. Помогает отделить системное отклонение "
                     "от индивидуального. Аргументы: metric, person."
+                ),
+            )
+        )
+
+    # Рейтинг по звёздам приходит только вместе со звёздами — без него
+    # инструмента нет, и набор инструментов для прежних датасетов не меняется.
+    if ctx.db.has_ratings:
+        def star_rating(person: str | None = None, quarter: str | None = None) -> str:
+            return star_rating_text(ctx, person=person, quarter=quarter)
+
+        tools.append(
+            StructuredTool.from_function(
+                func=star_rating,
+                args_schema=StarRatingArgs,
+                name="star_rating",
+                description=(
+                    "Рейтинг по звёздам: какое место сотрудник занял среди коллег на "
+                    "каждом уровне (от узкой группы к широкой) за квартал и сколько "
+                    "человек в рейтинге уровня. Отвечает на «какое место по звёздам», "
+                    "«как выглядит на фоне банка/территории». Аргументы: person — "
+                    "чей рейтинг; quarter — квартал, если нужен один."
                 ),
             )
         )

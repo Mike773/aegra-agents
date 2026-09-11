@@ -396,6 +396,60 @@ def _insert_aggregates(
         )
 
 
+def _insert_ratings(conn: sqlite3.Connection, parsed: ParsedDataset) -> None:
+    """Рейтинг по звёздам — только когда в базе есть звёзды: без них поле
+    ``rating`` не имеет смысла и игнорируется. Названия и порядок уровней
+    берутся из уже загруженных агрегатов по коду уровня; уровней, которых в
+    агрегатах нет, — код вместо названия и порядок по размеру группы (staff)."""
+    if not parsed.ratings:
+        return
+    has_stars = conn.execute(
+        "SELECT COUNT(*) FROM fact WHERE star_received IS NOT NULL"
+    ).fetchone()[0]
+    if not has_stars:
+        return
+    person_ids = {
+        row["person_key"]: row["person_id"]
+        for row in conn.execute("SELECT person_id, person_key FROM person")
+    }
+    known: dict[str, tuple[str | None, int | None]] = {}
+    for row in conn.execute(
+        "SELECT level, MIN(level_name) AS level_name, MIN(level_order) AS level_order "
+        "FROM peer_aggregate GROUP BY level"
+    ):
+        known[str(row["level"]).strip().casefold()] = (row["level_name"], row["level_order"])
+    # Уровни без агрегатов — после известных, от меньшей группы к большей.
+    unknown_sizes: dict[str, int] = {}
+    for r in parsed.ratings:
+        if r.level.casefold() not in known:
+            size = r.staff if r.staff is not None else 0
+            unknown_sizes[r.level] = max(unknown_sizes.get(r.level, 0), size)
+    base = max((o for _, o in known.values() if o is not None), default=0)
+    unknown_order = {
+        level: base + i + 1
+        for i, level in enumerate(sorted(unknown_sizes, key=lambda lv: (unknown_sizes[lv], lv)))
+    }
+    for r in parsed.ratings:
+        person_id = person_ids.get(r.person_key)
+        if person_id is None:
+            continue
+        name, order = known.get(r.level.casefold(), (None, None))
+        conn.execute(
+            "INSERT OR IGNORE INTO rating (person_id, level, level_name, level_order, "
+            "year, quarter, place, staff) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                person_id,
+                r.level,
+                name or r.level,
+                order if order is not None else unknown_order.get(r.level),
+                r.year,
+                r.quarter,
+                r.place,
+                r.staff,
+            ),
+        )
+
+
 _SERIES_VIEW = """
 CREATE VIEW v_series AS
 SELECT v.*,
@@ -447,6 +501,11 @@ class RunDb:
     @property
     def has_aggregates(self) -> bool:
         return bool(self.conn.execute("SELECT COUNT(*) FROM peer_aggregate").fetchone()[0])
+
+    @property
+    def has_ratings(self) -> bool:
+        """Рейтинг по звёздам есть только вместе со звёздами (см. _insert_ratings)."""
+        return bool(self.conn.execute("SELECT COUNT(*) FROM rating").fetchone()[0])
 
     def resolve_metric(self, text: Any) -> MetricRef | None:
         """Имя метрики → каталог. Лестница: точное совпадение нормализованного
@@ -548,6 +607,8 @@ def build_run_db(
     # относительные проценты подавляются (см. analytics.apply_metric_kinds).
     _apply_guessed_kinds(conn, parsed)
     _insert_aggregates(conn, loader.parse_aggregates(raw_aggregates), report)
+    # После агрегатов: оттуда берутся названия уровней рейтинга.
+    _insert_ratings(conn, parsed)
     if sqlite3.sqlite_version_info >= (3, 25):
         conn.executescript(_SERIES_VIEW)
     else:  # pragma: no cover — зависит от сборки SQLite на проме

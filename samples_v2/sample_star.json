@@ -6,6 +6,50 @@
       "fio": "Петров Никита Сергеевич",
       "post": "Оператор",
       "depart": "Сектор 1",
+      "rating": [
+        {
+          "year": 2026,
+          "level": "GOSB",
+          "place": "2",
+          "staff": 77,
+          "quarter": 3
+        },
+        {
+          "year": 2026,
+          "level": "SBER",
+          "place": "5",
+          "staff": 7777,
+          "quarter": 3
+        },
+        {
+          "year": 2026,
+          "level": "TB",
+          "place": "2",
+          "staff": 777,
+          "quarter": 3
+        },
+        {
+          "year": 2026,
+          "level": "GOSB",
+          "place": "6",
+          "staff": 75,
+          "quarter": 2
+        },
+        {
+          "year": 2026,
+          "level": "SBER",
+          "place": "41",
+          "staff": 7700,
+          "quarter": 2
+        },
+        {
+          "year": 2026,
+          "level": "TB",
+          "place": "9",
+          "staff": 770,
+          "quarter": 2
+        }
+      ],
       "metrics": [
         {
           "id": "90022908",
