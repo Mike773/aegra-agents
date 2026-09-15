@@ -83,7 +83,8 @@ def test_no_turn_hint_outside_dashboard():
     отдельных подсказок хода у них нет, промпт одинаковый."""
     initial = prompts.compose_system_prompt(_ctx(turn_kind="initial"))
     followup = prompts.compose_system_prompt(_ctx(turn_kind="followup"))
-    assert initial == followup
+    # Первая строка — метка запроса, она у каждого вызова своя.
+    assert initial.partition("\n")[2] == followup.partition("\n")[2]
     assert "Брифинг руководителя" in initial
     assert "первичный разбор" not in initial
     assert "реплику руководителя" not in followup
@@ -160,3 +161,20 @@ def test_tools_guide_keeps_only_cross_cutting_rules():
     assert "`search_wiki` — методика" not in guide
     assert "передавай `purpose`" not in guide
     assert len(guide) < 1800
+
+
+def test_query_uuid_opens_prompt_and_is_unique_per_request():
+    """Каждый запрос помечен своим uuid4 в первой строке — перед «Роль и Миссия»."""
+    import uuid
+
+    first = prompts.compose_system_prompt(_ctx())
+    second = prompts.compose_system_prompt(_ctx())
+    head, _, _ = first.partition("\n")
+    assert head.startswith("query UUID: ")
+    token = head.removeprefix("query UUID: ").strip()
+    assert uuid.UUID(token).version == 4
+    assert first.index("query UUID:") < first.index("# Роль и Миссия")
+    assert second.partition("\n")[0] != head
+    # И при подмене бизнес-промпта метка остаётся первой строкой.
+    overridden = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
+    assert overridden.startswith("query UUID: ")
