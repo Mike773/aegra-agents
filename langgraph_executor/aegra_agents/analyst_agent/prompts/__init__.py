@@ -1,6 +1,8 @@
 """Сборка единственного системного промпта агента.
 
-Порядок блоков: бизнес-промпт (роль, принципы, стиль, структура ответа) → как
+Первая строка — метка запроса ``query UUID: <uuid4>``: у каждого запроса к
+модели свой uuid, по нему запрос находится в логах. Дальше блоки в порядке:
+бизнес-промпт (роль, принципы, стиль, структура ответа) → как
 работать инструментами → что в этих данных → карта отклонений → память и
 брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
 инструмента query_sql. Бизнес-промпт заменяется целиком через
@@ -9,6 +11,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from .business import BUSINESS_PROMPT, RATING_PROSE_BLOCK, STAR_PROSE_BLOCK
@@ -67,10 +70,17 @@ def _turn_hint(ctx: PromptContext) -> str:
     return DASHBOARD_TASK_HINT if ctx.turn_kind == "dashboard" else ""
 
 
+def query_uuid_line() -> str:
+    """Метка запроса: новый uuid4 на каждый вызов — один запрос, один uuid."""
+    return f"query UUID: {uuid.uuid4()}"
+
+
 def compose_system_prompt(ctx: PromptContext) -> str:
-    """Собирает системный промпт; пустые блоки просто опускаются."""
+    """Собирает системный промпт; пустые блоки просто опускаются.
+
+    Первой строкой всегда идёт метка запроса, даже при подмене бизнес-промпта."""
     override = (ctx.system_prompt_override or "").strip()
-    business = override or BUSINESS_PROMPT
+    business = query_uuid_line() + "\n" + (override or BUSINESS_PROMPT)
     tail: list[str] = []
     if ctx.has_stars and not override:
         tail.append(STAR_PROSE_BLOCK)
@@ -104,5 +114,6 @@ __all__ = [
     "SAVE_INSIGHT_AUTO_FIXED",
     "STAR_PROSE_BLOCK",
     "compose_system_prompt",
+    "query_uuid_line",
     "tools_guide_block",
 ]
