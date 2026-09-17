@@ -58,6 +58,12 @@ class QueryResult:
     note: str | None = None
 
 
+# Кап ячейки по умолчанию. Длинные ячейки — составные колонки вроде
+# v_star.metrics, их резать нельзя; от переполнения контекста защищает общий
+# кап выдачи инструмента в гвардах. Тот же предел использует render_markdown.
+MAX_CELL = 2000
+
+
 class SafeQueryRunner:
     def __init__(
         self,
@@ -65,7 +71,7 @@ class SafeQueryRunner:
         *,
         max_rows: int = 200,
         max_cols: int = 20,
-        max_cell: int = 120,
+        max_cell: int = MAX_CELL,
         timeout_s: float = 3.0,
     ) -> None:
         self.conn = conn
@@ -233,4 +239,4 @@ class SafeQueryRunner:
         return tuple(out)
 
 
-__all__ = ["QueryResult", "SafeQueryRunner"]
+__all__ = ["MAX_CELL", "QueryResult", "SafeQueryRunner"]

@@ -505,3 +505,24 @@ def test_signal_mode_sends_nothing_when_data_failed(monkeypatch):
     assert sent == []
     assert llm.calls == 0
     assert "ответа нет" in out["reasoning_trace"][-1]["summary"]
+
+
+def test_agent_node_passes_thread_id_as_llm_session(monkeypatch):
+    # X-Session-ID = thread_id: все вызовы модели в ходе идут в одной сессии GigaChat.
+    from gigachat.context import session_id_cvar
+
+    _patch_load(monkeypatch)
+    seen = []
+
+    class SessionLLM(FakeLLM):
+        def invoke(self, messages):
+            seen.append(session_id_cvar.get())
+            return super().invoke(messages)
+
+    llm = SessionLLM([("query_sql", {"sql": "SELECT 1", "purpose": "проверка"}), "Итог."])
+    app = _build(llm)
+    asyncio.run(
+        app.ainvoke({"messages": [HumanMessage(content="Разбери показатели")]},
+                    _cfg(thread="t-session"))
+    )
+    assert seen and set(seen) == {"t-session"}

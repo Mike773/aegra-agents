@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from .text2sql import QueryResult
+from .text2sql import MAX_CELL, QueryResult
 
 _SQL_DIR = Path(__file__).with_name("sql")
 _HEADER_RE = re.compile(r"^--\s*(name|summary|params|returns|render)\s*:\s*(.*)$", re.I)
@@ -35,9 +35,9 @@ _PARAM_RE = re.compile(
 
 _MAX_ROWS_DEFAULT = 200
 _RENDER_MAX_ROWS = 60
-# Кап ячейки. Длинные ячейки — это составные колонки вроде v_star.metrics, их
-# резать нельзя; от переполнения контекста защищает общий кап выдачи в гвардах.
-_RENDER_MAX_CELL = 2000
+# Кап ячейки — общий с SafeQueryRunner: раннер режет раньше рендера, и разные
+# пределы здесь означали бы, что этот не работает.
+_RENDER_MAX_CELL = MAX_CELL
 
 
 @dataclass(frozen=True)

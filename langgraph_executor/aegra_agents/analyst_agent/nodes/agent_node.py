@@ -145,6 +145,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             history=history,
             question=question,
             budget=budget,
+            session_id=cfg.thread_id,
         )
 
         trace = (state.get("reasoning_trace") or []) + trace_steps(result.tool_steps)

@@ -253,3 +253,17 @@ def test_sql_examples_include_stars_only_with_stars():
     assert "person_key = '100500'" in star_examples[0]["params"]["sql"]
     assert "period_rank" in star_examples[0]["params"]["sql"]
     assert "v_star" in core.schema_doc(db)
+
+
+def test_default_cell_cap_matches_render_cap(db):
+    # Длинные ячейки (metrics в v_star, описания) режет не рендер, а раннер:
+    # его дефолт должен быть тем же, что у render_markdown, иначе кап в
+    # рендере не имеет смысла.
+    from langgraph_executor.aegra_agents.analyst_agent.db import sqlrunner
+
+    runner = SafeQueryRunner(db.conn)
+    runner.install()
+    long_text = "х" * 1500
+    res = runner.run(f"SELECT '{long_text}' AS long_text")
+    assert res.rows[0][0] == long_text
+    assert runner.max_cell == sqlrunner._RENDER_MAX_CELL
