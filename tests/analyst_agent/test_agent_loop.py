@@ -180,3 +180,47 @@ def test_guards_are_per_run():
     g1.register("t", {"a": 1})
     assert g1.calls_made == 1
     assert g2.calls_made == 0
+
+
+class SessionAwareLLM(ScriptedLLM):
+    """Запоминает X-Session-ID, который SDK GigaChat читает из контекста при вызове."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.session_ids = []
+
+    def invoke(self, messages):
+        from gigachat.context import session_id_cvar
+
+        self.session_ids.append(session_id_cvar.get())
+        return super().invoke(messages)
+
+
+def test_session_id_is_set_for_every_model_call_in_a_turn():
+    # Все запросы одного хода идут с одним X-Session-ID: так у GigaChat
+    # общий префикс (промпт + история) попадает в кэш, а не считается заново.
+    llm = SessionAwareLLM([("t", {}), ("t", {"a": 1}), "Итог."])
+    res = _run(llm, [_tool("t", lambda a=None: "ок")], session_id="thread-42")
+    assert res.final_text == "Итог."
+    assert llm.session_ids == ["thread-42"] * 3
+
+
+def test_session_id_covers_forced_answer_after_budget():
+    llm = SessionAwareLLM([("t", {"a": 1}), ("t", {"a": 2}), ("t", {"a": 3})])
+    _run(llm, [_tool("t", lambda a=None: "ок")], budget=1, session_id="thread-7")
+    assert llm.session_ids and set(llm.session_ids) == {"thread-7"}
+
+
+def test_session_id_generated_when_not_given():
+    llm = SessionAwareLLM([("t", {}), "Итог."])
+    _run(llm, [_tool("t", lambda: "ок")])
+    assert len(llm.session_ids) == 2
+    assert llm.session_ids[0] and llm.session_ids[0] == llm.session_ids[1]
+
+
+def test_session_id_does_not_leak_after_loop():
+    from gigachat.context import session_id_cvar
+
+    llm = SessionAwareLLM(["Итог."])
+    _run(llm, [], session_id="thread-1")
+    assert session_id_cvar.get() is None

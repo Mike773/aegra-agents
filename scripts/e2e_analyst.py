@@ -146,9 +146,13 @@ class UsageTracker(BaseCallbackHandler):
         total_out = sum(int(c.get("completion_tokens") or 0) for c in self.calls)
         peak = max((int(c.get("prompt_tokens") or 0) for c in self.calls), default=0)
         cached = sum(int(c.get("cache_read") or 0) for c in self.calls)
+        # prompt_tokens у GigaChat — только то, что посчитано заново; токены,
+        # взятые из кэша префикса (X-Session-ID), идут отдельным числом.
+        share = round(100 * cached / (total_in + cached)) if total_in + cached else 0
         return (
-            f"вызовов модели: {len(self.calls)}; токенов на вход: {total_in} "
-            f"(из кэша префикса: {cached}), на выход: {total_out}; пик входа: {peak}"
+            f"вызовов модели: {len(self.calls)}; токенов на вход: {total_in} новых "
+            f"+ {cached} из кэша префикса ({share} %), на выход: {total_out}; "
+            f"пик новых на вход: {peak}"
         )
 
 

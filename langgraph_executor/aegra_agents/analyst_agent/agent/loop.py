@@ -21,6 +21,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from .guards import BUDGET_NOTICE, REPEAT_NOTICE, RunGuards, clean_args
+from .session import llm_session
 from .trace import default_step_text
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,41 @@ async def run_tool_loop(
     max_rounds: int | None = None,
     step_text_fn: Any = default_step_text,
     stream_writer: Any = None,
+    session_id: str | None = None,
 ) -> LoopResult:
-    """Гоняет модель с инструментами до финального текста без вызовов."""
+    """Гоняет модель с инструментами до финального текста без вызовов.
+
+    ``session_id`` — X-Session-ID для GigaChat: все вызовы хода идут в одной
+    сессии, и общий префикс контекста берётся из кэша, а не считается заново.
+    """
+    with llm_session(session_id):
+        return await _run_loop(
+            llm=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+            history=history,
+            question=question,
+            budget=budget,
+            output_cap=output_cap,
+            max_rounds=max_rounds,
+            step_text_fn=step_text_fn,
+            stream_writer=stream_writer,
+        )
+
+
+async def _run_loop(
+    *,
+    llm: Any,
+    tools: list[Any],
+    system_prompt: str,
+    history: list[Any],
+    question: str,
+    budget: int | None,
+    output_cap: int | None,
+    max_rounds: int | None,
+    step_text_fn: Any,
+    stream_writer: Any,
+) -> LoopResult:
     guards = RunGuards(
         budget=budget if budget is not None else RunGuards.budget,
         output_cap=output_cap if output_cap is not None else RunGuards.output_cap,
