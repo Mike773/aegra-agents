@@ -1,8 +1,9 @@
 """Параметры запуска из ``config["configurable"]``.
 
 Набор ключей и дефолты повторяют analytic_orchestrator_v4 — прод-клиент уже их
-шлёт. Новых ровно три: dashboard_mode (составной разбор), text2sql_enabled
-(рубильник свободного SQL) и debug_dump (выгрузка базы для отладки).
+шлёт. Новых четыре: dashboard_mode (составной разбор), text2sql_enabled
+(рубильник свободного SQL), debug_dump (выгрузка базы для отладки) и
+interactive_suggestions (варианты следующего вопроса кнопками под ответом).
 ``format_first_answer`` принимается ради совместимости, но ничего не делает:
 правила формата первого ответа теперь в самом промпте. ``run_mode="signal"``
 включает сигнальный режим инсайтов (см. ``shared/insight_signal.py``).
@@ -59,6 +60,7 @@ class RunConfig:
     task_tool_budget: int = DEFAULT_TASK_TOOL_BUDGET
     max_tasks: int = MAX_TASKS
     debug_dump: bool = False
+    interactive_suggestions: bool = False
 
     @classmethod
     def from_config(cls, config: RunnableConfig | None) -> "RunConfig":
@@ -107,6 +109,9 @@ class RunConfig:
             task_tool_budget=number("task_tool_budget", DEFAULT_TASK_TOOL_BUDGET),
             max_tasks=number("max_tasks", MAX_TASKS),
             debug_dump=config_flag(config, "debug_dump", default=False),
+            interactive_suggestions=config_flag(
+                config, "interactive_suggestions", default=False
+            ),
         )
 
     def has_source(self) -> bool:

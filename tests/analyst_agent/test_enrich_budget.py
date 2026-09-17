@@ -42,17 +42,111 @@ def simple_db():
     return _db(make_dataset_obj(metrics))
 
 
-def test_profile_block_lists_people_and_periods(simple_db):
-    text = enrich.dataset_profile_block(simple_db)
-    assert "Иванов Иван Иванович" in text
-    assert "2026-04-06" in text and "2026-04-13" in text
-    assert "показател" in text.lower()
+def _peer_aggregates():
+    def entry(agg_id, level, level_name, total):
+        return {
+            "aggregate_id": agg_id,
+            "dataset": {
+                "level": level,
+                "level_name": level_name,
+                "metrics": [{
+                    "metric_id": "M1", "metric_name": "AHT",
+                    "aggregates": {
+                        "dt": "2026-04-13", "mean_fact": 10.0, "median": 9.0,
+                        "top20_mean_fact": 8.0, "hit_rate": 40.0, "total_objects": total,
+                    },
+                }],
+            },
+        }
+    return [entry("a-org", "ORG", "по банку", 5000), entry("a-off", "OFFICE", "по офису", 20)]
+
+
+def _people_dataset():
+    """Руководитель с одним показателем; сотрудник с деревом из двух корней и
+    тремя датами; второй сотрудник с группами сравнения."""
+    hold = make_metric("HOLD", date="2026-04-13", fact=5.0, plan=4.0)
+    talk = make_metric("TALK", date="2026-04-13", fact=7.0, plan=8.0)
+    aht = make_metric("AHT", date="2026-04-20", fact=12.0, plan=10.0, children=[hold, talk])
+    calls = make_metric("Звонки", date="2026-04-20", fact=30.0, plan=50.0)
+    perf = [
+        make_metric("Производительность", date=d, fact=f, plan=100.0)
+        for d, f in (("2026-04-06", 90.0), ("2026-04-13", 80.0))
+    ] + [make_metric("Производительность", date="2026-04-20", fact=70.0, plan=100.0,
+                     children=[aht, calls])]
+    rank = make_metric("РАНГ", date="2026-04-20", fact=3.0, plan=None)
+    boss = make_person([make_metric("AHT", date="2026-04-20", fact=11.0, plan=10.0)],
+                       tabnum=1, fio="Сидоров Пётр Ильич", post="Руководитель группы", is_me=True)
+    second = make_person([make_metric("AHT", date="2026-04-20", fact=9.0, plan=10.0)],
+                         tabnum=2, fio="Кузнецова Анна Олеговна", post="Оператор",
+                         aggregates_ids=["a-off", "a-org"])
+    return make_dataset_obj(perf + [rank], me=boss, employees_extra=[second])
+
+
+def _profile_lines(db):
+    text = enrich.dataset_profile_block(db)
+    assert text.startswith("СОСТАВ ДАННЫХ")
+    return [ln for ln in text.splitlines() if ln.startswith("- ")]
+
+
+def test_profile_line_per_person_with_role_post_roots_and_periods():
+    lines = _profile_lines(_db(_people_dataset()))
+    assert len(lines) == 3
+    assert lines[0].startswith("- Сидоров Пётр Ильич (руководитель), Руководитель группы.")
+    assert "Показатели первого уровня: AHT (дочерних нет)." in lines[0]
+    assert "Периоды: 2026-04-20 — всего 1." in lines[0]
+    assert lines[1].startswith("- Иванов Иван Иванович (сотрудник), Аналитик.")
+    assert (
+        "Показатели первого уровня: Производительность (дочерних: 2 второго уровня, "
+        "всего 4); РАНГ (дочерних нет)." in lines[1]
+    )
+    # Трёх дат многоточие не скрывает — печатаются все.
+    assert "Периоды: 2026-04-20, 2026-04-13, 2026-04-06 — всего 3." in lines[1]
+    assert "HOLD" not in lines[1] and "TALK" not in lines[1]
+
+
+def test_profile_periods_two_dates_without_ellipsis():
+    metrics = [
+        make_metric("Продажи", date="2026-04-06", fact=80.0, plan=100.0),
+        make_metric("Продажи", date="2026-04-13", fact=70.0, plan=100.0),
+    ]
+    lines = _profile_lines(_db(make_dataset_obj(metrics)))
+    assert "Периоды: 2026-04-13, 2026-04-06 — всего 2." in lines[0]
+
+
+def test_profile_periods_ellipsis_hides_middle_dates():
+    """Последняя, предпоследняя, …, первая — и сколько всего."""
+    metrics = [
+        make_metric("Продажи", date=d, fact=80.0, plan=100.0)
+        for d in ("2026-04-06", "2026-04-13", "2026-04-20", "2026-04-27", "2026-05-04")
+    ]
+    lines = _profile_lines(_db(make_dataset_obj(metrics)))
+    assert "Периоды: 2026-05-04, 2026-04-27, …, 2026-04-06 — всего 5." in lines[0]
+
+
+def test_profile_groups_listed_per_person(monkeypatch):
+    monkeypatch.delenv("PEER_LEVELS", raising=False)
+    from langgraph_executor.aegra_agents.shared import peer_levels
+    peer_levels.reset_cache()
+    lines = _profile_lines(_db(_people_dataset(), _peer_aggregates()))
+    assert lines[2].startswith("- Кузнецова Анна Олеговна (сотрудник), Оператор.")
+    assert lines[2].endswith("Группы сравнения: по офису, по банку.")
+    assert "Группы сравнения" not in lines[0] and "Группы сравнения" not in lines[1]
 
 
 def test_profile_omits_absent_features(simple_db):
     text = enrich.dataset_profile_block(simple_db)
     assert "звезд" not in text.lower()
     assert "групп" not in text.lower()
+    assert "разрез" not in text.lower()
+    assert "должност" not in text.lower()
+
+
+def test_profile_budget_is_about_ten_thousand():
+    assert enrich.BUDGET_PROFILE == 10000
+    db = _db(make_synthetic_dataset(n_level1=100, depth=5, periods=6, elements=5))
+    text = enrich.dataset_profile_block(db)
+    assert len(text) <= 10000
+    assert "М99.1 (дочерних: 1 второго уровня, всего 4)" in text
 
 
 def test_catalog_shows_two_levels_with_deeper_counters():
@@ -114,7 +208,7 @@ def test_stars_block_only_with_stars(simple_db):
     db = _db(make_dataset_obj([star]))
     text = enrich.stars_block(db)
     assert "Звезда качества" in text and "не получена" in text.lower()
-    assert "Влияющий: факт 1 при плане 2, выполнение 50 %, хуже плана" in text
+    assert "Влияющий (50 %)" in text
 
 
 def test_stars_block_lists_only_influencing_metrics():
@@ -141,9 +235,22 @@ def test_gaps_block_reports_missing_plan():
 
 def test_enrichment_block_fits_budget_on_production_scale():
     db = _db(make_synthetic_dataset(n_level1=100, depth=5, periods=6, elements=5))
-    text = enrich.enrichment_block(db, person_key="100500", budget_chars=9000)
-    assert len(text) <= 9000, len(text)
-    assert "показател" in text.lower()
+    text = enrich.enrichment_block(db, person_key="100500")
+    assert len(text) <= enrich.BUDGET_ENRICHMENT, len(text)
+    assert "СОСТАВ ДАННЫХ" in text and "ПОКАЗАТЕЛИ ВЕРХНЕГО УРОВНЯ" in text
+
+
+def test_enrichment_block_has_no_catalog_and_no_peer_block(monkeypatch):
+    """Каталог и сравнение с коллегами из промпта убраны: группы сравнения
+    названы в составе данных, цифры по коллегам модель берёт инструментом."""
+    monkeypatch.delenv("PEER_LEVELS", raising=False)
+    from langgraph_executor.aegra_agents.shared import peer_levels
+    peer_levels.reset_cache()
+    db = _db(_people_dataset(), _peer_aggregates())
+    text = enrich.enrichment_block(db, person_key="2")
+    assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" not in text
+    assert "СРАВНЕНИЕ С КОЛЛЕГАМИ" not in text
+    assert "Группы сравнения: по офису, по банку." in text
 
 
 def test_catalog_block_fits_budget_on_production_scale():
@@ -211,14 +318,14 @@ def test_stars_block_last_period_then_previous_missed_first():
     assert lines[0].startswith("ЗВЁЗДЫ")
     assert lines[1] == "Последний период (2026-05-11):"
     assert lines[2].startswith("- Звезда качества: не получена")
-    assert "CSI: факт 4.1 при плане 4.5" in lines[2]
+    assert "CSI (91.1 %)" in lines[2]
     assert lines[3].startswith("- Звезда продаж: получена")
-    assert "Конверсия: факт 13.4 при плане 12" in lines[3]
+    assert "Конверсия (111.7 %)" in lines[3]
     assert lines[4] == "Предыдущий период (2026-04-13):"
     assert lines[5].startswith("- Звезда продаж: не получена")
-    assert "Конверсия: факт 11.5 при плане 12" in lines[5]
+    assert "Конверсия (95.8 %)" in lines[5]
     assert lines[6].startswith("- Звезда качества: получена")
-    assert "CSI: факт 4.4 при плане 4.5" in lines[6]
+    assert "CSI (97.8 %)" in lines[6]
     assert "2026-03-16" not in text
 
 
@@ -238,13 +345,13 @@ def test_stars_block_dates_per_star_when_periods_differ():
 
 def test_enrichment_block_has_no_star_values():
     """Значения звёзд (статусы, показатели, рейтинг) в системный промпт не идут:
-    модель берёт их из v_star/metric_card/star_rating. Остаётся только счётчик
-    звёзд в профиле данных."""
+    модель берёт их из v_star/metric_card/star_rating. Звезда видна в составе
+    данных только как показатель первого уровня."""
     csi = make_metric("CSI", date="2026-05-11", fact=4.1, plan=4.5, is_star_metric=True)
     star = make_metric("Звезда качества", date="2026-05-11", fact=None, star_received=False,
                        calc_period="месяц", children=[csi])
     text = enrich.enrichment_block(_db(make_dataset_obj([star])), person_key="100500")
-    assert "Звёзд (именных показателей без чисел): 1" in text
+    assert "Звезда качества (дочерних: 1 второго уровня, всего 1)" in text
     assert "ЗВЁЗДЫ" not in text
     assert "не получена" not in text
     assert "Рейтинг по звёздам" not in text

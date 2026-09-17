@@ -23,6 +23,10 @@ FINAL_KEY = "orchestrator_final"    # итоговый ответ хода (ег
 # Исходный markdown итога при answer_html=true: content — уже HTML, а историю
 # для LLM собираем из этого ключа, чтобы модель не имитировала разметку.
 MARKDOWN_KEY = "orchestrator_markdown"
+# Варианты следующего вопроса (режим interactive_suggestions): список
+# {"type": "message", "label": подпись кнопки, "content": полный вопрос}.
+# Ключа нет, если режим выключен или модель вариантов не дала.
+SUGGESTIONS_KEY = "orchestrator_suggestions"
 
 TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
 
@@ -85,12 +89,20 @@ def render_answer_html(text: str) -> str:
     return str(soup)
 
 
-def final_message(text: str, config: RunnableConfig | None) -> AIMessage:
-    """Итог хода с флагом; при answer_html=true content — HTML, markdown рядом."""
+def final_message(
+    text: str,
+    config: RunnableConfig | None,
+    suggestions: list[dict] | None = None,
+) -> AIMessage:
+    """Итог хода с флагом; при answer_html=true content — HTML, markdown рядом.
+
+    Непустой список ``suggestions`` кладётся под ``SUGGESTIONS_KEY`` как есть."""
     kwargs: dict = {FINAL_KEY: True}
     if config_flag(config, "answer_html", default=True):
         kwargs[MARKDOWN_KEY] = text
         text = render_answer_html(text)
+    if suggestions:
+        kwargs[SUGGESTIONS_KEY] = list(suggestions)
     return AIMessage(content=text, additional_kwargs=kwargs)
 
 
@@ -154,6 +166,7 @@ __all__ = [
     "FINAL_KEY",
     "MARKDOWN_KEY",
     "STEP_KEY",
+    "SUGGESTIONS_KEY",
     "TRACE_SECTION_TITLE",
     "config_flag",
     "config_value",

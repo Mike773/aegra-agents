@@ -12,6 +12,7 @@
     E2E_TURNS=2 .venv/bin/python scripts/e2e_analyst.py          # ход 1 + уточнение
     E2E_DASHBOARD=1 .venv/bin/python scripts/e2e_analyst.py      # составной разбор
     E2E_PEER=1 .venv/bin/python scripts/e2e_analyst.py           # с группами сравнения
+    E2E_SUGGESTIONS=1 .venv/bin/python scripts/e2e_analyst.py    # кнопки-подсказки под ответом
 """
 from __future__ import annotations
 
@@ -172,6 +173,8 @@ def _print_messages(result: dict) -> None:
             print("\n" + "=" * 70)
             print("ИТОГОВЫЙ ОТВЕТ:\n")
             print(kwargs.get("orchestrator_markdown") or m.content)
+            for s in kwargs.get("orchestrator_suggestions") or []:
+                print(f"\n  [{s.get('type')}] {s.get('label')} → {s.get('content')}")
 
 
 async def main() -> int:
@@ -200,6 +203,7 @@ async def main() -> int:
             "easyrag_enabled": bool(os.environ.get("E2E_WIKI")),
             "knowledge_enabled": bool(os.environ.get("E2E_WIKI")),
             "describe_answer": bool(os.environ.get("E2E_DESCRIBE")),
+            "interactive_suggestions": bool(os.environ.get("E2E_SUGGESTIONS")),
             "answer_html": False,
         },
         "callbacks": [tracker],
