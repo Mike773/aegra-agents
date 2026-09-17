@@ -106,7 +106,8 @@ def make_summarize_node(llm: Any):
                     org_block="",
                     memory_context=state.get("memory_context"),
                     briefing=state.get("briefing"),
-                    turn_kind="followup",
+                    # Сводка не видит историю диалога — брифинг идёт в промпт.
+                    turn_kind="summary",
                     tool_budget=cfg.tool_budget,
                     system_prompt_override=cfg.system_prompt_override,
                 )

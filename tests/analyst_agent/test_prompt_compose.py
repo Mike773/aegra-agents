@@ -85,7 +85,7 @@ def test_no_turn_hint_outside_dashboard():
     followup = prompts.compose_system_prompt(_ctx(turn_kind="followup"))
     # Первая строка — метка запроса, она у каждого вызова своя.
     assert initial.partition("\n")[2] == followup.partition("\n")[2]
-    assert "Брифинг руководителя" in initial
+    assert "Брифинг руководителя" not in initial
     assert "первичный разбор" not in initial
     assert "реплику руководителя" not in followup
     assert prompts.DASHBOARD_TASK_HINT not in initial
@@ -178,3 +178,19 @@ def test_query_uuid_opens_prompt_and_is_unique_per_request():
     # И при подмене бизнес-промпта метка остаётся первой строкой.
     overridden = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
     assert overridden.startswith("query UUID: ")
+
+
+def test_briefing_block_only_without_dialog_history():
+    """В обычном диалоге брифинг — первое сообщение истории, дублировать его в
+    системном промпте незачем. Блок нужен там, где истории нет: задачи
+    составного разбора и его сводка."""
+    for kind in ("initial", "followup"):
+        assert "Брифинг руководителя" not in prompts.compose_system_prompt(
+            _ctx(turn_kind=kind)
+        )
+    for kind in ("dashboard", "summary"):
+        text = prompts.compose_system_prompt(_ctx(turn_kind=kind))
+        assert "Брифинг руководителя" in text and "Разбери показатели" in text
+    assert prompts.DASHBOARD_TASK_HINT not in prompts.compose_system_prompt(
+        _ctx(turn_kind="summary")
+    )
