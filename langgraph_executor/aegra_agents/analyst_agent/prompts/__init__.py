@@ -37,7 +37,7 @@ class PromptContext:
     memory_context: str | None = None
     briefing: str | None = None
     task_block: str = ""
-    turn_kind: str = "initial"          # initial | followup | dashboard
+    turn_kind: str = "initial"          # initial | followup | dashboard | summary
     has_stars: bool = False
     has_ratings: bool = False           # рейтинг по звёздам: только вместе со звёздами
     tool_budget: int = 18
@@ -45,7 +45,15 @@ class PromptContext:
     system_prompt_override: str | None = None
 
 
+# Ходы, на которых модель НЕ видит историю диалога: задача составного разбора
+# и его сводка. Только там брифинг кладётся в системный промпт — в обычном
+# диалоге он и так первое сообщение истории, дублировать его незачем.
+_BRIEFING_TURN_KINDS = ("dashboard", "summary")
+
+
 def _briefing_block(ctx: PromptContext) -> str:
+    if ctx.turn_kind not in _BRIEFING_TURN_KINDS:
+        return ""
     text = (ctx.briefing or "").strip()
     if not text:
         return ""
