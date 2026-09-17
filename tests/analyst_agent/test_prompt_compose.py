@@ -16,7 +16,6 @@ from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
 def _ctx(**kw):
     base = dict(
         enrichment_block="СОСТАВ ДАННЫХ\n- В анализе: Иванов.",
-        catalog_block="КАТАЛОГ ПОКАЗАТЕЛЕЙ\n- Продажи",
         deviations_block="КАРТА ОТКЛОНЕНИЙ\n- Продажи — хуже плана.",
         org_block="Кого анализируем: Иванов.",
         briefing="Разбери показатели",
@@ -34,7 +33,6 @@ def test_block_order():
         text.index("# Структура отчета"),
         text.index("КАК РАБОТАТЬ"),
         text.index("СОСТАВ ДАННЫХ"),
-        text.index("КАТАЛОГ ПОКАЗАТЕЛЕЙ"),
         text.index("КАРТА ОТКЛОНЕНИЙ"),
     ]
     assert positions == sorted(positions), positions
@@ -58,7 +56,7 @@ def test_override_replaces_business_but_keeps_operational():
     assert "# Роль и Миссия" not in text
     assert "# Структура отчета" not in text
     # Операционные блоки остаются: без них модель не сможет работать с данными.
-    assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" in text
+    assert "СОСТАВ ДАННЫХ" in text
     assert "КАК РАБОТАТЬ" in text
 
 
@@ -121,7 +119,7 @@ def test_tools_guide_warns_about_differing_dates():
 
 def test_absent_blocks_are_skipped():
     text = prompts.compose_system_prompt(
-        _ctx(deviations_block="", catalog_block="", org_block="")
+        _ctx(deviations_block="", org_block="")
     )
     assert "КАРТА ОТКЛОНЕНИЙ" not in text
     assert "\n\n\n" not in text
@@ -134,7 +132,6 @@ def test_fits_budget_on_production_scale():
     text = prompts.compose_system_prompt(
         _ctx(
             enrichment_block=enrich.enrichment_block(db, person_key="100500"),
-            catalog_block=enrich.catalog_block(db),
             has_stars=db.has_stars,
         )
     )
@@ -194,3 +191,9 @@ def test_briefing_block_only_without_dialog_history():
     assert prompts.DASHBOARD_TASK_HINT not in prompts.compose_system_prompt(
         _ctx(turn_kind="summary")
     )
+
+
+def test_catalog_block_is_gone_from_prompt_context():
+    """Каталог показателей в системный промпт не входит: состав дерева даёт
+    блок «Состав данных», имена глубже — metric_card и SQL."""
+    assert "catalog_block" not in prompts.PromptContext.__dataclass_fields__

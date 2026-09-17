@@ -20,6 +20,7 @@ from .peer_context import peer_context_text
 from .query_sql import make_query_sql
 from .search_wiki import make_search_wiki
 from .star_rating import levels_text, star_rating_text
+from .suggestions import make_suggest_followups
 
 
 class _ToolArgs(BaseModel):
@@ -209,6 +210,11 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
             ),
         )
     )
+
+    # Интерактивные подсказки — только по входному параметру: без него набор
+    # инструментов и промпт прежние.
+    if ctx.interactive_suggestions:
+        tools.append(make_suggest_followups(ctx))
 
     tools.extend(extra or [])
     return tools

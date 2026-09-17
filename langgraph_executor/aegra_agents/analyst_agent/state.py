@@ -112,7 +112,6 @@ class AnalystState(AnalystOutput, total=False):
 
     # Готовые блоки системного промпта, посчитанные один раз на первом ходе.
     enrichment_block: str
-    catalog_block: str
     knowledge_block: str
 
     # Карта отклонений на весь диалог (пересобирается и дополняется каждый ход).

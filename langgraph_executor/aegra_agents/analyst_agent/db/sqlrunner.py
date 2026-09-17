@@ -35,7 +35,9 @@ _PARAM_RE = re.compile(
 
 _MAX_ROWS_DEFAULT = 200
 _RENDER_MAX_ROWS = 60
-_RENDER_MAX_CELL = 80
+# Кап ячейки. Длинные ячейки — это составные колонки вроде v_star.metrics, их
+# резать нельзя; от переполнения контекста защищает общий кап выдачи в гвардах.
+_RENDER_MAX_CELL = 2000
 
 
 @dataclass(frozen=True)

@@ -73,6 +73,11 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         turn_no = int(state.get("turn_no") or 1)
         log = ledger_mod.DeviationLedger(db, deviations, turn=turn_no)
 
+        turn_kind = state.get("turn_kind") or "initial"
+        tasks = state.get("tasks") or []
+        task_idx = int(state.get("task_idx") or 0)
+        is_dashboard = turn_kind == "dashboard" and task_idx < len(tasks)
+
         ctx = RunContext(
             db=db,
             person_key=person_key,
@@ -84,19 +89,16 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             gap_on_unanswered=cfg.gap_on_unanswered,
             use_peer_aggregates=cfg.use_peer_aggregates and db.has_aggregates,
             text2sql_enabled=cfg.text2sql_enabled,
+            # Подсказки — только в обычном ходе: у задачи составного разбора
+            # продолжения пишет сводка, а у сводки инструментов нет.
+            interactive_suggestions=cfg.interactive_suggestions and not is_dashboard,
         )
         tools = build_tools(ctx)
-
-        turn_kind = state.get("turn_kind") or "initial"
-        tasks = state.get("tasks") or []
-        task_idx = int(state.get("task_idx") or 0)
-        is_dashboard = turn_kind == "dashboard" and task_idx < len(tasks)
 
         # Блоки промпта: посчитанные на первом ходе плюс свежая карта отклонений.
         enrichment = state.get("enrichment_block") or enrich.enrichment_block(
             db, person_key=person_key
         )
-        catalog = state.get("catalog_block") or enrich.catalog_block(db, person_key=person_key)
 
         task_block = ""
         if is_dashboard:
@@ -120,7 +122,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         prompt = compose_system_prompt(
             PromptContext(
                 enrichment_block=enrichment,
-                catalog_block=catalog,
                 knowledge_block=state.get("knowledge_block") or "",
                 deviations_block=deviations_block(log.select(limit=12)),
                 org_block=_org_block(state),
@@ -133,6 +134,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 tool_budget=budget,
                 has_sql=cfg.text2sql_enabled,
                 system_prompt_override=cfg.system_prompt_override,
+                interactive_suggestions=ctx.interactive_suggestions,
             )
         )
 
@@ -179,7 +181,9 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         text = await with_description(
             result.final_text, {**state, **update}, config, llm=llm, question=question
         )
-        messages = step_updates(config, result.step_texts) + [final_message(text, config)]
+        messages = step_updates(config, result.step_texts) + [
+            final_message(text, config, suggestions=ctx.suggestions)
+        ]
         update["messages"] = messages
         update["analytics_question"] = question
         update["analytics_answer"] = result.final_text

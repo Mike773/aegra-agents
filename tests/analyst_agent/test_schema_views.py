@@ -135,13 +135,16 @@ def test_tree_is_per_person():
 
 def test_star_view_and_flags():
     """Строка на звезду: только влияющие показатели (is_star_metric), одной
-    строкой с фактом, планом и процентом выполнения."""
+    строкой «имя (процент выполнения)»: RR с пометкой, иначе ex, иначе
+    факт/план; без плана и процентов — одно имя."""
     child = make_metric("Влияющий", fact=1.0, plan=2.0, is_star_metric=True)
     plain = make_metric("Справочный", fact=44.0, plan=None)
     star = make_metric("Звезда", fact=None, star_received=False, children=[child, plain])
     won = make_metric("Звезда продаж", fact=None, star_received=True, children=[
         make_metric("Конверсия", fact=13.4, plan=12.0, is_star_metric=True),
         make_metric("Кросс", fact=1.3, plan=1.2, ex=108.3, is_star_metric=True),
+        make_metric("Темп", fact=5.0, plan=6.0, ex=83.3, rr=95.5, is_star_metric=True),
+        make_metric("Без плана", fact=7.0, plan=None, is_star_metric=True),
     ])
     db = core.build_run_db(make_dataset_obj([star, won]))
     assert db.has_stars is True
@@ -150,12 +153,12 @@ def test_star_view_and_flags():
     ).fetchall()
     assert len(rows) == 2
     assert tuple(rows[0])[:3] == ("Звезда", 0, 1)
-    assert rows[0]["metrics"] == "Влияющий: факт 1 при плане 2, выполнение 50 %, хуже плана"
+    assert rows[0]["metrics"] == "Влияющий (50 %)"
     assert "Справочный" not in rows[0]["metrics"]
-    assert tuple(rows[1])[:3] == ("Звезда продаж", 1, 2)
+    assert tuple(rows[1])[:3] == ("Звезда продаж", 1, 4)
+    # Порядок: хуже плана первыми, затем по имени; без плана — в конце.
     assert rows[1]["metrics"] == (
-        "Конверсия: факт 13.4 при плане 12, выполнение 111.7 %, лучше плана; "
-        "Кросс: факт 1.3 при плане 1.2, выполнение 108.3 %, лучше плана"
+        "Темп (95.5 % RR); Конверсия (111.7 %); Кросс (108.3 %); Без плана"
     )
     assert core.build_run_db(_tree_dataset()).has_stars is False
 
@@ -179,8 +182,8 @@ def test_star_view_only_star_rows_and_own_children():
         "SELECT person_key, star, received, metrics FROM v_star ORDER BY person_key"
     ).fetchall()
     assert [tuple(r) for r in rows] == [
-        ("1", "Звезда", 0, "CSI: факт 4.1 при плане 4.5, выполнение 91.1 %, хуже плана"),
-        ("2", "Звезда", 1, "FCR: факт 78 при плане 75, выполнение 104 %, лучше плана"),
+        ("1", "Звезда", 0, "CSI (91.1 %)"),
+        ("2", "Звезда", 1, "FCR (104 %)"),
     ]
 
 
@@ -285,8 +288,8 @@ def test_star_view_row_per_period_with_metrics_of_that_period():
         ("Звезда качества", "2026-05-11", 0, 1, 1),
         ("Звезда качества", "2026-04-13", 1, 2, 0),
     ]
-    assert rows[0]["metrics"] == "CSI: факт 4.1 при плане 4.5, выполнение 91.1 %, хуже плана"
-    assert rows[1]["metrics"] == "CSI: факт 4.4 при плане 4.5, выполнение 97.8 %, хуже плана"
+    assert rows[0]["metrics"] == "CSI (91.1 %)"
+    assert rows[1]["metrics"] == "CSI (97.8 %)"
 
 
 def test_star_metric_view_carries_star_date():

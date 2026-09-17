@@ -23,6 +23,10 @@ class RunContext:
     gap_on_unanswered: bool = True
     use_peer_aggregates: bool = True
     text2sql_enabled: bool = True
+    # Интерактивные подсказки: инструмент suggest_followups и его результат —
+    # варианты следующего вопроса, которые уедут в additional_kwargs итога.
+    interactive_suggestions: bool = False
+    suggestions: list[dict] = field(default_factory=list)
     # Что нашлось в wiki за этот ход — уезжает в поля easyrag_* стейта, чтобы
     # раздел «Исходные данные» и describe_answer работали как в v4.
     wiki_queries: list[str] = field(default_factory=list)

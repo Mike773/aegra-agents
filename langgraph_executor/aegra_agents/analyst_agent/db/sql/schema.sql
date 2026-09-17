@@ -331,7 +331,7 @@ WHERE g.is_current = 1;
 CREATE VIEW v_star_metric AS
 SELECT sf.person_id, p.person_key, sf.metric_id AS star_id, sm.name AS star,
        sd.date AS star_date, sf.period_id AS star_period_id,
-       cf.metric_id, cm.name AS metric, cf.fact, cf.plan, cf.ex,
+       cf.metric_id, cm.name AS metric, cf.fact, cf.plan, cf.ex, cf.rr,
        ROUND(COALESCE(cf.ex, CASE WHEN cf.plan IS NOT NULL AND cf.plan <> 0
                                   THEN cf.fact * 100.0 / cf.plan END), 1) AS completion_pct,
        a.plan_status, a.plan_dev_pct, d.date
@@ -353,8 +353,9 @@ WHERE sf.star_received IS NOT NULL;
 -- Звёзды: ОДНА строка на (персона, звезда, дата звезды). period_rank — номер
 -- периода от конца для ЭТОЙ звезды у ЭТОГО человека (1 = последний,
 -- 2 = предыдущий, …), is_latest = 1 у последнего. metrics — влияющие показатели
--- за период звезды одной строкой: «имя: факт X при плане Y, выполнение Z %,
--- вердикт; …». Обычные показатели сюда не попадают.
+-- за период звезды одной строкой: «имя (Z % RR)» при наличии run rate, иначе
+-- «имя (Z %)» — ex либо факт/план; без процента — одно имя. Обычные показатели
+-- сюда не попадают.
 CREATE VIEW v_star AS
 SELECT p.person_key, p.fio, sm.name AS star, sf.star_received AS received,
        d.date AS star_date,
@@ -370,13 +371,12 @@ SELECT p.person_key, p.fio, sm.name AS star, sf.star_received AS received,
            AND x.star_period_id = sf.period_id
            AND x.plan_status = 'хуже_плана') AS n_below_plan,
        (SELECT group_concat(line, '; ') FROM (
-            SELECT x.metric || ': факт ' || COALESCE(fmt_num(x.fact), '—')
-                   || CASE WHEN x.plan IS NULL THEN ''
-                           ELSE ' при плане ' || fmt_num(x.plan) END
-                   || CASE WHEN x.completion_pct IS NULL THEN ''
-                           ELSE ', выполнение ' || fmt_num(x.completion_pct) || ' %' END
-                   || CASE WHEN x.plan_status IS NULL THEN ''
-                           ELSE ', ' || REPLACE(x.plan_status, '_', ' ') END AS line
+            SELECT x.metric
+                   || CASE WHEN x.rr IS NOT NULL
+                           THEN ' (' || fmt_num(ROUND(x.rr, 1)) || ' % RR)'
+                           WHEN x.completion_pct IS NOT NULL
+                           THEN ' (' || fmt_num(x.completion_pct) || ' %)'
+                           ELSE '' END AS line
               FROM v_star_metric x
              WHERE x.person_id = sf.person_id AND x.star_id = sf.metric_id
                AND x.star_period_id = sf.period_id

@@ -1,10 +1,12 @@
 """Блоки системного промпта, посчитанные SQL-статистикой.
 
 Датасет на проме — до сотни показателей верхнего уровня и пять уровней вглубь,
-поэтому в промпт идёт не сырьё, а выжимка: состав данных, скорборд верхнего
-уровня, каталог показателей и пробелы. Каждый блок имеет бюджет символов; то,
-чего в датасете нет (звёзды, группы сравнения, разрезы), не упоминается вовсе —
-модель не должна звать несуществующее.
+поэтому в промпт идёт не сырьё, а выжимка: состав данных (строка на человека),
+зоны внимания, скорборд верхнего уровня и пробелы. Каждый блок имеет бюджет
+символов; то, чего в датасете нет (звёзды, группы сравнения), не упоминается
+вовсе — модель не должна звать несуществующее. Каталог показателей и сравнение
+с коллегами в промпт не входят: они остались для отладки (``scripts/sql_debug.py``),
+а модель берёт состав дерева из metric_card и SQL, цифры коллег — из peer_context.
 """
 from __future__ import annotations
 
@@ -13,13 +15,15 @@ from typing import Any
 from .sqlrunner import QueryResult, render_kv, run_template
 
 # Бюджеты блоков (символы). Сумма с запасом укладывается в общий бюджет промпта.
-BUDGET_PROFILE = 600
+BUDGET_PROFILE = 10000
 BUDGET_SCOREBOARD = 4500
 BUDGET_ZONES = 400
 BUDGET_PEER = 700
 BUDGET_STARS = 1400
 BUDGET_GAPS = 600
 BUDGET_CATALOG = 14000
+# Общий бюджет сводного блока обогащения (профиль + зоны + скорборд + пробелы).
+BUDGET_ENRICHMENT = 16000
 
 # Сколько показателей скорборда печатать полными строками; остальные — счётчиками.
 _SCOREBOARD_FULL_ROWS = 30
@@ -54,55 +58,53 @@ def _plural_metrics(n: int) -> str:
     return "метрик"
 
 
+def _periods_text(dates: str | None, n_periods: int | None) -> str:
+    """«Последняя, предпоследняя, …, первая — всего N»; без многоточия, когда
+    дат две или меньше."""
+    items = [d for d in (dates or "").split(",") if d]
+    if not items:
+        return ""
+    shown = items if len(items) <= 3 else [items[0], items[1], "…", items[-1]]
+    return f"Периоды: {', '.join(shown)} — всего {n_periods or len(items)}."
+
+
+def _roots_text(roots: str | None) -> str:
+    """Показатели первого уровня с числом потомков: уникальных на втором
+    уровне и всего ниже корня."""
+    parts = []
+    for chunk in (roots or "").split(";;"):
+        if not chunk:
+            continue
+        name, n_l2, n_total = chunk.rsplit("|", 2)
+        if int(n_total) == 0:
+            parts.append(f"{name} (дочерних нет)")
+        else:
+            parts.append(f"{name} (дочерних: {n_l2} второго уровня, всего {n_total})")
+    return f"Показатели первого уровня: {'; '.join(parts)}." if parts else ""
+
+
 def dataset_profile_block(db: Any) -> str:
-    """«Состав данных»: люди, показатели, периоды, разрезы, группы, звёзды."""
-    res = run_template(db.conn, "enrich_profile")
+    """«Состав данных»: строка на человека — ФИО и роль, должность, показатели
+    первого уровня с числом потомков, даты периодов (последняя, предпоследняя,
+    …, первая и их число), группы сравнения этого человека от узкой к широкой."""
+    res = run_template(db.conn, "enrich_profile", max_rows=200)
     if res.error or not res.rows:
         return ""
-    p = _rows(res)[0]
-    people = db.conn.execute(
-        "SELECT fio, person_key, is_me FROM person ORDER BY is_me DESC, person_id"
-    ).fetchall()
-    who = ", ".join(
-        f"{r['fio'] or r['person_key']}" + (" (руководитель)" if r["is_me"] else "")
-        for r in people[:12]
-    )
-    if len(people) > 12:
-        who += f" и ещё {len(people) - 12}"
-
-    lines = ["СОСТАВ ДАННЫХ", f"- В анализе: {who}."]
-    lines.append(
-        f"- Показателей: {p['n_metrics']}, из них верхнего уровня {p['n_roots']}; "
-        f"глубина дерева {p['max_depth']}; с планом {p['n_with_plan']}."
-    )
-    if p["n_periods"]:
-        lines.append(
-            f"- Периоды ({p['calc_periods'] or 'без указания'}): {p['n_periods']}, "
-            f"с {p['first_date']} по {p['last_date']}. У разных показателей "
-            "последняя дата может отличаться — смотри дату у самого показателя."
-        )
-    if p["n_elements"]:
-        # Считаются РАЗНЫЕ значения разрезов по всей базе, а не пары
-        # показатель×разрез: у показателя их бывают сотни, и число здесь — только
-        # масштаб. Сколько разрезов у конкретного показателя — в каталоге.
-        lines.append(
-            f"- Разных значений разрезов: {p['n_elements']} "
-            "(сколько у конкретного показателя — в каталоге)."
-        )
-    levels = db.conn.execute(
-        "SELECT DISTINCT level_name, total_objects FROM peer_aggregate "
-        "WHERE level_name IS NOT NULL ORDER BY level_order"
-    ).fetchall()
-    if levels:
-        named = ", ".join(
-            f"{r['level_name']}" + (f" ({r['total_objects']} чел.)" if r["total_objects"] else "")
-            for r in levels
-        )
-        lines.append(f"- Группы сравнения от узкой к широкой: {named}.")
-    if db.has_stars:
-        n_stars = db.conn.execute("SELECT COUNT(*) FROM metric WHERE is_star = 1").fetchone()[0]
-        lines.append(f"- Звёзд (именных показателей без чисел): {n_stars}.")
-    return "\n".join(lines)[:BUDGET_PROFILE]
+    lines = ["СОСТАВ ДАННЫХ"]
+    for r in _rows(res):
+        role = "руководитель" if r["is_me"] else "сотрудник"
+        head = f"{r['fio'] or r['person_key']} ({role})"
+        post = str(r["post"] or "").strip()
+        if post:
+            head += f", {post}"
+        bits = [head + "."]
+        for piece in (_roots_text(r["roots"]), _periods_text(r["dates"], r["n_periods"])):
+            if piece:
+                bits.append(piece)
+        if r["groups"]:
+            bits.append(f"Группы сравнения: {r['groups']}.")
+        lines.append("- " + " ".join(bits))
+    return _trim("\n".join(lines), BUDGET_PROFILE)
 
 
 def zones_block(db: Any, *, person_key: str) -> str:
@@ -207,7 +209,8 @@ def _no_total_line(r: dict[str, Any]) -> str:
 def catalog_block(
     db: Any, *, person_key: str | None = None, budget_chars: int = BUDGET_CATALOG
 ) -> str:
-    """Каталог: все показатели 1-го и 2-го уровня.
+    """Каталог: все показатели 1-го и 2-го уровня. В системный промпт не входит —
+    остался для отладки (``scripts/sql_debug.py --enrichment``).
 
     У показателя 2-го уровня печатаются счётчики потомков по слоям
     («10 метрик 3-го, 20 4-го») — имена глубже второго уровня в промпт не идут,
@@ -279,7 +282,8 @@ def catalog_block(
 
 
 def peer_block(db: Any, *, person_key: str) -> str:
-    """Позиция в группах сравнения — только при наличии агрегатов."""
+    """Позиция в группах сравнения — только при наличии агрегатов. В системный
+    промпт не входит: названия групп даёт «Состав данных», цифры — peer_context."""
     res = run_template(db.conn, "enrich_peer", person_key=person_key)
     rows = _rows(res)
     if not rows:
@@ -411,21 +415,24 @@ def _trim(text: str, budget: int) -> str:
     return "\n".join(out)
 
 
-def enrichment_block(db: Any, *, person_key: str, budget_chars: int = 9000) -> str:
-    """Сводный блок обогащения: профиль, зоны, скорборд, коллеги, пробелы.
+def enrichment_block(
+    db: Any, *, person_key: str, budget_chars: int = BUDGET_ENRICHMENT
+) -> str:
+    """Сводный блок обогащения: профиль, зоны, скорборд, пробелы.
 
-    Значения звёзд (статусы по периодам, их показатели, рейтинг) в промпт не
-    идут — они только мешают модели; при необходимости она берёт их из
-    v_star / metric_card / star_rating. Блок stars_block остаётся для отладки.
+    Значения звёзд (статусы по периодам, их показатели, рейтинг), каталог
+    показателей и сравнение с коллегами в промпт не идут — они только мешают
+    модели; при необходимости она берёт их из v_star / metric_card /
+    peer_context / star_rating. Блоки stars_block, catalog_block и peer_block
+    остаются для отладки.
 
-    При нехватке бюджета режется с хвоста приоритета: сначала пробелы, потом
-    коллеги, в последнюю очередь — скорборд.
+    При нехватке бюджета режется с хвоста приоритета: сначала пробелы, в
+    последнюю очередь — скорборд.
     """
     blocks = [
         dataset_profile_block(db),
         zones_block(db, person_key=person_key),
         scoreboard_block(db, person_key=person_key),
-        peer_block(db, person_key=person_key),
         gaps_block(db, person_key=person_key),
     ]
     blocks = [b for b in blocks if b.strip()]

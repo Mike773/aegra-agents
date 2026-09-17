@@ -3,8 +3,8 @@
 Первая строка — метка запроса ``query UUID: <uuid4>``: у каждого запроса к
 модели свой uuid, по нему запрос находится в логах. Дальше блоки в порядке:
 бизнес-промпт (роль, принципы, стиль, структура ответа) → как
-работать инструментами → что в этих данных → карта отклонений → память и
-брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
+работать инструментами → интерактивные подсказки (только по флагу) → что в
+этих данных → карта отклонений → память и брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
 инструмента query_sql. Бизнес-промпт заменяется целиком через
 ``system_prompt_override``; операционные блоки остаются всегда — без них модель
 не сможет обращаться к данным.
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from .business import BUSINESS_PROMPT, RATING_PROSE_BLOCK, STAR_PROSE_BLOCK
 from .describe import DESCRIBE_ANSWER_PROMPT
 from .misc import LOAD_ERROR_PROMPT, SAVE_INSIGHT_AUTO_FIXED
+from .suggestions import SUGGESTIONS_PROMPT_BLOCK
 from .task_hints import DASHBOARD_TASK_HINT
 from .tools_guide import tools_guide_block
 
@@ -30,7 +31,6 @@ class PromptContext:
     """Всё, из чего собирается системный промпт одного хода."""
 
     enrichment_block: str = ""
-    catalog_block: str = ""
     deviations_block: str = ""
     knowledge_block: str = ""
     org_block: str = ""
@@ -43,6 +43,9 @@ class PromptContext:
     tool_budget: int = 18
     has_sql: bool = True
     system_prompt_override: str | None = None
+    # Режим interactive_suggestions: блок про инструмент suggest_followups.
+    # Без флага блока нет — промпт совпадает с прежним.
+    interactive_suggestions: bool = False
 
 
 # Ходы, на которых модель НЕ видит историю диалога: задача составного разбора
@@ -98,9 +101,9 @@ def compose_system_prompt(ctx: PromptContext) -> str:
     blocks: list[str] = [
         business,
         tools_guide_block(ctx.tool_budget, has_sql=ctx.has_sql),
+        SUGGESTIONS_PROMPT_BLOCK if ctx.interactive_suggestions else "",
         ctx.org_block,
         ctx.enrichment_block,
-        ctx.catalog_block,
         ctx.knowledge_block,
         ctx.deviations_block,
         _memory_block(ctx),
@@ -121,6 +124,7 @@ __all__ = [
     "RATING_PROSE_BLOCK",
     "SAVE_INSIGHT_AUTO_FIXED",
     "STAR_PROSE_BLOCK",
+    "SUGGESTIONS_PROMPT_BLOCK",
     "compose_system_prompt",
     "query_uuid_line",
     "tools_guide_block",
