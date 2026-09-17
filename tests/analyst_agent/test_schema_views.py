@@ -256,3 +256,45 @@ def test_samples_build():
     for name in ("sample_declining_ex_rr.json", "sample_star.json"):
         db = core.build_run_db(load_sample(name))
         assert db.conn.execute("SELECT COUNT(*) FROM v_fact").fetchone()[0] > 0
+
+
+def _star_periods_dataset():
+    """Звезда пришла за два периода: копия узла на каждую дату, история
+    влияющих показателей — только под последней копией."""
+    csi = [
+        make_metric("CSI", date=d, fact=f, plan=4.5, is_star_metric=True)
+        for d, f in (("2026-04-06", 4.6), ("2026-04-13", 4.4), ("2026-05-04", 4.2),
+                     ("2026-05-11", 4.1))
+    ]
+    star_may = make_metric("Звезда качества", date="2026-05-11", fact=None,
+                           star_received=False, calc_period="месяц", children=csi)
+    star_apr = make_metric("Звезда качества", date="2026-04-13", fact=None,
+                           star_received=True, calc_period="месяц")
+    return make_dataset_obj([star_may, star_apr])
+
+
+def test_star_view_row_per_period_with_metrics_of_that_period():
+    """v_star — строка на (звезда, дата звезды); влияющие показатели берутся
+    на последнюю дату серии не позже даты звезды, а не на конец истории."""
+    db = core.build_run_db(_star_periods_dataset())
+    rows = db.conn.execute(
+        "SELECT star, star_date, received, period_rank, is_latest, metrics "
+        "FROM v_star ORDER BY period_rank"
+    ).fetchall()
+    assert [tuple(r)[:5] for r in rows] == [
+        ("Звезда качества", "2026-05-11", 0, 1, 1),
+        ("Звезда качества", "2026-04-13", 1, 2, 0),
+    ]
+    assert rows[0]["metrics"] == "CSI: факт 4.1 при плане 4.5, выполнение 91.1 %, хуже плана"
+    assert rows[1]["metrics"] == "CSI: факт 4.4 при плане 4.5, выполнение 97.8 %, хуже плана"
+
+
+def test_star_metric_view_carries_star_date():
+    db = core.build_run_db(_star_periods_dataset())
+    rows = db.conn.execute(
+        "SELECT star_date, metric, fact, date FROM v_star_metric ORDER BY star_date DESC"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("2026-05-11", "CSI", 4.1, "2026-05-11"),
+        ("2026-04-13", "CSI", 4.4, "2026-04-13"),
+    ]

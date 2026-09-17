@@ -11,7 +11,10 @@ from typing import Any
 # Семантика колонок: что означает значение и как его читать. Только то, что
 # нельзя угадать по имени, — остальное модель поймёт сама.
 COLUMN_DOCS: dict[tuple[str, str], str] = {
-    ("v_fact", "person_key"): "идентификатор человека (табельный или ФИО)",
+    ("v_fact", "person_key"): (
+        "ключ человека — табельный номер строкой (см. список ключей в правилах); "
+        "ФИО лежит в колонке fio, в person_key его подставлять нельзя"
+    ),
     ("v_fact", "is_me"): "1 = руководитель, 0 = сотрудник",
     ("v_fact", "metric"): "название показателя (как в данных)",
     ("v_fact", "direction"): "'прямая' (больше = лучше) | 'обратная' (меньше = лучше)",
@@ -51,11 +54,16 @@ COLUMN_DOCS: dict[tuple[str, str], str] = {
     ("v_tree", "person_key"): "чьё дерево: у каждого человека состав показателей свой",
     ("v_tree", "share_pct"): "доля влияния ребёнка среди детей родителя, %",
     ("v_metric", "depth"): "уровень в СВОДНОМ дереве по всем людям; для человека бери v_fact/v_tree",
-    ("v_star", "received"): "1 = звезда получена, 0 = нет (на последнюю дату)",
-    ("v_star", "n_below_plan"): "сколько влияющих показателей звезды хуже плана",
+    ("v_star", "star_date"): "дата периода звезды; строка на каждый период",
+    ("v_star", "received"): "1 = звезда получена за этот период, 0 = нет",
+    ("v_star", "period_rank"): "1 = последний период этой звезды, 2 = предыдущий, …",
+    ("v_star", "is_latest"): "1 = последний период этой звезды у человека",
+    ("v_star", "n_below_plan"): "сколько влияющих показателей звезды хуже плана за её период",
     ("v_star", "metrics"): (
-        "влияющие показатели одной строкой: имя, факт, план, выполнение %, вердикт"
+        "влияющие показатели за период звезды одной строкой: имя, факт, план, выполнение %, вердикт"
     ),
+    ("v_star_metric", "star_date"): "дата периода звезды, к которому относится значение",
+    ("v_star_metric", "date"): "дата значения показателя — последняя не позже star_date",
     ("v_star_metric", "completion_pct"): "выполнение плана, % (факт / план)",
     ("v_rating", "level_name"): "название уровня рейтинга — только его и называй",
     ("v_rating", "level_order"): "1 = самая узкая группа (ГОСБ), дальше шире (ТБ, Сбер)",
@@ -166,6 +174,20 @@ ORDER BY period_idx;""",
 ]
 
 
+# Примеры для датасетов со звёздами: v_star есть не всегда, поэтому без звёзд
+# они модели не показываются.
+STAR_SQL_EXAMPLES: list[tuple[str, str]] = [
+    (
+        "Звёзды сотрудника по периодам с их влияющими показателями "
+        "(period_rank = 1 — последний период, 2 — предыдущий)",
+        """SELECT star, star_date, period_rank, received, n_below_plan, metrics
+FROM v_star
+WHERE person_key = '{person}' AND period_rank <= 2
+ORDER BY period_rank, received, star;""",
+    ),
+]
+
+
 def _views(conn) -> list[str]:
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name"
@@ -216,7 +238,7 @@ def build_schema_doc(db: Any, *, examples: bool = True) -> str:
         lines.append(dataset_rules)
     if examples:
         lines.append("")
-        lines.append(_examples_block(conn))
+        lines.append(_examples_block(db))
     return "\n".join(lines).strip()
 
 
@@ -245,6 +267,18 @@ def _dataset_rules(db: Any) -> str:
     «СОСТАВ ДАННЫХ»."""
     conn = db.conn
     parts = []
+    people = conn.execute(
+        "SELECT person_key, fio FROM person ORDER BY is_me DESC, person_id LIMIT 30"
+    ).fetchall()
+    if people:
+        keys = "; ".join(
+            f"'{r['person_key']}' — {r['fio']}" if r["fio"] else f"'{r['person_key']}'"
+            for r in people
+        )
+        parts.append(
+            "- Ключи людей для person_key (табельный, строкой; ФИО — колонка fio): "
+            + keys + "."
+        )
     if db.has_aggregates:
         levels = conn.execute(
             "SELECT DISTINCT level_name FROM peer_aggregate "
@@ -266,7 +300,8 @@ def _dataset_rules(db: Any) -> str:
     if db.has_stars:
         parts.append(
             "- Есть звёзды: именные показатели без чисел (получена/не получена). "
-            "v_star — строка на звезду с влияющими показателями одной строкой, "
+            "v_star — строка на звезду за каждый её период (period_rank = 1 — последний) "
+            "с влияющими показателями за этот период одной строкой, "
             "v_star_metric — те же показатели построчно."
         )
     if db.has_ratings:
@@ -290,10 +325,18 @@ def _example_slots(conn) -> dict[str, str]:
     }
 
 
-def _examples_block(conn) -> str:
-    slots = _example_slots(conn)
+def _examples_for(db: Any) -> list[tuple[str, str]]:
+    """Общие примеры плюс примеры под состав датасета (звёзды)."""
+    examples = list(SQL_EXAMPLES)
+    if db.has_stars:
+        examples.extend(STAR_SQL_EXAMPLES)
+    return examples
+
+
+def _examples_block(db: Any) -> str:
+    slots = _example_slots(db.conn)
     parts = ["ПРИМЕРЫ ЗАПРОСОВ"]
-    for request, sql in SQL_EXAMPLES:
+    for request, sql in _examples_for(db):
         parts.append(f"-- {request}:\n{sql.format(**slots)}")
     return "\n\n".join(parts)
 
@@ -304,8 +347,8 @@ def sql_examples(db: Any) -> list[dict[str, Any]]:
     slots = _example_slots(db.conn)
     return [
         {"request": request, "params": {"sql": sql.format(**slots), "purpose": request}}
-        for request, sql in SQL_EXAMPLES
+        for request, sql in _examples_for(db)
     ]
 
 
-__all__ = ["COLUMN_DOCS", "SQL_EXAMPLES", "build_schema_doc", "sql_examples"]
+__all__ = ["COLUMN_DOCS", "SQL_EXAMPLES", "STAR_SQL_EXAMPLES", "build_schema_doc", "sql_examples"]

@@ -182,3 +182,69 @@ def test_catalog_block_follows_person_tree():
     # У второго HOLD — самостоятельный показатель верхнего уровня, TALK показан
     # по сводному дереву каталога (у него самого TALK нет).
     assert "- HOLD" in second and "  - HOLD" not in second
+
+
+def test_stars_block_last_period_then_previous_missed_first():
+    """Звёзды за несколько периодов: сначала последний период (неполученные
+    выше полученных), затем предыдущий; показатели — за период звезды.
+    Третий период назад в блок не попадает."""
+    csi = [
+        make_metric("CSI", date=d, fact=f, plan=4.5, is_star_metric=True)
+        for d, f in (("2026-03-16", 4.0), ("2026-04-13", 4.4), ("2026-05-11", 4.1))
+    ]
+    conv = [
+        make_metric("Конверсия", date=d, fact=f, plan=12.0, is_star_metric=True)
+        for d, f in (("2026-03-16", 11.0), ("2026-04-13", 11.5), ("2026-05-11", 13.4))
+    ]
+    quality = [
+        make_metric("Звезда качества", date=d, fact=None, star_received=r,
+                    calc_period="месяц", children=csi if d == "2026-05-11" else None)
+        for d, r in (("2026-05-11", False), ("2026-04-13", True), ("2026-03-16", False))
+    ]
+    sales = [
+        make_metric("Звезда продаж", date=d, fact=None, star_received=r,
+                    calc_period="месяц", children=conv if d == "2026-05-11" else None)
+        for d, r in (("2026-05-11", True), ("2026-04-13", False), ("2026-03-16", False))
+    ]
+    text = enrich.stars_block(_db(make_dataset_obj(quality + sales)))
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert lines[0].startswith("ЗВЁЗДЫ")
+    assert lines[1] == "Последний период (2026-05-11):"
+    assert lines[2].startswith("- Звезда качества: не получена")
+    assert "CSI: факт 4.1 при плане 4.5" in lines[2]
+    assert lines[3].startswith("- Звезда продаж: получена")
+    assert "Конверсия: факт 13.4 при плане 12" in lines[3]
+    assert lines[4] == "Предыдущий период (2026-04-13):"
+    assert lines[5].startswith("- Звезда продаж: не получена")
+    assert "Конверсия: факт 11.5 при плане 12" in lines[5]
+    assert lines[6].startswith("- Звезда качества: получена")
+    assert "CSI: факт 4.4 при плане 4.5" in lines[6]
+    assert "2026-03-16" not in text
+
+
+def test_stars_block_dates_per_star_when_periods_differ():
+    """Если у звёзд последние даты не совпадают, дата ставится у каждой звезды,
+    а не в заголовке периода."""
+    quality = make_metric("Звезда качества", date="2026-05-11", fact=None, star_received=False,
+                          children=[make_metric("CSI", date="2026-05-11", fact=4.1, plan=4.5,
+                                                is_star_metric=True)])
+    sales = make_metric("Звезда продаж", date="2026-05-04", fact=None, star_received=True)
+    text = enrich.stars_block(_db(make_dataset_obj([quality, sales])))
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert lines[1] == "Последний период:"
+    assert lines[2].startswith("- Звезда качества (2026-05-11): не получена")
+    assert lines[3].startswith("- Звезда продаж (2026-05-04): получена")
+
+
+def test_enrichment_block_has_no_star_values():
+    """Значения звёзд (статусы, показатели, рейтинг) в системный промпт не идут:
+    модель берёт их из v_star/metric_card/star_rating. Остаётся только счётчик
+    звёзд в профиле данных."""
+    csi = make_metric("CSI", date="2026-05-11", fact=4.1, plan=4.5, is_star_metric=True)
+    star = make_metric("Звезда качества", date="2026-05-11", fact=None, star_received=False,
+                       calc_period="месяц", children=[csi])
+    text = enrich.enrichment_block(_db(make_dataset_obj([star])), person_key="100500")
+    assert "Звёзд (именных показателей без чисел): 1" in text
+    assert "ЗВЁЗДЫ" not in text
+    assert "не получена" not in text
+    assert "Рейтинг по звёздам" not in text
