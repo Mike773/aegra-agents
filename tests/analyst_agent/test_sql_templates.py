@@ -64,7 +64,7 @@ def test_optional_param_filters(db):
 
 def test_all_templates_run_on_samples():
     """Каждый шаблон исполняется на каждом демо-датасете без ошибок."""
-    for sample in ("sample_declining_ex_rr.json", "sample_star.json"):
+    for sample in ("sample_declining_ex_rr.json", "sample_star.json", "sample_star_periods.json"):
         d = core.build_run_db(load_sample(sample))
         person = d.conn.execute("SELECT person_key FROM person LIMIT 1").fetchone()[0]
         metric = d.conn.execute(

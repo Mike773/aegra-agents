@@ -17,7 +17,7 @@ BUDGET_PROFILE = 600
 BUDGET_SCOREBOARD = 4500
 BUDGET_ZONES = 400
 BUDGET_PEER = 700
-BUDGET_STARS = 800
+BUDGET_STARS = 1400
 BUDGET_GAPS = 600
 BUDGET_CATALOG = 14000
 
@@ -307,7 +307,12 @@ def peer_block(db: Any, *, person_key: str) -> str:
 
 
 def stars_block(db: Any, *, person_key: str | None = None) -> str:
-    """Звёзды и их влияющие показатели — только если звёзды есть."""
+    """Звёзды и их влияющие показатели — только если звёзды есть. Звёзды
+    приходят за несколько периодов: сначала последний период, затем
+    предыдущий; внутри периода неполученные звёзды выше полученных.
+
+    В системный промпт блок не входит (см. enrichment_block) — используется
+    в отладке и тестах как эталон выдачи enrich_stars."""
     if not db.has_stars:
         return ""
     if person_key is None:
@@ -320,10 +325,27 @@ def stars_block(db: Any, *, person_key: str | None = None) -> str:
     rows = _rows(run_template(db.conn, "enrich_stars", person_key=person_key))
     if not rows:
         return ""
-    lines = ["ЗВЁЗДЫ (строка на звезду; после двоеточия — её влияющие показатели)"]
+    lines = [
+        "ЗВЁЗДЫ (по периодам, строка на звезду; после двоеточия — её влияющие "
+        "показатели за тот же период)"
+    ]
+    titles = {1: "Последний период", 2: "Предыдущий период"}
+    # Дата в заголовке периода — только если у всех звёзд периода она одна;
+    # иначе дата ставится у каждой звезды.
+    dates_by_rank: dict[int, set[str]] = {}
     for r in rows:
+        dates_by_rank.setdefault(r["period_rank"], set()).add(str(r["star_date"]))
+    seen_ranks: list[int] = []
+    for r in rows:
+        rank = r["period_rank"]
+        shared_date = len(dates_by_rank[rank]) == 1
+        if rank not in seen_ranks:
+            seen_ranks.append(rank)
+            title = titles.get(rank, "Период")
+            lines.append(f"{title} ({r['star_date']}):" if shared_date else f"{title}:")
         status = "получена" if r["received"] else "не получена"
-        head = f"- {r['star']} ({r['star_date']}): {status}"
+        when = "" if shared_date else f" ({r['star_date']})"
+        head = f"- {r['star']}{when}: {status}"
         if r["metrics"]:
             lines.append(f"{head}. Показатели: {r['metrics']}.")
         else:
@@ -390,17 +412,20 @@ def _trim(text: str, budget: int) -> str:
 
 
 def enrichment_block(db: Any, *, person_key: str, budget_chars: int = 9000) -> str:
-    """Сводный блок обогащения: профиль, зоны, скорборд, коллеги, звёзды, пробелы.
+    """Сводный блок обогащения: профиль, зоны, скорборд, коллеги, пробелы.
+
+    Значения звёзд (статусы по периодам, их показатели, рейтинг) в промпт не
+    идут — они только мешают модели; при необходимости она берёт их из
+    v_star / metric_card / star_rating. Блок stars_block остаётся для отладки.
 
     При нехватке бюджета режется с хвоста приоритета: сначала пробелы, потом
-    звёзды/коллеги, в последнюю очередь — скорборд.
+    коллеги, в последнюю очередь — скорборд.
     """
     blocks = [
         dataset_profile_block(db),
         zones_block(db, person_key=person_key),
         scoreboard_block(db, person_key=person_key),
         peer_block(db, person_key=person_key),
-        stars_block(db, person_key=person_key),
         gaps_block(db, person_key=person_key),
     ]
     blocks = [b for b in blocks if b.strip()]

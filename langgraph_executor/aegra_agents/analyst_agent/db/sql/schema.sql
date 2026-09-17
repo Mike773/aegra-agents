@@ -322,37 +322,52 @@ JOIN person p ON EXISTS (
                     WHERE pp.person_id = p.person_id AND pp.aggregate_id = g.aggregate_id))
 WHERE g.is_current = 1;
 
--- Влияющие показатели звёзд: строка на (персона, звезда, показатель). Берутся
--- дети звезды в дереве ЭТОГО человека с признаком is_star_metric, последнее
--- значение серии без разреза. completion_pct — выполнение плана, % (ex из
--- данных либо факт / план).
+-- Влияющие показатели звёзд: строка на (персона, звезда, дата звезды,
+-- показатель). Звезда приходит копией узла на каждый период, поэтому строки
+-- есть за КАЖДУЮ дату звезды. Влияющие — дети звезды в дереве ЭТОГО человека
+-- с признаком is_star_metric; значение берётся за период звезды: последняя
+-- точка серии (без разреза) не позже даты звезды. completion_pct — выполнение
+-- плана, % (ex из данных либо факт / план).
 CREATE VIEW v_star_metric AS
 SELECT sf.person_id, p.person_key, sf.metric_id AS star_id, sm.name AS star,
+       sd.date AS star_date, sf.period_id AS star_period_id,
        cf.metric_id, cm.name AS metric, cf.fact, cf.plan, cf.ex,
        ROUND(COALESCE(cf.ex, CASE WHEN cf.plan IS NOT NULL AND cf.plan <> 0
                                   THEN cf.fact * 100.0 / cf.plan END), 1) AS completion_pct,
        a.plan_status, a.plan_dev_pct, d.date
 FROM fact sf
 JOIN person p ON p.person_id = sf.person_id
+JOIN period sd ON sd.period_id = sf.period_id
 JOIN metric sm ON sm.metric_id = sf.metric_id AND sm.is_star = 1
 JOIN metric_edge e ON e.person_id = sf.person_id AND e.parent_id = sf.metric_id
 JOIN metric cm ON cm.metric_id = e.child_id AND cm.is_star_metric = 1
 JOIN fact cf ON cf.person_id = sf.person_id AND cf.metric_id = cm.metric_id
-       AND cf.is_last_of_series = 1 AND cf.element IS NULL
+       AND cf.element IS NULL
+       AND cf.period_id = (SELECT MAX(f2.period_id) FROM fact f2
+                            WHERE f2.person_id = cf.person_id AND f2.metric_id = cf.metric_id
+                              AND f2.element IS NULL AND f2.period_id <= sf.period_id)
 JOIN period d ON d.period_id = cf.period_id
 LEFT JOIN fact_analytics a ON a.fact_id = cf.fact_id
-WHERE sf.star_received IS NOT NULL AND sf.is_last_of_series = 1;
+WHERE sf.star_received IS NOT NULL;
 
--- Звёзды: ОДНА строка на (персона, звезда) за последний период серии.
--- metrics — влияющие показатели одной строкой: «имя: факт X при плане Y,
--- выполнение Z %, вердикт; …». Обычные показатели сюда не попадают.
+-- Звёзды: ОДНА строка на (персона, звезда, дата звезды). period_rank — номер
+-- периода от конца для ЭТОЙ звезды у ЭТОГО человека (1 = последний,
+-- 2 = предыдущий, …), is_latest = 1 у последнего. metrics — влияющие показатели
+-- за период звезды одной строкой: «имя: факт X при плане Y, выполнение Z %,
+-- вердикт; …». Обычные показатели сюда не попадают.
 CREATE VIEW v_star AS
 SELECT p.person_key, p.fio, sm.name AS star, sf.star_received AS received,
        d.date AS star_date,
-       (SELECT COUNT(*) FROM v_star_metric x
-         WHERE x.person_id = sf.person_id AND x.star_id = sf.metric_id) AS n_metrics,
+       (SELECT COUNT(*) FROM fact s2
+         WHERE s2.person_id = sf.person_id AND s2.metric_id = sf.metric_id
+           AND s2.star_received IS NOT NULL AND s2.period_id >= sf.period_id) AS period_rank,
+       sf.is_last_of_series AS is_latest,
        (SELECT COUNT(*) FROM v_star_metric x
          WHERE x.person_id = sf.person_id AND x.star_id = sf.metric_id
+           AND x.star_period_id = sf.period_id) AS n_metrics,
+       (SELECT COUNT(*) FROM v_star_metric x
+         WHERE x.person_id = sf.person_id AND x.star_id = sf.metric_id
+           AND x.star_period_id = sf.period_id
            AND x.plan_status = 'хуже_плана') AS n_below_plan,
        (SELECT group_concat(line, '; ') FROM (
             SELECT x.metric || ': факт ' || COALESCE(fmt_num(x.fact), '—')
@@ -364,12 +379,13 @@ SELECT p.person_key, p.fio, sm.name AS star, sf.star_received AS received,
                            ELSE ', ' || REPLACE(x.plan_status, '_', ' ') END AS line
               FROM v_star_metric x
              WHERE x.person_id = sf.person_id AND x.star_id = sf.metric_id
+               AND x.star_period_id = sf.period_id
              ORDER BY x.plan_status = 'хуже_плана' DESC, x.metric)) AS metrics
 FROM fact sf
 JOIN metric sm ON sm.metric_id = sf.metric_id AND sm.is_star = 1
 JOIN person p ON p.person_id = sf.person_id
 JOIN period d ON d.period_id = sf.period_id
-WHERE sf.is_last_of_series = 1 AND sf.star_received IS NOT NULL;
+WHERE sf.star_received IS NOT NULL;
 
 -- Рейтинг по звёздам: строка на (человек, уровень, квартал). is_latest —
 -- последний квартал, по которому у ЭТОГО человека есть рейтинг.

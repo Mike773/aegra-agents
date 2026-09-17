@@ -230,3 +230,26 @@ def test_query_sql_few_shot_examples_run_on_the_db(db):
 def test_schema_doc_can_omit_examples(db):
     assert "ПРИМЕРЫ ЗАПРОСОВ" in core.schema_doc(db)
     assert "ПРИМЕРЫ ЗАПРОСОВ" not in core.schema_doc(db, examples=False)
+
+
+def test_schema_doc_lists_people_keys():
+    """Ключ человека — табельный, не ФИО: модель писала person_key = 'Фамилия'
+    и получала пустую выдачу. Справка перечисляет людей с их ключами."""
+    db = core.build_run_db(make_dataset_obj([make_metric("AHT", fact=1.0)]))
+    doc = core.schema_doc(db)
+    assert "'100500' — Иванов Иван Иванович" in doc
+    assert "person_key" in doc and "табельный" in doc
+
+
+def test_sql_examples_include_stars_only_with_stars():
+    plain = core.build_run_db(make_dataset_obj([make_metric("AHT", fact=1.0)]))
+    assert not any("v_star" in ex["params"]["sql"] for ex in core.sql_examples(plain))
+    star = make_metric("Звезда", fact=None, star_received=False, children=[
+        make_metric("CSI", fact=4.1, plan=4.5, is_star_metric=True),
+    ])
+    db = core.build_run_db(make_dataset_obj([star]))
+    star_examples = [ex for ex in core.sql_examples(db) if "v_star" in ex["params"]["sql"]]
+    assert len(star_examples) == 1
+    assert "person_key = '100500'" in star_examples[0]["params"]["sql"]
+    assert "period_rank" in star_examples[0]["params"]["sql"]
+    assert "v_star" in core.schema_doc(db)
