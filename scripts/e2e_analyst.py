@@ -13,6 +13,7 @@
     E2E_DASHBOARD=1 .venv/bin/python scripts/e2e_analyst.py      # составной разбор
     E2E_PEER=1 .venv/bin/python scripts/e2e_analyst.py           # с группами сравнения
     E2E_SUGGESTIONS=1 .venv/bin/python scripts/e2e_analyst.py    # кнопки-подсказки под ответом
+    E2E_CHART=1 .venv/bin/python scripts/e2e_analyst.py          # график plotly под ответом
 """
 from __future__ import annotations
 
@@ -179,6 +180,9 @@ def _print_messages(result: dict) -> None:
             print(kwargs.get("orchestrator_markdown") or m.content)
             for s in kwargs.get("orchestrator_suggestions") or []:
                 print(f"\n  [{s.get('type')}] {s.get('label')} → {s.get('content')}")
+            if kwargs.get("orchestrator_chart"):
+                print("\nГРАФИК (plotly):")
+                print(json.dumps(kwargs["orchestrator_chart"], ensure_ascii=False, indent=2))
 
 
 async def main() -> int:
@@ -208,6 +212,7 @@ async def main() -> int:
             "knowledge_enabled": bool(os.environ.get("E2E_WIKI")),
             "describe_answer": bool(os.environ.get("E2E_DESCRIBE")),
             "interactive_suggestions": bool(os.environ.get("E2E_SUGGESTIONS")),
+            "interactive_chart": bool(os.environ.get("E2E_CHART")),
             "answer_html": False,
         },
         "callbacks": [tracker],

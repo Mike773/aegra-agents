@@ -3,7 +3,7 @@
 Первая строка — метка запроса ``query UUID: <uuid4>``: у каждого запроса к
 модели свой uuid, по нему запрос находится в логах. Дальше блоки в порядке:
 бизнес-промпт (роль, принципы, стиль, структура ответа) → как
-работать инструментами → интерактивные подсказки (только по флагу) → что в
+работать инструментами → интерактивные подсказки и график (только по флагам) → что в
 этих данных → карта отклонений → память и брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
 инструмента query_sql. Бизнес-промпт заменяется целиком через
 ``system_prompt_override``; операционные блоки остаются всегда — без них модель
@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 
 from .business import BUSINESS_PROMPT, RATING_PROSE_BLOCK, STAR_PROSE_BLOCK
+from .chart import CHART_PROMPT_BLOCK
 from .describe import DESCRIBE_ANSWER_PROMPT
 from .misc import LOAD_ERROR_PROMPT, SAVE_INSIGHT_AUTO_FIXED
 from .suggestions import SUGGESTIONS_PROMPT_BLOCK
@@ -46,6 +47,9 @@ class PromptContext:
     # Режим interactive_suggestions: блок про инструмент suggest_followups.
     # Без флага блока нет — промпт совпадает с прежним.
     interactive_suggestions: bool = False
+    # Режим interactive_chart: блок про инструмент build_chart. Без флага
+    # блока нет.
+    interactive_chart: bool = False
 
 
 # Ходы, на которых модель НЕ видит историю диалога: задача составного разбора
@@ -102,6 +106,7 @@ def compose_system_prompt(ctx: PromptContext) -> str:
         business,
         tools_guide_block(ctx.tool_budget, has_sql=ctx.has_sql),
         SUGGESTIONS_PROMPT_BLOCK if ctx.interactive_suggestions else "",
+        CHART_PROMPT_BLOCK if ctx.interactive_chart else "",
         ctx.org_block,
         ctx.enrichment_block,
         ctx.knowledge_block,
@@ -117,6 +122,7 @@ def compose_system_prompt(ctx: PromptContext) -> str:
 
 __all__ = [
     "BUSINESS_PROMPT",
+    "CHART_PROMPT_BLOCK",
     "DASHBOARD_TASK_HINT",
     "DESCRIBE_ANSWER_PROMPT",
     "LOAD_ERROR_PROMPT",

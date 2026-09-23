@@ -36,6 +36,8 @@ def default_step_text(tool_name: str, args: dict[str, Any]) -> str:
         return f"📝 Отметил находку по «{metric}»" if metric else "📝 Отметил находку"
     if tool_name == "suggest_followups":
         return "💡 Подготовил варианты продолжения"
+    if tool_name == "build_chart":
+        return "📉 Построил график"
     return f"⚙️ {tool_name}"
 
 

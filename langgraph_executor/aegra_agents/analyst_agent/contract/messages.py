@@ -27,6 +27,10 @@ MARKDOWN_KEY = "orchestrator_markdown"
 # {"type": "message", "label": подпись кнопки, "content": полный вопрос}.
 # Ключа нет, если режим выключен или модель вариантов не дала.
 SUGGESTIONS_KEY = "orchestrator_suggestions"
+# График под ответом (режим interactive_chart): фигура plotly
+# {"data": [...], "layout": {...}}. Ключа нет, если режим выключен или модель
+# график не построила.
+CHART_KEY = "orchestrator_chart"
 
 TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
 
@@ -93,16 +97,20 @@ def final_message(
     text: str,
     config: RunnableConfig | None,
     suggestions: list[dict] | None = None,
+    chart: dict | None = None,
 ) -> AIMessage:
     """Итог хода с флагом; при answer_html=true content — HTML, markdown рядом.
 
-    Непустой список ``suggestions`` кладётся под ``SUGGESTIONS_KEY`` как есть."""
+    Непустой список ``suggestions`` кладётся под ``SUGGESTIONS_KEY`` как есть,
+    фигура ``chart`` — под ``CHART_KEY``."""
     kwargs: dict = {FINAL_KEY: True}
     if config_flag(config, "answer_html", default=True):
         kwargs[MARKDOWN_KEY] = text
         text = render_answer_html(text)
     if suggestions:
         kwargs[SUGGESTIONS_KEY] = list(suggestions)
+    if chart:
+        kwargs[CHART_KEY] = chart
     return AIMessage(content=text, additional_kwargs=kwargs)
 
 
@@ -163,6 +171,7 @@ def history_for_llm(messages: list[Any]) -> list[Any]:
 
 
 __all__ = [
+    "CHART_KEY",
     "FINAL_KEY",
     "MARKDOWN_KEY",
     "STEP_KEY",

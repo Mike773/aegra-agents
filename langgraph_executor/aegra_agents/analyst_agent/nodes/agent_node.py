@@ -89,9 +89,10 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             gap_on_unanswered=cfg.gap_on_unanswered,
             use_peer_aggregates=cfg.use_peer_aggregates and db.has_aggregates,
             text2sql_enabled=cfg.text2sql_enabled,
-            # Подсказки — только в обычном ходе: у задачи составного разбора
-            # продолжения пишет сводка, а у сводки инструментов нет.
+            # Подсказки и график — только в обычном ходе: у задачи составного
+            # разбора итог пишет сводка, а у сводки инструментов нет.
             interactive_suggestions=cfg.interactive_suggestions and not is_dashboard,
+            interactive_chart=cfg.interactive_chart and not is_dashboard,
         )
         tools = build_tools(ctx)
 
@@ -135,6 +136,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 has_sql=cfg.text2sql_enabled,
                 system_prompt_override=cfg.system_prompt_override,
                 interactive_suggestions=ctx.interactive_suggestions,
+                interactive_chart=ctx.interactive_chart,
             )
         )
 
@@ -183,7 +185,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             result.final_text, {**state, **update}, config, llm=llm, question=question
         )
         messages = step_updates(config, result.step_texts) + [
-            final_message(text, config, suggestions=ctx.suggestions)
+            final_message(text, config, suggestions=ctx.suggestions, chart=ctx.chart)
         ]
         update["messages"] = messages
         update["analytics_question"] = question
