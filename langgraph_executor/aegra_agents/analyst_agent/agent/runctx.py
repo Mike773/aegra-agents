@@ -27,6 +27,10 @@ class RunContext:
     # варианты следующего вопроса, которые уедут в additional_kwargs итога.
     interactive_suggestions: bool = False
     suggestions: list[dict] = field(default_factory=list)
+    # Интерактивный график: инструмент build_chart и его результат — фигура
+    # plotly, которая уедет в additional_kwargs итога.
+    interactive_chart: bool = False
+    chart: dict | None = None
     # Что нашлось в wiki за этот ход — уезжает в поля easyrag_* стейта, чтобы
     # раздел «Исходные данные» и describe_answer работали как в v4.
     wiki_queries: list[str] = field(default_factory=list)

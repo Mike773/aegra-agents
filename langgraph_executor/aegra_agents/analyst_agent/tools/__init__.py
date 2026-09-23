@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..agent.guards import clean_args
 from ..agent.runctx import RunContext
+from .chart import make_build_chart
 from .metric_card import metric_card_text
 from .peer_context import peer_context_text
 from .query_sql import make_query_sql
@@ -211,10 +212,12 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
         )
     )
 
-    # Интерактивные подсказки — только по входному параметру: без него набор
+    # Интерактивные подсказки и график — только по входным параметрам: без них набор
     # инструментов и промпт прежние.
     if ctx.interactive_suggestions:
         tools.append(make_suggest_followups(ctx))
+    if ctx.interactive_chart:
+        tools.append(make_build_chart(ctx))
 
     tools.extend(extra or [])
     return tools

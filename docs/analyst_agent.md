@@ -229,7 +229,7 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 
 Новые: `dashboard_mode`, `text2sql_enabled`, `knowledge_enabled`,
 `knowledge_max_new`, `knowledge_timeout`, `tool_budget`, `task_tool_budget`,
-`max_tasks`, `debug_dump`, `interactive_suggestions`. Ключ `format_first_answer`
+`max_tasks`, `debug_dump`, `interactive_suggestions`, `interactive_chart`. Ключ `format_first_answer`
 принимается ради совместимости, но ничего не делает: правила формата первого
 ответа влиты в промпт.
 
@@ -296,6 +296,36 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 сводке подсказок нет: у задач продолжения пишет сводка, а у сводки нет
 инструментов. В историю для модели подсказки не попадают.
 
+### Интерактивный график (`interactive_chart`)
+
+Входной параметр `configurable.interactive_chart=true` включает график plotly
+под ответом. Работает так:
+
+- в набор инструментов добавляется `build_chart` (`tools/chart.py`): модель
+  описывает график типизированным подмножеством plotly — `chart_type`
+  (`line` | `bar` | `scatter`), `title`, `x_title`, `y_title` и `traces`
+  (`{name, x: [строки], y: [числа|null], type?}`). Произвольный JSON в
+  аргументе не принимается: GigaChat-3-Ultra без явных типов шлёт `{}`.
+  Код собирает стандартную фигуру `{"data": [...], "layout": {...}}`
+  (`build_figure`): `line` → `scatter` с `mode="lines+markers"`, `scatter` →
+  `mode="markers"`; серии с разной длиной x/y, пустые и без единого числа
+  выбрасываются, серий не больше `MAX_TRACES` = 8, точек — `MAX_POINTS` = 120.
+  Не осталось ни одной серии — модель получает подсказку исправить аргументы,
+  прежняя фигура сохраняется; повторный удачный вызов перезаписывает фигуру.
+  Библиотека plotly не нужна: фигура — обычный JSON;
+- в системный промпт после блока подсказок добавляется `CHART_PROMPT_BLOCK`
+  (`prompts/chart.py`): вызвать инструмент один раз перед итогом; руководитель
+  описал график — строить его, не описал — значения главной проблемной
+  метрики (верх карты отклонений, факт и план по периодам); числа — только из
+  результатов инструментов. Описание инструмента — `CHART_TOOL_DESCRIPTION`
+  там же;
+- итог хода получает `additional_kwargs.orchestrator_chart` — фигуру plotly.
+  Ключа нет, если модель инструмент не вызвала: графика по умолчанию код сам
+  не строит.
+
+При выключенном параметре не меняется ничего. В задачах составного разбора и
+в сводке графика нет. В историю для модели график не попадает.
+
 ## Прогоны
 
 ```bash
@@ -304,6 +334,7 @@ python scripts/sql_debug.py --dataset samples_v2/sample_star.json --enrichment
 E2E_DASHBOARD=1 .venv/bin/python scripts/e2e_analyst.py       # составной разбор
 E2E_PEER=1 E2E_TURNS=2 .venv/bin/python scripts/e2e_analyst.py
 E2E_SUGGESTIONS=1 .venv/bin/python scripts/e2e_analyst.py     # кнопки-подсказки под ответом
+E2E_CHART=1 .venv/bin/python scripts/e2e_analyst.py           # график plotly под ответом
 ```
 
 Для `E2E_WIKI=1` (база знаний и кэш трактовок) нужен Postgres со схемой
