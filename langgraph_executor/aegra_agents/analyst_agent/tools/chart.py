@@ -3,7 +3,8 @@
 Модель описывает график типизированным подмножеством plotly (тип, заголовки,
 серии x/y), код чистит его и собирает стандартную фигуру
 ``{"data": [...], "layout": {...}}``, которую узел агента переносит в
-``additional_kwargs`` итога (``orchestrator_chart``). Библиотека plotly не
+``additional_kwargs`` итога (``orchestrator_chart``, обёртка —
+``contract.messages.chart_payload``). Библиотека plotly не
 нужна: фигура — обычный JSON. Привязывается только при ``interactive_chart=true``.
 """
 from __future__ import annotations

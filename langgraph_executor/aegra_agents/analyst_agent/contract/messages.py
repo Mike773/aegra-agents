@@ -27,10 +27,14 @@ MARKDOWN_KEY = "orchestrator_markdown"
 # {"type": "message", "label": подпись кнопки, "content": полный вопрос}.
 # Ключа нет, если режим выключен или модель вариантов не дала.
 SUGGESTIONS_KEY = "orchestrator_suggestions"
-# График под ответом (режим interactive_chart): фигура plotly
-# {"data": [...], "layout": {...}}. Ключа нет, если режим выключен или модель
-# график не построила.
+# График под ответом (режим interactive_chart): список из одного элемента
+# {"type": "plotly", "data": фигура {"data": [...], "layout": {...}},
+#  "tool_call_id": "interactive_chart", "title": заголовок от модели}.
+# Ключа нет, если режим выключен или модель график не построила.
 CHART_KEY = "orchestrator_chart"
+CHART_TYPE = "plotly"
+CHART_TOOL_CALL_ID = "interactive_chart"
+CHART_DEFAULT_TITLE = "График"
 
 TRACE_SECTION_TITLE = "### Как я пришёл к выводу"
 
@@ -93,6 +97,20 @@ def render_answer_html(text: str) -> str:
     return str(soup)
 
 
+def chart_payload(figure: dict) -> list[dict]:
+    """Фигура plotly → значение ``CHART_KEY``: список ровно из одного элемента.
+
+    Заголовок элемента — заголовок, который модель дала графику (он же в
+    ``layout.title`` фигуры); фигура кладётся в ``data`` как есть."""
+    title = ((figure.get("layout") or {}).get("title") or {}).get("text")
+    return [{
+        "type": CHART_TYPE,
+        "data": figure,
+        "tool_call_id": CHART_TOOL_CALL_ID,
+        "title": title or CHART_DEFAULT_TITLE,
+    }]
+
+
 def final_message(
     text: str,
     config: RunnableConfig | None,
@@ -102,7 +120,7 @@ def final_message(
     """Итог хода с флагом; при answer_html=true content — HTML, markdown рядом.
 
     Непустой список ``suggestions`` кладётся под ``SUGGESTIONS_KEY`` как есть,
-    фигура ``chart`` — под ``CHART_KEY``."""
+    фигура ``chart`` — под ``CHART_KEY`` в обёртке ``chart_payload``."""
     kwargs: dict = {FINAL_KEY: True}
     if config_flag(config, "answer_html", default=True):
         kwargs[MARKDOWN_KEY] = text
@@ -110,7 +128,7 @@ def final_message(
     if suggestions:
         kwargs[SUGGESTIONS_KEY] = list(suggestions)
     if chart:
-        kwargs[CHART_KEY] = chart
+        kwargs[CHART_KEY] = chart_payload(chart)
     return AIMessage(content=text, additional_kwargs=kwargs)
 
 
@@ -171,12 +189,16 @@ def history_for_llm(messages: list[Any]) -> list[Any]:
 
 
 __all__ = [
+    "CHART_DEFAULT_TITLE",
     "CHART_KEY",
+    "CHART_TOOL_CALL_ID",
+    "CHART_TYPE",
     "FINAL_KEY",
     "MARKDOWN_KEY",
     "STEP_KEY",
     "SUGGESTIONS_KEY",
     "TRACE_SECTION_TITLE",
+    "chart_payload",
     "config_flag",
     "config_value",
     "final_message",
