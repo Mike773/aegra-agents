@@ -2,7 +2,8 @@
 
 При включённом флаге модель описывает график инструментом ``build_chart``
 (типизированное подмножество plotly), код собирает из него фигуру plotly, а
-итог хода несёт её в ``additional_kwargs["orchestrator_chart"]``. Не вызвала
+итог хода несёт её в ``additional_kwargs["orchestrator_chart"]`` — списке из
+одного элемента ``{type: "plotly", data: фигура, tool_call_id, title}``. Не вызвала
 инструмент — графика нет. При выключенном флаге не меняется ничего: ни набор
 инструментов, ни промпт, ни итоговое сообщение.
 """
@@ -209,9 +210,22 @@ def test_final_message_carries_chart_only_when_given():
     assert messages.CHART_KEY not in none.additional_kwargs
     fig = build_figure(LINE_ARGS)
     with_chart = messages.final_message("Ответ", cfg, chart=fig)
-    assert with_chart.additional_kwargs[messages.CHART_KEY] == fig
+    assert with_chart.additional_kwargs[messages.CHART_KEY] == [{
+        "type": "plotly",
+        "data": fig,
+        "tool_call_id": "interactive_chart",
+        "title": "Продажи: факт и план",
+    }]
     assert with_chart.additional_kwargs[messages.FINAL_KEY] is True
     assert messages.CHART_KEY == "orchestrator_chart"
+
+
+def test_chart_payload_title_falls_back_when_figure_has_none():
+    fig = build_figure({**LINE_ARGS, "title": "  "})
+    assert "title" not in fig["layout"]
+    (entry,) = messages.chart_payload(fig)
+    assert entry["title"] == messages.CHART_DEFAULT_TITLE
+    assert entry["data"] is fig
 
 
 def test_history_for_llm_ignores_chart():
@@ -320,7 +334,9 @@ def test_turn_with_flag_puts_chart_into_final_message(monkeypatch):
     out = _run(monkeypatch, llm, interactive_chart=True)
     final = out["messages"][-1]
     assert final.additional_kwargs[messages.FINAL_KEY] is True
-    assert final.additional_kwargs[messages.CHART_KEY] == build_figure(LINE_ARGS)
+    assert final.additional_kwargs[messages.CHART_KEY] == messages.chart_payload(
+        build_figure(LINE_ARGS)
+    )
     assert CHART_PROMPT_BLOCK in llm.prompts[0][0].content
 
 
