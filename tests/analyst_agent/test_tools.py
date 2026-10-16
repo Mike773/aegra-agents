@@ -187,3 +187,23 @@ def test_tool_descriptions_are_russian_and_nonempty():
     for tool in build_tools(_ctx(easyrag_graph=object(), easyrag_enabled=True)):
         assert tool.description.strip()
         assert any("а" <= ch.lower() <= "я" for ch in tool.description)
+
+
+def test_metric_is_required_in_schema_sent_to_model():
+    """Модель видит metric обязательным: с `default: null` и без `required`
+    GigaChat часто звал metric_card вовсе без показателя (живой прогон)."""
+    from langchain_gigachat.utils.function_calling import convert_to_gigachat_function
+
+    ctx = _ctx(use_peer_aggregates=True)
+    tools = {t.name: t for t in build_tools(ctx)}
+    for name in ("metric_card", "peer_context"):
+        params = convert_to_gigachat_function(tools[name])["parameters"]
+        assert "metric" in params.get("required", []), name
+        assert "default" not in params["properties"]["metric"], name
+
+
+def test_metric_card_without_metric_answers_with_hint():
+    """Обязательность — только для модели: пропуск даёт подсказку, а не ошибку."""
+    out = _call(build_tools(_ctx()), "metric_card")
+    assert "Не указано название показателя" in out
+    assert "Продажи" in out
