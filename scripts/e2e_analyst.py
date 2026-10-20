@@ -132,23 +132,26 @@ class UsageTracker(BaseCallbackHandler):
         self.calls: list[dict] = []
 
     def on_llm_end(self, response, **kwargs):  # noqa: D102
+        # usage_metadata одинаков на обоих API: input_tokens включает токены
+        # из кэша префикса (X-Session-ID), cache_read — их доля. Сырые
+        # token_usage различаются: prompt_tokens на v1, input_tokens на v2.
         usage = {}
         for gen in response.generations:
             for g in gen:
-                meta = getattr(g.message, "response_metadata", {}) or {}
-                usage = dict(meta.get("token_usage") or usage)
                 um = getattr(g.message, "usage_metadata", None) or {}
-                details = um.get("input_token_details") or {}
-                usage["cache_read"] = int(details.get("cache_read") or 0)
-        self.calls.append(usage or {})
+                cached = int((um.get("input_token_details") or {}).get("cache_read") or 0)
+                usage = {
+                    "new_in": int(um.get("input_tokens") or 0) - cached,
+                    "cache_read": cached,
+                    "out": int(um.get("output_tokens") or 0),
+                }
+        self.calls.append(usage)
 
     def report(self) -> str:
-        total_in = sum(int(c.get("prompt_tokens") or 0) for c in self.calls)
-        total_out = sum(int(c.get("completion_tokens") or 0) for c in self.calls)
-        peak = max((int(c.get("prompt_tokens") or 0) for c in self.calls), default=0)
-        cached = sum(int(c.get("cache_read") or 0) for c in self.calls)
-        # prompt_tokens у GigaChat — только то, что посчитано заново; токены,
-        # взятые из кэша префикса (X-Session-ID), идут отдельным числом.
+        total_in = sum(c.get("new_in", 0) for c in self.calls)
+        total_out = sum(c.get("out", 0) for c in self.calls)
+        peak = max((c.get("new_in", 0) for c in self.calls), default=0)
+        cached = sum(c.get("cache_read", 0) for c in self.calls)
         share = round(100 * cached / (total_in + cached)) if total_in + cached else 0
         return (
             f"вызовов модели: {len(self.calls)}; токенов на вход: {total_in} новых "
