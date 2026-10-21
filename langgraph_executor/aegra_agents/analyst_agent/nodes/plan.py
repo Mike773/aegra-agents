@@ -15,7 +15,6 @@ from ..dashboard.planner import plan_tasks
 from ..dashboard.summarizer import SUMMARIZER_PROMPT_TAIL, summary_input
 from ..db import analytics, core
 from ..deviations import builder, tasks as tasks_mod
-from ..deviations.format import deviations_block
 from ..prompts import PromptContext, compose_system_prompt
 from .prepare import focus_person_key
 
@@ -102,7 +101,6 @@ def make_summarize_node(llm: Any):
         else:
             prompt = compose_system_prompt(
                 PromptContext(
-                    deviations_block=deviations_block(state.get("deviations") or []),
                     org_block="",
                     memory_context=state.get("memory_context"),
                     briefing=state.get("briefing"),

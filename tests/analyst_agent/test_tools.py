@@ -10,7 +10,6 @@ from _fixtures import make_dataset_obj, make_metric, make_person  # noqa: F401
 
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
-from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
 from langgraph_executor.aegra_agents.analyst_agent.tools import build_tools
 
 PERSON = "100500"
@@ -24,12 +23,10 @@ def _ctx(dataset=None, **kw):
                                           plan=50.0, influent_percent=60)]),
     ])
     db = core.build_run_db(dataset)
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
     return RunContext(
         db=db,
         person_key=PERSON,
         direction_key="test-dir",
-        ledger=ledger.DeviationLedger(db, devs, turn=1),
         **kw,
     )
 
@@ -50,7 +47,6 @@ def test_default_tool_set():
     tools = build_tools(_ctx())
     assert _names(tools) == {
         "query_sql", "metric_card", "peer_context",
-        "list_deviations", "note_deviation",
     }
 
 
@@ -135,21 +131,6 @@ def test_metric_card_children_follow_person_tree():
     assert "Звонки" not in out_second and "Встречи" not in out_second
 
 
-def test_list_deviations_renders_map():
-    out = _call(build_tools(_ctx()), "list_deviations", scope="all")
-    assert "Продажи" in out
-    assert "хуже плана" in out
-
-
-def test_note_deviation_persists_into_ledger():
-    ctx = _ctx()
-    tools = build_tools(ctx)
-    out = _call(tools, "note_deviation", metric="Продажи", kind="hypothesis",
-                text="сезонный спад")
-    assert "Продажи" in out
-    assert any(d.get("note") == "сезонный спад" for d in ctx.ledger.to_state())
-
-
 def test_peer_context_without_data_says_so():
     out = _call(build_tools(_ctx()), "peer_context", metric="Продажи")
     assert "не пришло" in out.lower() and "нечем" in out.lower()
@@ -173,8 +154,7 @@ def test_peer_context_renders_levels():
                          aggregates_ids=["a1"]),
         aggregates,
     )
-    ctx = RunContext(db=db, person_key=PERSON, direction_key="d",
-                     ledger=ledger.DeviationLedger(db, [], turn=1))
+    ctx = RunContext(db=db, person_key=PERSON, direction_key="d")
     out = _call(build_tools(ctx), "peer_context", metric="Продажи")
     assert "по офису" in out
     assert "120" in out            # уровень сильнейших

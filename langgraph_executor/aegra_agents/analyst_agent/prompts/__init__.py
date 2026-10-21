@@ -4,7 +4,7 @@
 модели свой uuid, по нему запрос находится в логах. Дальше блоки в порядке:
 бизнес-промпт (роль, принципы, стиль, структура ответа) → как
 работать инструментами → интерактивные подсказки и график (только по флагам) → что в
-этих данных → карта отклонений → память и брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
+этих данных → память и брифинг → подсказка хода. Схема базы в промпт не входит: она в описании
 инструмента query_sql. Бизнес-промпт заменяется целиком через
 ``system_prompt_override``; операционные блоки остаются всегда — без них модель
 не сможет обращаться к данным.
@@ -32,7 +32,6 @@ class PromptContext:
     """Всё, из чего собирается системный промпт одного хода."""
 
     enrichment_block: str = ""
-    deviations_block: str = ""
     knowledge_block: str = ""
     org_block: str = ""
     memory_context: str | None = None
@@ -110,7 +109,6 @@ def compose_system_prompt(ctx: PromptContext) -> str:
         ctx.org_block,
         ctx.enrichment_block,
         ctx.knowledge_block,
-        ctx.deviations_block,
         _memory_block(ctx),
         _briefing_block(ctx),
         ctx.task_block,

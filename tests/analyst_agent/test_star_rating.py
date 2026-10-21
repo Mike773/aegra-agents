@@ -18,7 +18,6 @@ from _fixtures import load_sample, make_dataset_obj, make_metric, make_person  #
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import core, enrich, loader
 from langgraph_executor.aegra_agents.analyst_agent.db.schema_doc import build_schema_doc
-from langgraph_executor.aegra_agents.analyst_agent.deviations import ledger
 from langgraph_executor.aegra_agents.analyst_agent.prompts import (
     PromptContext,
     compose_system_prompt,
@@ -73,8 +72,7 @@ def _dataset(*, stars: bool = True, rating: list | None = RATING, aggregates_ids
 
 
 def _ctx(db):
-    return RunContext(db=db, person_key=PERSON, direction_key="d",
-                      ledger=ledger.DeviationLedger(db, [], turn=1))
+    return RunContext(db=db, person_key=PERSON, direction_key="d")
 
 
 def _call(tools, name, **args):

@@ -30,10 +30,6 @@ def default_step_text(tool_name: str, args: dict[str, Any]) -> str:
     if tool_name == "search_wiki":
         query = _short(args.get("query"))
         return f"📖 Уточнил в базе знаний: {query}" if query else "📖 Заглянул в базу знаний"
-    if tool_name == "list_deviations":
-        return "🗂 Просмотрел карту отклонений"
-    if tool_name == "note_deviation":
-        return f"📝 Отметил находку по «{metric}»" if metric else "📝 Отметил находку"
     if tool_name == "suggest_followups":
         return "💡 Подготовил варианты продолжения"
     if tool_name == "build_chart":
