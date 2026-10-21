@@ -1,7 +1,7 @@
 """Сквозные прогоны графа на MemorySaver с фейковой моделью.
 
 Проверяем контракт хода целиком: что видит клиент (сообщения, теги, порядок),
-что переживает ход (карта отклонений), сколько раз зовётся модель.
+что переживает ход, сколько раз зовётся модель.
 """
 from __future__ import annotations
 
@@ -38,8 +38,12 @@ class FakeLLM:
         self.calls = 0
         self.prompts = []
 
-    def bind_tools(self, tools):
-        self.tools = tools
+    def bind_tools(self, tools, **kw):
+        # Обязательный инструмент главного вывода не затирает набор агента.
+        if kw.get("tool_choice"):
+            self.forced = (tools, kw["tool_choice"])
+        else:
+            self.tools = tools
         return self
 
     def invoke(self, messages):
@@ -169,7 +173,7 @@ def test_progress_can_be_disabled(monkeypatch):
     assert not [m for m in out["messages"] if m.additional_kwargs.get(STEP_KEY)]
 
 
-def test_second_turn_reuses_state_and_deviations(monkeypatch):
+def test_second_turn_reuses_state(monkeypatch):
     _patch_load(monkeypatch)
     llm = FakeLLM(["Первый ответ.", "Второй ответ."])
     app = _build(llm)
@@ -177,15 +181,12 @@ def test_second_turn_reuses_state_and_deviations(monkeypatch):
     first = asyncio.run(
         app.ainvoke({"messages": [HumanMessage(content="Разбери")]}, cfg)
     )
-    # deviations — внутренний канал: наружу не отдаётся, но чекпойнтится.
-    assert "deviations" not in first
-    assert app.get_state(cfg).values["deviations"]
+    assert first["messages"][-1].additional_kwargs["orchestrator_markdown"] == "Первый ответ."
     second = asyncio.run(
         app.ainvoke({"messages": [HumanMessage(content="А что со звонками?")]}, cfg)
     )
     assert second["messages"][-1].additional_kwargs["orchestrator_markdown"] == "Второй ответ."
-    # Карта отклонений пережила ход, данные не перезагружались.
-    assert app.get_state(cfg).values["deviations"]
+    # Данные не перезагружались, сводка первого хода сохранилась.
     assert second["metrics_summary"] == "Первый ответ."
 
 
@@ -243,7 +244,8 @@ def test_insight_written_once_with_source(monkeypatch):
         "SendAssignmentsComponent",
         FakeComponent,
     )
-    llm = FakeLLM(["Ответ."])
+    answer = "Главный фокус — продажи: 70 при плане 100."
+    llm = FakeLLM([answer, _insight_call("main_problem", "продажи", "Продажи 70 при плане 100.")])
     app = _build(llm)
     out = asyncio.run(
         app.ainvoke(
@@ -253,9 +255,15 @@ def test_insight_written_once_with_source(monkeypatch):
     )
     assert len(sent) == 1
     insight = sent[0]["insight"]
-    assert insight["type"] in ("main_problem", "achievement", "norm")
+    # Тип и суть — от модели, по её ответу; показатель сверен с каталогом,
+    # а факт и план взяты из данных, не со слов модели.
+    assert insight["type"] == "main_problem"
+    assert insight["text"] == "Продажи 70 при плане 100."
     assert insight["metric_name"] == "Продажи"
     assert insight["fact"] == 70.0 and insight["plan"] == 100.0
+    assert llm.calls == 2                                   # ответ + главный вывод
+    assert llm.forced[1] == "save_main_insight"
+    assert llm.prompts[1][-1].content == answer
     assert out["reasoning_trace"][-1]["stage"] == "assignments"
 
 
@@ -346,6 +354,11 @@ def test_dashboard_falls_back_to_plain_turn(monkeypatch):
     assert out["messages"][-1].additional_kwargs["orchestrator_markdown"] == "Обычный ответ."
 
 
+def _insight_call(kind, metric, text):
+    """Ответ модели на обязательный инструмент главного вывода."""
+    return ("save_main_insight", {"type": kind, "metric": metric, "text": text})
+
+
 def _capture_insights(monkeypatch):
     sent = []
 
@@ -371,7 +384,11 @@ _SIGNAL_KEYS = ("author", "confirmed", "signal", "signal_description")
 def test_signal_mode_adds_fields(monkeypatch):
     _patch_load(monkeypatch)
     sent = _capture_insights(monkeypatch)
-    llm = FakeLLM(["Продажи просели до 70 при плане 100.", '{"signal": true}'])
+    llm = FakeLLM([
+        "Продажи просели до 70 при плане 100.",
+        _insight_call("main_problem", "Продажи", "Продажи просели до 70 при плане 100."),
+        '{"signal": true}',
+    ])
     app = _build(llm)
     out = asyncio.run(
         app.ainvoke(
@@ -388,8 +405,8 @@ def test_signal_mode_adds_fields(monkeypatch):
     assert insight["signal"] is True
     assert insight["signal_description"] == out["analytics_answer"]
     assert "<p>" not in insight["signal_description"]      # markdown, не HTML
-    assert llm.calls == 2                                   # ответ + вердикт
-    verdict_prompt = llm.prompts[1][-1].content
+    assert llm.calls == 3                                   # ответ + вывод + вердикт
+    verdict_prompt = llm.prompts[2][-1].content
     assert "Что с продажами?" in verdict_prompt
     assert "Продажи просели" in verdict_prompt
     trace = out["reasoning_trace"][-1]
@@ -397,13 +414,14 @@ def test_signal_mode_adds_fields(monkeypatch):
     assert trace["detail"]["signal"] is True
 
 
-def test_signal_mode_norm_when_no_deviations(monkeypatch):
+def test_signal_mode_norm_when_main_insight_not_extracted(monkeypatch):
     flat = make_dataset_obj([
         make_metric("Продажи", date="2026-04-13", fact=100.0, plan=100.0),
     ])
     _patch_load(monkeypatch, dataset=flat)
     sent = _capture_insights(monkeypatch)
-    llm = FakeLLM(["Всё в норме.", '{"signal": false}'])
+    # Модель не вызвала инструмент главного вывода — уходит запись «в норме».
+    llm = FakeLLM(["Всё в норме.", "не знаю", '{"signal": false}'])
     app = _build(llm)
     asyncio.run(
         app.ainvoke(
@@ -423,7 +441,7 @@ def test_signal_mode_norm_when_no_deviations(monkeypatch):
 def test_no_signal_fields_without_run_mode(monkeypatch):
     _patch_load(monkeypatch)
     sent = _capture_insights(monkeypatch)
-    llm = FakeLLM(["Ответ."])
+    llm = FakeLLM(["Ответ.", _insight_call("achievement", "Продажи", "Продажи растут.")])
     app = _build(llm)
     asyncio.run(
         app.ainvoke(
@@ -433,16 +451,16 @@ def test_no_signal_fields_without_run_mode(monkeypatch):
     )
     assert len(sent) == 1
     assert not any(k in sent[0]["insight"] for k in _SIGNAL_KEYS)
-    assert llm.calls == 1                                   # без вердикта
+    assert llm.calls == 2                                   # без вердикта
 
 
-def test_signal_mode_no_deviations_and_no_run_mode_sends_nothing(monkeypatch):
+def test_no_main_insight_and_no_run_mode_sends_nothing(monkeypatch):
     flat = make_dataset_obj([
         make_metric("Продажи", date="2026-04-13", fact=100.0, plan=100.0),
     ])
     _patch_load(monkeypatch, dataset=flat)
     sent = _capture_insights(monkeypatch)
-    app = _build(FakeLLM(["Всё в норме."]))
+    app = _build(FakeLLM(["Всё в норме.", "не знаю"]))
     asyncio.run(
         app.ainvoke(
             {"messages": [HumanMessage(content="Разбери")]},
@@ -455,7 +473,11 @@ def test_signal_mode_no_deviations_and_no_run_mode_sends_nothing(monkeypatch):
 def test_signal_mode_verdict_failure_falls_back_to_type(monkeypatch):
     _patch_load(monkeypatch)
     sent = _capture_insights(monkeypatch)
-    llm = FakeLLM(["Продажи просели.", "не могу сказать"])
+    llm = FakeLLM([
+        "Продажи просели.",
+        _insight_call("main_problem", "Продажи", "Продажи просели."),
+        "не могу сказать",
+    ])
     app = _build(llm)
     asyncio.run(
         app.ainvoke(

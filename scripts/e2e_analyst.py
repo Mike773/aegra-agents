@@ -2,7 +2,7 @@
 
 Сервис данных здесь заглушка, поэтому датасет берём из ``samples_v2``, а
 предагрегаты peer-групп синтезируем по демо-профилям групп. Печатаем финальный
-ответ, шаги хода, трассу, карту отклонений и расход токенов — по этому выводу и
+ответ, шаги хода, трассу и расход токенов — по этому выводу и
 видно, как агент работает.
 
 Примеры::
@@ -232,16 +232,6 @@ async def main() -> int:
     print("\n" + "=" * 70 + "\nШАГИ ХОДА (трасса):")
     for i, step in enumerate(result.get("reasoning_trace") or [], 1):
         print(f"  {i}. [{step.get('kind')}] {step.get('summary')}")
-
-    state = app.get_state(config).values
-    devs = state.get("deviations") or []
-    print("\n" + "=" * 70 + f"\nКАРТА ОТКЛОНЕНИЙ (top-8 из {len(devs)}):")
-    for d in devs[:8]:
-        print(
-            f"  {d['priority']:.2f}  {d['metric_name']}"
-            + (f" ({d['element']})" if d.get("element") else "")
-            + f" — {d['kind']}"
-        )
 
     turns = int(os.environ.get("E2E_TURNS", "1"))
     if turns > 1:
