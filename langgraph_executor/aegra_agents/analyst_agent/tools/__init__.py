@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, model_validator
@@ -32,16 +32,35 @@ class _ToolArgs(BaseModel):
     получает пустое название показателя (замечено на живом прогоне). Пустые
     значения любого вида до проверки типов превращаются в «не задано», чтобы
     инструмент ответил подсказкой, а не ошибкой валидации.
+
+    `model_required` — поля, обязательные для модели, но не для Python. Они
+    объявлены `str` без default: только так они попадают в `required` схемы
+    функции (генератор схем `langchain_gigachat` снимает обязательность с
+    любого nullable-поля). Без `required` модель читает поле необязательным и
+    зовёт инструмент без него — metric_card без показателя, замечено на живом
+    прогоне. Пропуск всё равно даёт подсказку, а не ошибку валидации:
+    валидатор подставляет пустую строку, которую инструмент читает как
+    «не задано».
     """
+
+    model_required: ClassVar[tuple[str, ...]] = ()
 
     @model_validator(mode="before")
     @classmethod
     def _blanks_to_none(cls, data: Any) -> Any:
-        return clean_args(data) if isinstance(data, dict) else data
+        if not isinstance(data, dict):
+            return data
+        data = clean_args(data)
+        for name in cls.model_required:
+            if data.get(name) is None:
+                data[name] = ""
+        return data
 
 
 class MetricCardArgs(_ToolArgs):
-    metric: str | None = Field(None, description="Название показателя")
+    model_required = ("metric",)
+
+    metric: str = Field(..., description="Название показателя")
     person: str | None = Field(
         None, description="Чей результат; по умолчанию — тот, кого разбираем"
     )
@@ -53,7 +72,9 @@ class MetricCardArgs(_ToolArgs):
 
 
 class PeerContextArgs(_ToolArgs):
-    metric: str | None = Field(None, description="Название показателя")
+    model_required = ("metric",)
+
+    metric: str = Field(..., description="Название показателя")
     person: str | None = Field(None, description="Чей результат")
 
 
@@ -119,9 +140,10 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
                 "когда нужно разобраться в показателе. Разрезов у показателя бывают "
                 "сотни — карточка сама показывает худшие разрезы, а ряд по одному "
                 "конкретному разрезу даёт аргумент element. Аргументы: metric — "
-                "название показателя; person — чей результат (по умолчанию тот, кого "
+                "название показателя, обязательно; person — чей результат (по умолчанию тот, кого "
                 "разбираем); date — конкретная дата, если нужна одна; depth — сколько "
-                "уровней состава показать; element — название разреза."
+                "уровней состава показать; element — название разреза. Без metric "
+                "карточки нет: обзор всех показателей сразу — list_deviations."
             ),
         )
     )

@@ -13,6 +13,9 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[options]
+prerelease-mode = "allow"
+
 [[package]]
 name = "aegra-agents"
 version = "0.1.0"
@@ -50,7 +53,7 @@ requires-dist = [
     { name = "dowhy", marker = "extra == 'causal'", specifier = ">=0.13" },
     { name = "langchain", specifier = ">=0.3" },
     { name = "langchain-core", specifier = ">=0.3.0" },
-    { name = "langchain-gigachat", specifier = ">=0.3.0" },
+    { name = "langchain-gigachat", specifier = "==0.5.2a1" },
     { name = "langgraph", specifier = ">=0.2.50" },
     { name = "markdown2", specifier = ">=2.5.5" },
     { name = "networkx", marker = "extra == 'causal'", specifier = ">=3.0" },
@@ -699,16 +702,16 @@ wheels = [
 
 [[package]]
 name = "gigachat"
-version = "0.2.1"
+version = "0.2.4a1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/54/12/376c5379edaba910e2ddd1e286e711ad0e3d43e2008123a62dc7cd05b4bb/gigachat-0.2.1.tar.gz", hash = "sha256:4b6bb976ffd1fec22c813e2f40f100fff60efc2c50b91cc36aa6df5f888d0373", size = 34644, upload-time = "2026-04-27T07:58:13.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/fd/847ccb6c155a8061dec3edfad3d4a72e3f9b74ce376d71bee4033eba2adc/gigachat-0.2.4a1.tar.gz", hash = "sha256:c81889e06c028d2ed295a54295b5443301589764b0de0925ae3f3b3ce1fe8a47", size = 52065, upload-time = "2026-10-09T13:58:38.845Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/30/f5743775b7bcf9da5b9bdc70717c92b3a570ab3215b68a77c9eba504bcd9/gigachat-0.2.1-py3-none-any.whl", hash = "sha256:a4a4fb9e2db0905b7ab5a340d5029527a177811b8b609998d600c95e8a8a060c", size = 45150, upload-time = "2026-04-27T07:58:14.411Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/15/99ad73e363759a737e775135d61c5f2e82dc11723a6103d25e849738d908/gigachat-0.2.4a1-py3-none-any.whl", hash = "sha256:04363a572e436f14832efdab7c035bad07c270d0dc19219072abac13f54ddcf6", size = 57303, upload-time = "2026-10-09T13:58:37.618Z" },
 ]
 
 [[package]]
@@ -1078,15 +1081,15 @@ wheels = [
 
 [[package]]
 name = "langchain-gigachat"
-version = "0.5.1"
+version = "0.5.2a1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gigachat" },
     { name = "langchain-core" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/48/bb/efea48f87376d5e5332391b8acc4fe2e8d9946232a76006e122b97ccef1b/langchain_gigachat-0.5.1.tar.gz", hash = "sha256:0979813e391fb66fb356990dce36d8db23e4634b78914b03ffdade96ada718a7", size = 25920, upload-time = "2026-05-04T14:04:25.328Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c8/2a/76148b27c55913c0ec415b157ce760b8ded74bebbc9a3bfcaa3678cafaa2/langchain_gigachat-0.5.2a1.tar.gz", hash = "sha256:b6ca017465d43e4c7a59c805d214cdcf32d088ae42f494998d2b946699158aad", size = 55770, upload-time = "2026-10-09T14:19:17.075Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/88/c7/7a33997b4e5bea202732128759cd8be13a5b8863161dcb2b2f843da833d5/langchain_gigachat-0.5.1-py3-none-any.whl", hash = "sha256:900a44a4c36926118974e3cddc689b23547d3cd21d1d7649b1e979a434e66a00", size = 28562, upload-time = "2026-05-04T14:04:26.246Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/bd/8632df2c469618f3fb8c0582dd6bdb34494562e1ae24f53f6c9d17b48830/langchain_gigachat-0.5.2a1-py3-none-any.whl", hash = "sha256:91397db7bf581ccbde007de9268f0c3aba5ced454e5c762862e7cc4e2c5a63d3", size = 64867, upload-time = "2026-10-09T14:19:15.444Z" },
 ]
 
 [[package]]

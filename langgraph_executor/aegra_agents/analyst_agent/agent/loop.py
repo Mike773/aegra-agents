@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from .guards import BUDGET_NOTICE, REPEAT_NOTICE, RunGuards, clean_args
 from .session import llm_session
+from .tool_schema import bind_tools
 from .trace import default_step_text
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ async def _run_loop(
         max_rounds=max_rounds,
     )
     by_name = {t.name: t for t in tools}
-    bound = llm.bind_tools(tools) if tools else llm
+    bound = bind_tools(llm, tools) if tools else llm
 
     messages: list[Any] = [SystemMessage(content=system_prompt), *history]
     if question:
