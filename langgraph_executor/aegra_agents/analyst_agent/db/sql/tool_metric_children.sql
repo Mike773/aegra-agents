@@ -1,7 +1,7 @@
 -- name: tool_metric_children
 -- summary: Состав показателя — влияющие показатели с весами и их последними значениями
 -- params: person_key:str, metric:str, max_depth:int = 2, row_limit:int = 40
--- returns: child, child_depth, influent_percent, share_pct, date, fact, plan, plan_status, plan_dev_pct, pop_status
+-- returns: child, child_depth, influent_percent, share_pct, date, fact, plan, ex, rr, plan_status, plan_dev_pct, pop_status
 -- render: table
 --
 -- Дерево берётся у ЭТОГО человека (metric_edge.person_id): состав показателя
@@ -23,7 +23,7 @@ down(root_id, parent_id, node_id, lvl) AS (
      WHERE d.lvl < :max_depth
 )
 SELECT c.name AS child, d.lvl AS child_depth, e.influent_percent, t.share_pct,
-       f.date, f.fact, f.plan, f.plan_status, f.plan_dev_pct, f.pop_status
+       f.date, f.fact, f.plan, f.ex, f.rr, f.plan_status, f.plan_dev_pct, f.pop_status
 FROM down d
 JOIN metric c ON c.metric_id = d.node_id
 LEFT JOIN metric_edge e ON e.person_id = (SELECT person_id FROM me)
