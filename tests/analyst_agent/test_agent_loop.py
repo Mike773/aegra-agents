@@ -33,6 +33,8 @@ class ScriptedLLM:
         if not self.script:
             return AIMessage(content="Готов ответ по собранным данным.")
         item = self.script.pop(0)
+        if isinstance(item, AIMessage):
+            return item
         if isinstance(item, str):
             return AIMessage(content=item)
         name, args = item
@@ -166,12 +168,68 @@ def test_step_texts_collected_for_progress_messages():
     assert any("проверил план" in t for t in res.step_texts)
 
 
-def test_trace_steps_carry_reasoning_text():
-    llm = ScriptedLLM([("t", {}), "Итог."])
-    llm.script.insert(0, "Сначала посмотрю план.")
+def _answer_with_calls(text, *calls):
+    """Сообщение API v2: готовый ответ и вызовы инструментов вместе."""
+    return AIMessage(
+        content=text,
+        tool_calls=[
+            {"name": name, "args": args, "id": f"v2call{i}"}
+            for i, (name, args) in enumerate(calls)
+        ],
+    )
+
+
+def test_text_with_tool_call_is_final_answer_and_call_still_runs():
+    # GigaChat-3-Ultra на API v2 пишет ответ и тут же зовёт suggest_followups:
+    # варианты нужны в финальном сообщении, а второй круг модели — нет.
+    seen = []
+    llm = ScriptedLLM([
+        _answer_with_calls("Главный фокус — AHT.", ("suggest_followups", {"n": 3})),
+        "Другой ответ, которого быть не должно.",
+    ])
+    res = _run(llm, [_tool("suggest_followups", lambda n: seen.append(n) or "приняты")])
+    assert res.final_text == "Главный фокус — AHT."
+    assert res.stop_reason == "answer" and res.completed is True
+    assert seen == [3]
+    assert llm.calls == 1
+    assert [s["tool"] for s in res.tool_steps] == ["suggest_followups"]
+
+
+def test_text_with_several_calls_runs_them_all():
+    seen = []
+    tools = [
+        _tool("build_chart", lambda title: seen.append(("chart", title)) or "ок"),
+        _tool("suggest_followups", lambda n: seen.append(("sugg", n)) or "ок"),
+    ]
+    llm = ScriptedLLM([
+        _answer_with_calls(
+            "Ответ.", ("build_chart", {"title": "AHT"}), ("suggest_followups", {"n": 2})
+        ),
+    ])
+    res = _run(llm, tools)
+    assert res.final_text == "Ответ."
+    assert seen == [("chart", "AHT"), ("sugg", 2)]
+
+
+def test_text_with_repeated_call_does_not_rerun_it():
+    # Ultra прикладывает к ответу тот же build_chart, что уже был: гвард повтора
+    # действует и здесь, а ответ всё равно принимается.
+    seen = []
+    llm = ScriptedLLM([
+        ("build_chart", {"title": "AHT"}),
+        _answer_with_calls("Ответ.", ("build_chart", {"title": "AHT"})),
+    ])
+    res = _run(llm, [_tool("build_chart", lambda title: seen.append(title) or "ок")])
+    assert res.final_text == "Ответ."
+    assert seen == ["AHT"]
+    assert llm.calls == 2
+
+
+def test_whitespace_text_with_call_is_not_an_answer():
+    llm = ScriptedLLM([_answer_with_calls("  \n", ("t", {})), "Итог."])
     res = _run(llm, [_tool("t", lambda: "ок")])
-    # Текст перед вызовом инструмента сохраняется как мотивация вызова.
-    assert res.final_text == "Итог." or res.final_text == "Сначала посмотрю план."
+    assert res.final_text == "Итог."
+    assert llm.calls == 2
 
 
 def test_guards_are_per_run():

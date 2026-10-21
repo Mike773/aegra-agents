@@ -10,6 +10,13 @@
 
 Финальный текст модели — это и есть ответ руководителю: стадии пересказа нет,
 правила формулировок лежат в системном промпте.
+
+Ответ — любое сообщение модели с текстом. На API v2 GigaChat-3-Ultra пишет
+готовый ответ и в том же сообщении вызывает инструмент (чаще всего
+suggest_followups или build_chart). Такие вызовы выполняются — их результат
+нужен в финальном сообщении, — но цепочка на этом заканчивается: иначе модель
+пишет ответ заново и снова зовёт инструменты, пока не кончится бюджет, и
+верный первый ответ теряется.
 """
 from __future__ import annotations
 
@@ -88,6 +95,60 @@ def _step_text(tool_name: str, args: dict[str, Any], step_text_fn: Any) -> str:
         return ""
 
 
+def _tool_message(call: dict[str, Any], payload: str) -> ToolMessage:
+    return ToolMessage(content=payload, tool_call_id=call.get("id") or call["name"])
+
+
+async def _run_call(
+    call: dict[str, Any],
+    by_name: dict[str, Any],
+    guards: RunGuards,
+    result: LoopResult,
+    step_text_fn: Any,
+    stream_writer: Any,
+) -> tuple[str, bool]:
+    """Один вызов инструмента под гвардами → (выдача, пора ли заканчивать)."""
+    name = call["name"]
+    args = clean_args(call.get("args"))
+    tool = by_name.get(name)
+    if tool is None:
+        return (
+            f"Инструмента «{name}» нет. Доступны: {', '.join(by_name) or 'нет'}.",
+            guards.note_block(),
+        )
+    if guards.is_repeat(name, args):
+        return REPEAT_NOTICE, guards.note_block()
+    if guards.over_budget():
+        return BUDGET_NOTICE, guards.note_block()
+
+    guards.register(name, args)
+    try:
+        payload = await _invoke_tool(tool, args)
+    except Exception as exc:  # noqa: BLE001 — ошибка инструмента не ломает ход
+        logger.warning("agent: инструмент %s упал", name, exc_info=True)
+        payload = f"Инструмент вернул ошибку: {exc}"
+    payload = guards.clip(payload)
+    result.tool_steps.append(
+        {
+            "tool": name,
+            "args": args,
+            "result_summary": payload[:_STEP_SUMMARY_CAP],
+            # Текст вместе с вызовом теперь ответ, а не мотивация; ключ остаётся
+            # для формата трассы (describe_answer его читает).
+            "reasoning": "",
+        }
+    )
+    text = _step_text(name, args, step_text_fn)
+    if text:
+        result.step_texts.append(text)
+        if stream_writer is not None:
+            try:
+                stream_writer({"step": text})
+            except Exception:  # noqa: BLE001 — стрим не критичен
+                pass
+    return payload, False
+
+
 async def run_tool_loop(
     *,
     llm: Any,
@@ -148,7 +209,6 @@ async def _run_loop(
         messages.append(HumanMessage(content=question))
 
     result = LoopResult()
-    reasoning = ""
     rounds = 0
 
     while True:
@@ -173,57 +233,23 @@ async def _run_loop(
             result.stop_reason = "answer"
             break
 
+        text = _text_of(ai).strip()
+        if text:
+            # Текст — это ответ. Вызовы из того же сообщения выполняем, но
+            # их результат модели уже не отдаём.
+            for call in calls:
+                payload, _ = await _run_call(call, by_name, guards, result,
+                                             step_text_fn, stream_writer)
+                messages.append(_tool_message(call, payload))
+            result.final_text = text
+            result.stop_reason = "answer"
+            break
+
         # GigaChat отдаёт один вызов за сообщение; если пришло больше, берём первый.
         call = calls[0]
-        name = call["name"]
-        args = clean_args(call.get("args"))
-        text_before = _text_of(ai).strip()
-        if text_before:
-            reasoning = text_before
-
-        tool = by_name.get(name)
-        if tool is None:
-            payload = (
-                f"Инструмента «{name}» нет. Доступны: {', '.join(by_name) or 'нет'}."
-            )
-            stop = guards.note_block()
-        elif guards.is_repeat(name, args):
-            payload = REPEAT_NOTICE
-            stop = guards.note_block()
-        elif guards.over_budget():
-            payload = BUDGET_NOTICE
-            stop = guards.note_block()
-        else:
-            guards.register(name, args)
-            try:
-                payload = await _invoke_tool(tool, args)
-            except Exception as exc:  # noqa: BLE001 — ошибка инструмента не ломает ход
-                logger.warning("agent: инструмент %s упал", name, exc_info=True)
-                payload = f"Инструмент вернул ошибку: {exc}"
-            payload = guards.clip(payload)
-            summary = payload[:_STEP_SUMMARY_CAP]
-            result.tool_steps.append(
-                {
-                    "tool": name,
-                    "args": args,
-                    "result_summary": summary,
-                    "reasoning": reasoning,
-                }
-            )
-            text = _step_text(name, args, step_text_fn)
-            if text:
-                result.step_texts.append(text)
-                if stream_writer is not None:
-                    try:
-                        stream_writer({"step": text})
-                    except Exception:  # noqa: BLE001 — стрим не критичен
-                        pass
-            reasoning = ""
-            stop = False
-
-        messages.append(
-            ToolMessage(content=payload, tool_call_id=call.get("id") or name)
-        )
+        payload, stop = await _run_call(call, by_name, guards, result,
+                                        step_text_fn, stream_writer)
+        messages.append(_tool_message(call, payload))
         if stop:
             result.completed = False
             result.stop_reason = "blocked"
