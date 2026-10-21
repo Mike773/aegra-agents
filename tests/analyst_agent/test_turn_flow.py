@@ -135,8 +135,13 @@ def test_first_turn_prompt_carries_data_blocks(monkeypatch):
     assert "СХЕМА ДАННЫХ" in next(t for t in llm.tools if t.name == "query_sql").description
     assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" not in system_prompt
     assert "СОСТАВ ДАННЫХ" in system_prompt
-    assert "КАРТА ОТКЛОНЕНИЙ" in system_prompt
     assert "Продажи" in system_prompt
+    # Готовой карты отклонений модель не видит ни в промпте, ни инструментом,
+    # ни через SQL: список отклонений она составляет сама по первому запросу.
+    assert "КАРТА ОТКЛОНЕНИЙ" not in system_prompt
+    names = {t.name for t in llm.tools}
+    assert not names & {"list_deviations", "note_deviation"}
+    assert "v_deviation" not in next(t for t in llm.tools if t.name == "query_sql").description
 
 
 def test_tool_call_produces_step_message_before_final(monkeypatch):

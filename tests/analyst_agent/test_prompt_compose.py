@@ -1,7 +1,8 @@
 """analyst_agent.prompts.compose_system_prompt: один системный промпт агента.
 
 Порядок блоков фиксирован: бизнес-промпт → как работать инструментами →
-что в этих данных → карта отклонений → подсказка хода. Схема базы — в описании
+что в этих данных → подсказка хода. Карты отклонений в промпте нет: список
+отклонений модель составляет сама по алгоритму из первого запроса. Схема базы — в описании
 инструмента query_sql, в системный промпт она не входит. Бизнес-
 промпт заменяется через system_prompt_override, операционная часть остаётся всегда.
 """
@@ -16,7 +17,6 @@ from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
 def _ctx(**kw):
     base = dict(
         enrichment_block="СОСТАВ ДАННЫХ\n- В анализе: Иванов.",
-        deviations_block="КАРТА ОТКЛОНЕНИЙ\n- Продажи — хуже плана.",
         org_block="Кого анализируем: Иванов.",
         briefing="Разбери показатели",
         turn_kind="initial",
@@ -33,7 +33,6 @@ def test_block_order():
         text.index("# Структура отчета"),
         text.index("КАК РАБОТАТЬ"),
         text.index("СОСТАВ ДАННЫХ"),
-        text.index("КАРТА ОТКЛОНЕНИЙ"),
     ]
     assert positions == sorted(positions), positions
 
@@ -104,11 +103,20 @@ def test_dashboard_task_block():
 
 def test_tools_guide_mentions_budget_and_entry_points():
     """Полный список инструментов модель видит в functions; в гиде — бюджет и
-    с чего начинать: карта отклонений и карточка показателя."""
+    с чего начинать: свой список отклонений по первому запросу и карточка
+    показателя."""
     text = prompts.compose_system_prompt(_ctx(tool_budget=12))
     assert "12" in text
-    for tool in ("metric_card", "list_deviations"):
-        assert tool in text
+    assert "metric_card" in text
+    assert "первого запроса" in text
+
+
+def test_deviation_map_is_not_offered_to_model():
+    """Готовой карты отклонений модель не видит: ни блока, ни инструмента."""
+    text = prompts.compose_system_prompt(_ctx())
+    assert "list_deviations" not in text
+    assert "КАРТА ОТКЛОНЕНИЙ" not in text
+    assert not hasattr(prompts.PromptContext(), "deviations_block")
 
 
 def test_tools_guide_warns_about_differing_dates():
@@ -119,9 +127,9 @@ def test_tools_guide_warns_about_differing_dates():
 
 def test_absent_blocks_are_skipped():
     text = prompts.compose_system_prompt(
-        _ctx(deviations_block="", org_block="")
+        _ctx(org_block="")
     )
-    assert "КАРТА ОТКЛОНЕНИЙ" not in text
+    assert "Кого анализируем" not in text
     assert "\n\n\n" not in text
 
 
@@ -144,7 +152,7 @@ def test_tools_guide_keeps_only_cross_cutting_rules():
     guide = prompts.tools_guide_block(18)
     for rule in (
         "ТОЛЬКО через инструменты",
-        "карты отклонений",
+        "Готовой карты отклонений нет",
         "Один вызов инструмента за шаг",
         "Бюджет вызовов на этот ответ — 18",
         "РАЗНЫЕ даты",

@@ -19,7 +19,6 @@ from langgraph_executor.aegra_agents.analyst_agent.agent.trace import default_st
 from langgraph_executor.aegra_agents.analyst_agent.config import RunConfig
 from langgraph_executor.aegra_agents.analyst_agent.contract import messages
 from langgraph_executor.aegra_agents.analyst_agent.db import core
-from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
 from langgraph_executor.aegra_agents.analyst_agent.prompts.suggestions import (
     MAX_SUGGESTIONS,
     SUGGESTIONS_PROMPT_BLOCK,
@@ -36,10 +35,8 @@ DATASET = make_dataset_obj([
 
 def _ctx(**kw):
     db = core.build_run_db(DATASET)
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
     return RunContext(
-        db=db, person_key=PERSON, direction_key="test-dir",
-        ledger=ledger.DeviationLedger(db, devs, turn=1), **kw,
+        db=db, person_key=PERSON, direction_key="test-dir", **kw,
     )
 
 
@@ -141,7 +138,7 @@ def test_history_for_llm_ignores_suggestions():
 # --- промпт ----------------------------------------------------------------
 
 def _pctx(**kw):
-    base = dict(enrichment_block="СОСТАВ ДАННЫХ", deviations_block="КАРТА",
+    base = dict(enrichment_block="СОСТАВ ДАННЫХ",
                 turn_kind="initial")
     base.update(kw)
     return prompts.PromptContext(**base)

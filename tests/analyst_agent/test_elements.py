@@ -15,7 +15,7 @@ from _fixtures import make_dataset_obj, make_metric, make_person  # noqa: F401
 
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import core, enrich
-from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
+from langgraph_executor.aegra_agents.analyst_agent.deviations import builder
 from langgraph_executor.aegra_agents.analyst_agent.deviations.format import deviations_block
 from langgraph_executor.aegra_agents.analyst_agent.tools import build_tools
 
@@ -24,9 +24,7 @@ DATE = "2026-04-13"
 
 
 def _ctx(db):
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
-    return RunContext(db=db, person_key=PERSON, direction_key="d",
-                      ledger=ledger.DeviationLedger(db, devs, turn=1))
+    return RunContext(db=db, person_key=PERSON, direction_key="d")
 
 
 def _call(tools, name, **args):

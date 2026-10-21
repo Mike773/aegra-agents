@@ -190,11 +190,8 @@ def test_schema_doc_star_and_rank_hints_survive_without_facts_block():
 
 def _sql_ctx(db):
     from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
-    from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
-
-    devs = builder.build_deviations(db, focus_person_key="100500")
-    return RunContext(db=db, person_key="100500", direction_key="d",
-                      ledger=ledger.DeviationLedger(db, devs, turn=1))
+    
+    return RunContext(db=db, person_key="100500", direction_key="d")
 
 
 def test_query_sql_description_carries_schema(db):

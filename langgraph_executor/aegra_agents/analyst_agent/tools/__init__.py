@@ -94,21 +94,6 @@ class StarRatingArgs(_ToolArgs):
     )
 
 
-class ListDeviationsArgs(_ToolArgs):
-    scope: str | None = Field(
-        "all",
-        description="all | plan | dynamics | peers | stars | achievements | model | task:<id>",
-    )
-    metric: str | None = Field(None, description="Фильтр по показателю")
-
-
-class NoteDeviationArgs(_ToolArgs):
-    metric: str = Field(..., description="Показатель")
-    kind: str = Field(..., description="Короткий вид находки, например hypothesis")
-    text: str = Field(..., description="Суть находки")
-    element: str | None = Field(None, description="Разрез, если находка про него")
-
-
 def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]:
     """Набор инструментов под флаги запуска."""
     tools: list[Any] = []
@@ -143,7 +128,7 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
                 "название показателя, обязательно; person — чей результат (по умолчанию тот, кого "
                 "разбираем); date — конкретная дата, если нужна одна; depth — сколько "
                 "уровней состава показать; element — название разреза. Без metric "
-                "карточки нет: обзор всех показателей сразу — list_deviations."
+                "карточки нет: сводка показателей верхнего уровня — в системном промпте."
             ),
         )
     )
@@ -197,42 +182,6 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
 
     if ctx.easyrag_enabled and ctx.easyrag_graph is not None:
         tools.append(make_search_wiki(ctx))
-
-    def list_deviations(scope: str | None = "all", metric: str | None = None) -> str:
-        return ctx.ledger.render(scope=scope or "all", metric=metric)
-
-    tools.append(
-        StructuredTool.from_function(
-            func=list_deviations,
-            args_schema=ListDeviationsArgs,
-            name="list_deviations",
-            description=(
-                "Карта отклонений сотрудника целиком: уже посчитана по данным и "
-                "отранжирована по важности, в системном промпте — только её верхушка. "
-                "scope: all | plan | dynamics | peers | stars | achievements | model "
-                "| task:<id>; metric — фильтр по показателю."
-            ),
-        )
-    )
-
-    def note_deviation(
-        metric: str, kind: str, text: str, element: str | None = None
-    ) -> str:
-        return ctx.ledger.note(metric=metric, kind=kind, text=text, element=element)
-
-    tools.append(
-        StructuredTool.from_function(
-            func=note_deviation,
-            args_schema=NoteDeviationArgs,
-            name="note_deviation",
-            description=(
-                "Зафиксировать свою находку, которой нет в карте отклонений: она "
-                "переживёт следующие вопросы руководителя. Аргументы: metric — "
-                "показатель; kind — короткий вид находки (например hypothesis); "
-                "text — суть находки; element — разрез, если находка про него."
-            ),
-        )
-    )
 
     # Интерактивные подсказки и график — только по входным параметрам: без них набор
     # инструментов и промпт прежние.

@@ -20,8 +20,6 @@ from ..contract.describe import with_description
 from ..contract.messages import final_message, history_for_llm, last_user_text, step_updates
 from ..db import analytics, core, enrich
 from ..dashboard.summarizer import prior_results_digest
-from ..deviations import ledger as ledger_mod
-from ..deviations.format import deviations_block
 from ..prompts import PromptContext, compose_system_prompt
 from ..tools import build_tools
 from .prepare import focus_person_key
@@ -69,9 +67,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         cfg = RunConfig.from_config(config)
         db = await _rebuild_db(state)
         person_key = focus_person_key(db, state.get("employee_tabnum"))
-        deviations = state.get("deviations") or []
-        turn_no = int(state.get("turn_no") or 1)
-        log = ledger_mod.DeviationLedger(db, deviations, turn=turn_no)
 
         turn_kind = state.get("turn_kind") or "initial"
         tasks = state.get("tasks") or []
@@ -82,7 +77,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             db=db,
             person_key=person_key,
             direction_key=str(state.get("direction_key") or ""),
-            ledger=log,
             easyrag_graph=easyrag_graph,
             easyrag_enabled=cfg.easyrag_enabled,
             easyrag_top_k=cfg.easyrag_top_k,
@@ -96,7 +90,10 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         )
         tools = build_tools(ctx)
 
-        # Блоки промпта: посчитанные на первом ходе плюс свежая карта отклонений.
+        # Блоки промпта посчитаны на первом ходе. Карты отклонений в промпте нет:
+        # список отклонений модель составляет сама, по алгоритму из первого
+        # запроса руководителя. Карта по-прежнему считается в коде — из неё
+        # берутся главный инсайт и задачи составного разбора.
         enrichment = state.get("enrichment_block") or enrich.enrichment_block(
             db, person_key=person_key
         )
@@ -124,7 +121,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
             PromptContext(
                 enrichment_block=enrichment,
                 knowledge_block=state.get("knowledge_block") or "",
-                deviations_block=deviations_block(log.select(limit=12)),
                 org_block=_org_block(state),
                 memory_context=state.get("memory_context"),
                 briefing=state.get("briefing"),
@@ -153,7 +149,6 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
         trace = (state.get("reasoning_trace") or []) + trace_steps(result.tool_steps)
         update: dict[str, Any] = {
             "reasoning_trace": trace,
-            "deviations": log.to_state(),
             "intent": _intent_of(ctx),
             **_wiki_fields(ctx),
         }

@@ -15,7 +15,7 @@ from _fixtures import make_dataset_obj, make_metric  # noqa: F401
 from langgraph_executor.aegra_agents.analyst_agent.agent.guards import clean_args
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import analytics, core
-from langgraph_executor.aegra_agents.analyst_agent.deviations import builder, ledger
+from langgraph_executor.aegra_agents.analyst_agent.deviations import builder
 from langgraph_executor.aegra_agents.analyst_agent.tools import build_tools
 
 PERSON = "100500"
@@ -27,9 +27,7 @@ def _db(dataset):
 
 
 def _ctx(db):
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
-    return RunContext(db=db, person_key=PERSON, direction_key="d",
-                      ledger=ledger.DeviationLedger(db, devs, turn=1))
+    return RunContext(db=db, person_key=PERSON, direction_key="d")
 
 
 def _call(tools, name, **args):
@@ -209,5 +207,3 @@ def test_tool_descriptions_carry_their_own_hints():
     assert "purpose" in desc["query_sql"]
     assert "не источник чисел" in desc["search_wiki"].lower()
     assert "от узкой к широкой" in desc["peer_context"]
-    assert "отранжирован" in desc["list_deviations"]
-    assert "следующие вопросы" in desc["note_deviation"]
