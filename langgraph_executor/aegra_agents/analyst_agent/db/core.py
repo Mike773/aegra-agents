@@ -587,7 +587,6 @@ def build_run_db(
     raw_aggregates: Any = None,
     *,
     knowledge: dict[str, Any] | None = None,
-    deviations: list[dict[str, Any]] | None = None,
     compute: bool = True,
 ) -> RunDb:
     """JSON датасета (+ агрегаты peer-групп) → готовая к запросам база.

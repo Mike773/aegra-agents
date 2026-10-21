@@ -1,8 +1,8 @@
-"""Подготовка хода: база, обогащение промпта, карта отклонений.
+"""Подготовка хода: база и обогащение промпта.
 
 Сборка базы и все SQL синхронны, поэтому уводятся в поток. На первом ходе
 считаются и кладутся в стейт готовые текстовые блоки промпта — на последующих
-ходах их не пересчитываем, меняется только карта отклонений.
+ходах их не пересчитываем.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from ...metric_knowledge.sync import sync_knowledge
 from ..config import RunConfig
 from ..contract.messages import final_message, step_update
 from ..db import analytics, core, enrich
-from ..deviations import builder, tasks as tasks_mod
 from ..prompts import LOAD_ERROR_PROMPT
 from .load import metrics_obj
 
@@ -101,37 +100,18 @@ def make_prepare_node():
             enrich.enrichment_block, db, person_key=person_key
         )
 
-        # Задачи из брифинга: без dashboard_mode они всё равно смещают фокус
-        # карты отклонений на то, что просил руководитель.
-        parsed_tasks = tasks_mod.parse_tasks(state.get("briefing"))[: cfg.max_tasks]
-        resolved_tasks = (
-            await asyncio.to_thread(tasks_mod.resolve_task_metrics, db, parsed_tasks)
-            if parsed_tasks
-            else []
-        )
-        deviations = await asyncio.to_thread(
-            builder.build_deviations,
-            db,
-            focus_person_key=person_key,
-            tasks=resolved_tasks,
-            previous=state.get("deviations") or [],
-            turn=int(state.get("turn_no") or 1),
-        )
-
         n_metrics = db.conn.execute("SELECT COUNT(*) FROM metric").fetchone()[0]
         n_periods = db.conn.execute("SELECT COUNT(*) FROM period").fetchone()[0]
         step = step_update(
             config,
-            f"📊 Загрузил показатели: {n_metrics} шт., периодов {n_periods}, "
-            f"в карте отклонений {len(deviations)}.",
+            f"📊 Загрузил показатели: {n_metrics} шт., периодов {n_periods}.",
         )
         return {
             **step,
             **blocks,
-            "tasks": resolved_tasks,
+            "tasks": [],
             "task_idx": 0,
             "task_results": [],
-            "deviations": deviations,
             "knowledge_error": knowledge_error,
             "turn_kind": "dashboard" if cfg.dashboard_mode else "initial",
             "reasoning_trace": (state.get("reasoning_trace") or [])
@@ -139,10 +119,7 @@ def make_prepare_node():
                 {
                     "stage": "prepare",
                     "kind": "decision",
-                    "summary": (
-                        f"Собрал базу: показателей {n_metrics}, периодов {n_periods}, "
-                        f"отклонений {len(deviations)}."
-                    ),
+                    "summary": f"Собрал базу: показателей {n_metrics}, периодов {n_periods}.",
                     "detail": {"person_key": person_key},
                 }
             ],

@@ -15,8 +15,6 @@ from _fixtures import make_dataset_obj, make_metric, make_person  # noqa: F401
 
 from langgraph_executor.aegra_agents.analyst_agent.agent.runctx import RunContext
 from langgraph_executor.aegra_agents.analyst_agent.db import core, enrich
-from langgraph_executor.aegra_agents.analyst_agent.deviations import builder
-from langgraph_executor.aegra_agents.analyst_agent.deviations.format import deviations_block
 from langgraph_executor.aegra_agents.analyst_agent.tools import build_tools
 
 PERSON = "100500"
@@ -171,81 +169,6 @@ def _many_metrics_with_elements(n_metrics=10, n_elements=60):
     return core.build_run_db(make_dataset_obj(metrics))
 
 
-def test_aggregate_deviations_survive_many_elements():
-    db = _many_metrics_with_elements()
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
-    aggregates = [d for d in devs if not d.get("element")]
-    assert aggregates, "агрегатные отклонения полностью вытеснены разрезами"
-    assert len({d["metric_name"] for d in aggregates}) >= 5
-
-
-def test_element_deviations_capped_per_metric():
-    db = _many_metrics_with_elements()
-    from collections import Counter
-
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
-
-    per_metric = Counter(d["metric_name"] for d in devs if d.get("element"))
-    assert per_metric, "разрезы пропали совсем"
-    assert max(per_metric.values()) <= 2
-
-
-def test_prompt_block_limits_element_lines():
-    db = _many_metrics_with_elements()
-    devs = builder.build_deviations(db, focus_person_key=PERSON)
-    text = deviations_block(devs)
-    element_lines = [ln for ln in text.splitlines() if "(Разрез" in ln]
-    assert len(element_lines) <= 4
-    assert any("М" in ln and "(Разрез" not in ln for ln in text.splitlines())
-
-
-def test_immaterial_element_not_in_map():
-    """Разрез, который почти не отличается от своего агрегата, — не находка."""
-    db = core.build_run_db(make_dataset_obj([
-        make_metric("AHT", date=DATE, fact=350.0, plan=320.0, metric_type="обратная"),
-        make_metric("AHT", date=DATE, fact=324.0, plan=320.0, metric_type="обратная",
-                    element="Почти как агрегат"),
-        make_metric("AHT", date=DATE, fact=600.0, plan=320.0, metric_type="обратная",
-                    element="Вдвое хуже"),
-    ]))
-    elements = {
-        d["element"] for d in builder.build_deviations(db, focus_person_key=PERSON)
-        if d.get("element")
-    }
-    assert "Вдвое хуже" in elements
-    assert "Почти как агрегат" not in elements
-
-
-def test_element_gives_single_entry():
-    """Один разрез — одна запись, а не segment_worst плюс declining."""
-    db = core.build_run_db(make_dataset_obj([
-        make_metric("Продажи", date="2026-04-06", fact=100.0, plan=100.0),
-        make_metric("Продажи", date=DATE, fact=90.0, plan=100.0),
-        make_metric("Продажи", date="2026-04-06", fact=90.0, plan=100.0, element="Плохой"),
-        make_metric("Продажи", date=DATE, fact=30.0, plan=100.0, element="Плохой"),
-    ]))
-    devs = [
-        d for d in builder.build_deviations(db, focus_person_key=PERSON)
-        if d.get("element") == "Плохой"
-    ]
-    assert len(devs) == 1
-
-
-def test_good_element_marked_as_segment_best():
-    db = core.build_run_db(make_dataset_obj([
-        make_metric("Продажи", date=DATE, fact=100.0, plan=100.0),
-        make_metric("Продажи", date=DATE, fact=200.0, plan=100.0, element="Отличный"),
-    ]))
-    devs = [
-        d for d in builder.build_deviations(db, focus_person_key=PERSON)
-        if d.get("element") == "Отличный"
-    ]
-    assert devs and devs[0]["kind"] == "segment_best"
-    assert devs[0]["polarity"] == "positive"
-
-
-# --- 5. Карточка при сотнях разрезов --------------------------------------
-
 def test_metric_card_caps_elements_and_reports_total():
     db = core.build_run_db(make_dataset_obj(
         [make_metric("Продажи", date=DATE, fact=80.0, plan=100.0)]
@@ -299,26 +222,3 @@ def test_element_workflow_split_between_guide_and_tools():
     assert "разрез" in text.lower()
     sql_desc = make_query_sql(_ctx(_many_metrics_with_elements(n_metrics=1, n_elements=2))).description
     assert "LIKE" in sql_desc and "LIMIT" in sql_desc
-
-
-def test_prompt_block_puts_metrics_before_their_elements():
-    """Сначала показатели, потом разрезы: разрез объясняет показатель."""
-    db = _many_metrics_with_elements(n_metrics=3, n_elements=20)
-    text = deviations_block(builder.build_deviations(db, focus_person_key=PERSON))
-    body = [ln for ln in text.splitlines() if ln.startswith("- ")]
-    first_element = next(i for i, ln in enumerate(body) if "(Разрез" in ln)
-    assert not any("(Разрез" in ln for ln in body[:first_element])
-    assert any("(Разрез" not in ln for ln in body[:first_element])
-
-
-def test_prompt_block_skips_zero_change():
-    """Нулевое изменение к прошлому периоду — шум, в промпт не идёт."""
-    db = core.build_run_db(make_dataset_obj([
-        make_metric("Продажи", date="2026-04-06", fact=50.0, plan=100.0),
-        make_metric("Продажи", date=DATE, fact=50.0, plan=100.0),
-    ]))
-    text = deviations_block(builder.build_deviations(db, focus_person_key=PERSON))
-    assert "+0.0 %" not in text
-    assert "-0.0 %" not in text
-
-

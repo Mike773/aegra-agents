@@ -114,8 +114,6 @@ class AnalystState(AnalystOutput, total=False):
     enrichment_block: str
     knowledge_block: str
 
-    # Карта отклонений на весь диалог (пересобирается и дополняется каждый ход).
-    deviations: list[dict]
     insight_written: bool
 
 

@@ -13,10 +13,7 @@ from ..contract.describe import with_description
 from ..contract.messages import final_message, step_update
 from ..dashboard.planner import plan_tasks
 from ..dashboard.summarizer import SUMMARIZER_PROMPT_TAIL, summary_input
-from ..db import analytics, core
-from ..deviations import builder, tasks as tasks_mod
 from ..prompts import PromptContext, compose_system_prompt
-from .prepare import focus_person_key
 
 logger = logging.getLogger(__name__)
 
@@ -48,47 +45,25 @@ def make_plan_tasks_node(llm: Any):
                 ],
             }
 
-        # Карта отклонений пересобирается под задачи: то, что просил
-        # руководитель, поднимается в приоритете.
-        db = await asyncio.to_thread(_rebuild, state)
-        resolved = await asyncio.to_thread(tasks_mod.resolve_task_metrics, db, tasks)
-        # Тот же резолв, что и в подготовке хода: табельный из configurable
-        # может не совпадать с ключом персоны в датасете, и тогда карта
-        # отклонений собиралась бы по несуществующему человеку — то есть пустой.
-        resolved_key = focus_person_key(db, state.get("employee_tabnum"))
-        deviations = await asyncio.to_thread(
-            builder.build_deviations,
-            db,
-            focus_person_key=resolved_key,
-            tasks=resolved,
-            previous=state.get("deviations") or [],
-            turn=int(state.get("turn_no") or 1),
-        )
-        titles = "; ".join(t["title"] for t in resolved[:5])
+        titles = "; ".join(t["title"] for t in tasks[:5])
         return {
-            **step_update(config, f"🗂 Разбил запрос на {len(resolved)} задач: {titles}."),
-            "tasks": resolved,
+            **step_update(config, f"🗂 Разбил запрос на {len(tasks)} задач: {titles}."),
+            "tasks": tasks,
             "task_idx": 0,
             "task_results": [],
-            "deviations": deviations,
             "turn_kind": "dashboard",
             "reasoning_trace": (state.get("reasoning_trace") or [])
             + [
                 {
                     "stage": "plan",
                     "kind": "decision",
-                    "summary": f"Разбил запрос на {len(resolved)} задач: {titles}.",
-                    "detail": {"tasks": [t["title"] for t in resolved]},
+                    "summary": f"Разбил запрос на {len(tasks)} задач: {titles}.",
+                    "detail": {"tasks": [t["title"] for t in tasks]},
                 }
             ],
         }
 
     return plan
-
-
-def _rebuild(state: Any) -> Any:
-    db = core.build_run_db(state.get("metrics"), state.get("aggregates"))
-    return db
 
 
 def make_summarize_node(llm: Any):
