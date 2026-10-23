@@ -126,3 +126,58 @@ def test_stars_limit_map_to_open_star_metrics():
     assert rows["CSAT"]["scope"] == "звезда: Звезда качества"
     received = _rows(core.build_run_db(make_dataset_obj([star(1)])))
     assert received == {}
+
+
+# --- инструмент deviation_map --------------------------------------------
+
+def _tool_out(db, **args):
+    from types import SimpleNamespace
+
+    from langgraph_executor.aegra_agents.analyst_agent.tools.deviation_map import (
+        deviation_map_text,
+    )
+
+    ctx = SimpleNamespace(db=db, person_key=PERSON, used_data_tools=False)
+    out = deviation_map_text(ctx, **args)
+    assert ctx.used_data_tools
+    return out
+
+
+def test_tool_gives_problems_and_lists_norm_by_name(db):
+    out = _tool_out(db)
+    assert out.startswith("Карта отклонений: Иванов Иван Иванович, показатели до 2 уровня")
+    assert "- Продажи — отклонение. План: факт 80 при плане 100" in out
+    assert "- Качество — слабый сигнал." in out
+    assert "Звонки" not in out                     # без плана
+
+
+def test_tool_depth_and_person(db):
+    assert "до 1 уровня" in _tool_out(db, depth=1)
+    assert "до 9 уровня" in _tool_out(db, depth=100)
+    assert "до 2 уровня" in _tool_out(db, depth="")
+    assert _tool_out(db, person="Неведомый") == "Сотрудник «Неведомый» не найден в данных."
+    assert "Иванов" in _tool_out(db, person="100500")
+
+
+def test_tool_overflow_goes_to_names(db, monkeypatch):
+    from langgraph_executor.aegra_agents.analyst_agent.tools import deviation_map as mod
+
+    monkeypatch.setattr(mod, "_TEXT_BUDGET", 600)
+    out = _tool_out(db)
+    assert "- Продажи — отклонение." in out
+    assert "Не поместились, подробности — через metric_card: Качество (слабый сигнал)" in out
+
+
+def test_tool_empty_map():
+    d = core.build_run_db(make_dataset_obj(_series("Звонки", (50.0, 40.0), None)))
+    assert "пуста" in _tool_out(d)
+
+
+def test_names_line_is_capped(monkeypatch):
+    from langgraph_executor.aegra_agents.analyst_agent.tools import deviation_map as mod
+
+    monkeypatch.setattr(mod, "_NAMES_BUDGET", 20)
+    assert mod._names_line("В норме", ["А", "Б"]) == "В норме: А, Б."
+    assert mod._names_line("В норме", [f"Показатель {i}" for i in range(5)]) == (
+        "В норме: Показатель 0 и ещё 4."
+    )
