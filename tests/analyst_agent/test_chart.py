@@ -178,10 +178,16 @@ def test_tool_with_broken_args_returns_hint_and_keeps_previous():
 
 
 def test_tool_has_typed_schema_for_gigachat():
-    """Ultra шлёт `{}` вместо значений без явных типов — схема типизирована до листьев."""
+    """Ultra шлёт `{}` вместо значений без явных типов — схема, которую видит
+    GigaChat, типизирована до листьев (v2 проверяет test_tool_schema)."""
+    from langchain_gigachat.utils.function_calling import convert_to_gigachat_function
+
     tool = _tool(build_tools(_ctx(interactive_chart=True)), TOOL_NAME)
-    schema = tool.args_schema.model_json_schema()
+    schema = convert_to_gigachat_function(tool)["parameters"]
     props = schema["properties"]
+    assert schema["required"] == ["chart_type", "title"]
+    assert props["metric"]["type"] == "string"
+    assert props["periods"]["type"] == "integer"
     assert set(props["chart_type"]["enum"]) == {"line", "bar", "scatter"}
     assert props["title"]["type"] == "string"
     assert props["traces"]["type"] == "array"
@@ -191,6 +197,80 @@ def test_tool_has_typed_schema_for_gigachat():
     assert set(item["required"]) == {"name", "x", "y"}
     assert item["properties"]["x"]["type"] == "array"
     assert item["properties"]["y"]["type"] == "array"
+
+
+# --- режим metric: ряд берёт код -------------------------------------------
+
+def _series_ctx(n=8, *, aggregates=None, element=False):
+    dates = [f"2026-0{3 + i // 4}-{1 + 7 * (i % 4):02d}" for i in range(n)]
+    metrics = [make_metric("Продажи", date=d, fact=float(60 + i), plan=100.0)
+               for i, d in enumerate(dates)]
+    if element:
+        metrics = [make_metric("Продажи", date=d, fact=float(i), plan=10.0, element="Разрез А")
+                   for i, d in enumerate(dates)]
+    db = core.build_run_db(make_dataset_obj(metrics), aggregates)
+    return RunContext(db=db, person_key=PERSON, direction_key="t", interactive_chart=True), dates
+
+
+def test_metric_mode_takes_last_periods_from_data():
+    ctx, dates = _series_ctx(8)
+    tool = _tool(build_tools(ctx), TOOL_NAME)
+    reply = tool.invoke({"chart_type": "line", "title": "", "metric": "продажи"})
+    fact, plan = ctx.chart["data"]
+    assert fact["name"] == "Факт" and plan["name"] == "План"
+    assert fact["x"] == dates[-6:]                       # по умолчанию 6 последних
+    assert fact["y"] == [62.0, 63.0, 64.0, 65.0, 66.0, 67.0]
+    assert ctx.chart["layout"]["title"]["text"] == "продажи"
+    assert "«Продажи», периодов 6" in reply and "итоговый ответ" in reply
+
+
+def test_metric_mode_ignores_model_numbers_and_clamps_periods():
+    ctx, dates = _series_ctx(8)
+    tool = _tool(build_tools(ctx), TOOL_NAME)
+    tool.invoke({"chart_type": "line", "title": "Т", "metric": "Продажи", "periods": 3,
+                 "traces": [{"name": "Выдумка", "x": ["a"], "y": [1]}]})
+    assert [t["name"] for t in ctx.chart["data"]] == ["Факт", "План"]
+    assert ctx.chart["data"][0]["x"] == dates[-3:]
+    tool.invoke({"chart_type": "line", "title": "Т", "metric": "Продажи", "periods": 1})
+    assert len(ctx.chart["data"][0]["x"]) == 2           # минимум две точки
+    tool.invoke({"chart_type": "line", "title": "Т", "metric": "Продажи", "periods": 100})
+    assert len(ctx.chart["data"][0]["x"]) == 8           # сколько есть, до 12
+
+
+def test_metric_mode_adds_group_median_of_nearest_group():
+    aggregates = [{"aggregate_id": None, "dataset": {
+        "level": lv, "level_name": name, "metrics": [{"metric_name": "Продажи", "aggregates": {
+            "dt": "2026-04-22", "median": med, "total_objects": size,
+            "history": [{"dt": "2026-03-22", "median": med - 5}]}}]}}
+        for lv, name, med, size in (("tb", "по ТБ", 90.0, 300), ("gosb", "по ГОСБ", 80.0, 20))]
+    ctx, dates = _series_ctx(8, aggregates=aggregates)
+    _tool(build_tools(ctx), TOOL_NAME).invoke(
+        {"chart_type": "line", "title": "Т", "metric": "Продажи"})
+    median = ctx.chart["data"][-1]
+    assert median["name"] == "Медиана коллег (по ГОСБ)"
+    # Помесячные агрегаты: мартовские точки — мартовский срез, апрельские — апрельский.
+    assert median["y"] == [75.0, 75.0, 80.0, 80.0, 80.0, 80.0]
+
+
+def test_metric_mode_hints():
+    ctx, _ = _series_ctx(4, element=True)
+    tool = _tool(build_tools(ctx), TOOL_NAME)
+    assert "не найден" in tool.invoke({"chart_type": "line", "title": "Т", "metric": "Нечто"})
+    reply = tool.invoke({"chart_type": "line", "title": "Т", "metric": "Продажи"})
+    assert "передай element" in reply and ctx.chart is None
+    tool.invoke({"chart_type": "line", "title": "Т", "metric": "Продажи", "element": "Разрез А"})
+    assert ctx.chart["data"][0]["y"] == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_single_point_line_is_rejected():
+    ctx = _ctx(interactive_chart=True)
+    tool = _tool(build_tools(ctx), TOOL_NAME)
+    one = {"chart_type": "line", "title": "Т",
+           "traces": [{"name": "Факт", "x": ["2026-04-13"], "y": [70.0]}]}
+    assert "metric" in tool.invoke(one) and ctx.chart is None
+    # Сравнение столбиками по одной точке на серию — нормальный график.
+    tool.invoke({**one, "chart_type": "bar"})
+    assert ctx.chart is not None
 
 
 def test_step_text_for_tool():
@@ -264,8 +344,10 @@ def test_prompt_block_follows_suggestions_block():
 
 def test_prompt_block_names_tool_and_default_chart():
     assert TOOL_NAME in CHART_PROMPT_BLOCK
-    assert "проблемн" in CHART_PROMPT_BLOCK
-    assert "карт" in CHART_PROMPT_BLOCK.lower()
+    # По умолчанию — динамика показателя из ответа, ряд берёт код.
+    assert "подсветил в ответе" in CHART_PROMPT_BLOCK
+    assert "`metric`" in CHART_PROMPT_BLOCK and "`periods`" in CHART_PROMPT_BLOCK
+    assert "карт" not in CHART_PROMPT_BLOCK.lower()     # карты отклонений нет
 
 
 def test_prompt_block_survives_override():

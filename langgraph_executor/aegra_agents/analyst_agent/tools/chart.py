@@ -1,7 +1,14 @@
 """Инструмент ``build_chart`` — график под ответом в формате plotly.
 
-Модель описывает график типизированным подмножеством plotly (тип, заголовки,
-серии x/y), код чистит его и собирает стандартную фигуру
+Два режима. Основной — ``metric``: модель называет показатель, а ряд за
+последние ``periods`` периодов (факт, план, медиана ближайшей группы) код берёт
+из базы шаблоном ``tool_chart_series``. Модель чисел не переписывает: на
+большом объёме GigaChat их путает, а по одной последней точке строил «линию»
+из одной даты. Второй — ``traces``: график, который описал руководитель, модель
+задаёт типизированным подмножеством plotly (тип, заголовки, серии x/y); линия
+по одной точке не принимается.
+
+Код чистит описание и собирает стандартную фигуру
 ``{"data": [...], "layout": {...}}``, которую узел агента переносит в
 ``additional_kwargs`` итога (``orchestrator_chart``, обёртка —
 ``contract.messages.chart_payload``). Библиотека plotly не
@@ -15,8 +22,16 @@ from typing import Any, Literal
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..agent.guards import blank_to_none
 from ..agent.runctx import RunContext
-from ..prompts.chart import CHART_TOOL_DESCRIPTION, MAX_POINTS, MAX_TRACES
+from ..db.sqlrunner import run_template
+from ..prompts.chart import (
+    CHART_TOOL_DESCRIPTION,
+    DEFAULT_PERIODS,
+    MAX_PERIODS,
+    MAX_POINTS,
+    MAX_TRACES,
+)
 
 TOOL_NAME = "build_chart"
 
@@ -30,9 +45,16 @@ _PLOTLY_TRACE: dict[str, dict[str, str]] = {
 }
 
 _EMPTY_HINT = (
-    "График не принят: нужен хотя бы один объект в traces с полями name, x и y "
-    "одинаковой длины, где y — числа из данных. Исправь аргументы и вызови ещё "
-    "раз либо переходи к итоговому ответу без графика."
+    "График не принят: передай metric — показатель, который ты подсветил в "
+    "ответе (ряд по периодам код возьмёт из данных), либо traces — объекты с "
+    "полями name, x и y одинаковой длины, где y — числа из данных. Исправь "
+    "аргументы и вызови ещё раз либо переходи к итоговому ответу без графика."
+)
+
+_SINGLE_POINT_HINT = (
+    "График не принят: у линии одна точка — это не динамика. Передай metric — "
+    "показатель, который ты подсветил в ответе, и код построит его ряд за "
+    "последние периоды из данных."
 )
 
 
@@ -50,9 +72,30 @@ class Trace(BaseModel):
 class ChartArgs(BaseModel):
     chart_type: ChartType = Field(..., description="line | bar | scatter")
     title: str = Field(..., description="Заголовок графика")
+    metric: str | None = Field(
+        None,
+        description=(
+            "Показатель, который ты подсветил в ответе: ряд по периодам код возьмёт "
+            "из данных, traces тогда не нужны"
+        ),
+    )
+    periods: int | None = Field(
+        DEFAULT_PERIODS,
+        description=f"Сколько последних периодов показать для metric (до {MAX_PERIODS})",
+    )
+    element: str | None = Field(None, description="Разрез показателя metric, если фокус на нём")
+    person: str | None = Field(
+        None, description="Чей ряд для metric; по умолчанию — тот, кого разбираем"
+    )
     x_title: str | None = Field(None, description="Подпись оси x")
     y_title: str | None = Field(None, description="Подпись оси y")
-    traces: list[Trace] = Field(..., description=f"Серии графика, до {MAX_TRACES} штук")
+    traces: list[Trace] | None = Field(
+        None,
+        description=(
+            f"Серии графика, до {MAX_TRACES} штук — только для графика, который "
+            "описал руководитель; без metric"
+        ),
+    )
 
 
 def _number(value: Any) -> float | None:
@@ -126,26 +169,98 @@ def build_figure(raw: Any) -> dict[str, Any] | None:
     return {"data": data, "layout": layout}
 
 
+def _periods(value: Any) -> int:
+    try:
+        n = int(blank_to_none(value) or DEFAULT_PERIODS)
+    except (TypeError, ValueError):
+        n = DEFAULT_PERIODS
+    return min(max(n, 2), MAX_PERIODS)
+
+
+def metric_traces(
+    ctx: RunContext,
+    metric: Any,
+    *,
+    periods: Any = None,
+    element: Any = None,
+    person: Any = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Ряд показателя из базы → серии графика и подпись ряда для ответа модели.
+
+    Пустой список серий — график строить не из чего; вторая часть — подсказка.
+    """
+    ref = ctx.db.resolve_metric(metric)
+    if ref is None:
+        return [], f"График не принят: показатель «{metric}» не найден в данных."
+    person_key = ctx.person_key
+    person = blank_to_none(person)
+    if person:
+        resolved = ctx.db.resolve_person(person)
+        if resolved is None:
+            return [], f"График не принят: сотрудник «{person}» не найден в данных."
+        person_key = resolved
+    element = blank_to_none(element)
+    res = run_template(
+        ctx.db.conn, "tool_chart_series", person_key=person_key, metric=ref.name,
+        element=element, periods=_periods(periods),
+    )
+    rows = [dict(zip(res.columns, row)) for row in res.rows] if not res.error else []
+    if not rows or all(r["fact"] is None for r in rows):
+        where = f" по разрезу «{element}»" if element else ""
+        return [], (
+            f"График не принят: у «{ref.name}»{where} нет ряда значений. Если у "
+            "показателя только разрезы, передай element."
+        )
+    dates = [r["date"] for r in rows]
+    traces = [{"name": "Факт", "x": dates, "y": [r["fact"] for r in rows]}]
+    if any(r["plan"] not in (None, 0) for r in rows):
+        traces.append({"name": "План", "x": dates, "y": [r["plan"] for r in rows]})
+    group = rows[-1]["group_name"]
+    if any(r["median"] is not None for r in rows):
+        label = f"Медиана коллег ({group})" if group else "Медиана коллег"
+        traces.append({"name": label, "x": dates, "y": [r["median"] for r in rows]})
+    series = ", ".join(t["name"].lower() for t in traces)
+    span = dates[0] if len(dates) == 1 else f"{dates[0]} — {dates[-1]}"
+    return traces, f"«{ref.name}», периодов {len(dates)} ({span}): {series}"
+
+
 def make_build_chart(ctx: RunContext) -> StructuredTool:
     def build_chart(
         chart_type: str,
         title: str,
-        traces: list[Any],
+        metric: str | None = None,
+        periods: int | None = DEFAULT_PERIODS,
+        element: str | None = None,
+        person: str | None = None,
         x_title: str | None = None,
         y_title: str | None = None,
+        traces: list[Any] | None = None,
     ) -> str:
+        what = ""
+        if blank_to_none(metric):
+            traces, what = metric_traces(
+                ctx, metric, periods=periods, element=element, person=person
+            )
+            if not traces:
+                return what
         figure = build_figure({
-            "chart_type": chart_type, "title": title, "traces": traces,
-            "x_title": x_title, "y_title": y_title,
+            "chart_type": chart_type, "title": title or blank_to_none(metric),
+            "traces": traces, "x_title": x_title, "y_title": y_title,
         })
         if figure is None:
             return _EMPTY_HINT
+        # Линия по одной дате — не динамика: так модель «строила» график по
+        # последнему значению, которое видела в ответах инструментов.
+        if not what and all(
+            t.get("mode") == "lines+markers" and len(t["x"]) < 2 for t in figure["data"]
+        ):
+            return _SINGLE_POINT_HINT
         # Повторный вызов перезаписывает фигуру: у ответа один график.
         ctx.chart = figure
-        return (
-            f"График принят: серий {len(figure['data'])}. Теперь напиши итоговый "
-            "ответ, не пересказывая график текстом."
+        head = f"График принят: {what}." if what else (
+            f"График принят: серий {len(figure['data'])}."
         )
+        return f"{head} Теперь напиши итоговый ответ, не пересказывая график текстом."
 
     return StructuredTool.from_function(
         func=build_chart,
@@ -155,4 +270,4 @@ def make_build_chart(ctx: RunContext) -> StructuredTool:
     )
 
 
-__all__ = ["TOOL_NAME", "build_figure", "make_build_chart"]
+__all__ = ["TOOL_NAME", "build_figure", "make_build_chart", "metric_traces"]
