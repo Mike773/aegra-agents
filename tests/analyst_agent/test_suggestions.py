@@ -157,6 +157,10 @@ def test_prompt_block_only_with_flag():
 def test_prompt_block_names_tool_and_forbids_text_duplicate():
     assert TOOL_NAME in SUGGESTIONS_PROMPT_BLOCK
     assert "Варианты для углубления" in SUGGESTIONS_PROMPT_BLOCK
+    # Подпись кнопки — призыв к действию инфинитивом и суть отклонения.
+    assert "глагола в инфинитиве" in SUGGESTIONS_PROMPT_BLOCK
+    assert "«Разобрать увеличение доли переводов»" in SUGGESTIONS_PROMPT_BLOCK
+    assert "В первом ответе диалога" in SUGGESTIONS_PROMPT_BLOCK
     assert str(MAX_SUGGESTIONS) in SUGGESTIONS_PROMPT_BLOCK
 
 

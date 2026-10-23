@@ -49,6 +49,16 @@ def test_business_prompt_is_single_block():
         assert marker in text
 
 
+def test_business_prompt_closing_phrases():
+    """Последняя строка ответа: своя фраза для первого и для следующих ответов."""
+    for phrase in (
+        "Ниже другие важные отклонения (проблемы и достижения), которые я нашел. "
+        "Выбери, что хочешь рассмотреть подробнее",
+        "Ниже темы, которые предлагаю рассмотреть подробнее. Выбери какую хочешь посмотреть?",
+    ):
+        assert phrase in prompts.BUSINESS_PROMPT
+
+
 def test_override_replaces_business_but_keeps_operational():
     text = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
     assert "ТЫ ПРОСТО БОТ" in text
