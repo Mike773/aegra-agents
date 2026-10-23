@@ -14,6 +14,11 @@
 
 ``?`` в типе — необязательный параметр; после ``=`` идёт значение по умолчанию.
 Параметры биндятся как ``:name`` — конкатенации строк в SQL нет нигде.
+
+Шаблон может читать другой шаблон как подзапрос: ``-- uses: deviation_map`` в
+шапке и ``{{deviation_map}}`` в теле (обычно ``WITH d AS ({{deviation_map}})``).
+Тело подставляется при загрузке, параметры объединяются — так текстовая
+выдача и отладочная таблица считаются одним и тем же SQL.
 """
 from __future__ import annotations
 
@@ -27,7 +32,7 @@ from typing import Any, Literal
 from .text2sql import MAX_CELL, QueryResult
 
 _SQL_DIR = Path(__file__).with_name("sql")
-_HEADER_RE = re.compile(r"^--\s*(name|summary|params|returns|render)\s*:\s*(.*)$", re.I)
+_HEADER_RE = re.compile(r"^--\s*(name|summary|params|returns|render|uses)\s*:\s*(.*)$", re.I)
 _PARAM_RE = re.compile(
     r"^(?P<name>[a-zA-Z_][a-zA-Z_0-9]*)\s*:\s*(?P<type>str|int|float|bool)"
     r"(?P<optional>\?)?\s*(?:=\s*(?P<default>.+))?$"
@@ -56,6 +61,7 @@ class SqlTemplate:
     returns: list[str]
     render: str
     body: str
+    uses: tuple[str, ...] = ()
 
 
 def _parse_default(raw: str | None, type_: str) -> Any:
@@ -127,6 +133,25 @@ def _parse_template(name: str, text: str) -> SqlTemplate:
         returns=[c.strip() for c in header.get("returns", "").split(",") if c.strip()],
         render=header.get("render", "table"),
         body="\n".join(body_lines).strip(),
+        uses=tuple(u.strip() for u in header.get("uses", "").split(",") if u.strip()),
+    )
+
+
+def _inline_uses(tpl: SqlTemplate) -> SqlTemplate:
+    """Подставляет тела шаблонов из ``uses`` вместо ``{{имя}}``; параметры
+    вложенных шаблонов добавляются к своим (свои имеют приоритет)."""
+    body, params = tpl.body, {}
+    for used in tpl.uses:
+        token = "{{" + used + "}}"
+        if token not in body:
+            raise ValueError(f"{tpl.name}: в теле нет {token}, хотя он указан в uses")
+        inner = load_sql(used)
+        body = body.replace(token, inner.body.rstrip().rstrip(";"))
+        params.update(inner.params)
+    params.update(tpl.params)
+    return SqlTemplate(
+        name=tpl.name, summary=tpl.summary, params=params, returns=tpl.returns,
+        render=tpl.render, body=body, uses=tpl.uses,
     )
 
 
@@ -138,7 +163,8 @@ def load_sql(name: str) -> SqlTemplate:
     path = _SQL_DIR / f"{name}.sql"
     if not path.is_file():
         raise FileNotFoundError(f"нет шаблона {name}.sql")
-    return _parse_template(name, path.read_text(encoding="utf-8"))
+    tpl = _parse_template(name, path.read_text(encoding="utf-8"))
+    return _inline_uses(tpl) if tpl.uses else tpl
 
 
 def list_templates(prefix: str | None = None) -> list[SqlTemplate]:
