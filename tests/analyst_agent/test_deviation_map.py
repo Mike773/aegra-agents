@@ -181,3 +181,9 @@ def test_names_line_is_capped(monkeypatch):
     assert mod._names_line("В норме", [f"Показатель {i}" for i in range(5)]) == (
         "В норме: Показатель 0 и ещё 4."
     )
+
+
+def test_step_text_is_human():
+    from langgraph_executor.aegra_agents.analyst_agent.agent.trace import default_step_text
+
+    assert default_step_text("deviation_map", {"depth": 2}) == "🗺 Составил карту отклонений"

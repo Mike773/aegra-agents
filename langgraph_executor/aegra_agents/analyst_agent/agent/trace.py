@@ -23,6 +23,8 @@ def default_step_text(tool_name: str, args: dict[str, Any]) -> str:
     if tool_name == "query_sql":
         purpose = str(args.get("purpose") or "").strip()[:_PURPOSE_CAP]
         return f"📊 {purpose}" if purpose else "📊 Посчитал данные запросом"
+    if tool_name == "deviation_map":
+        return "🗺 Составил карту отклонений"
     if tool_name == "metric_card":
         return f"📈 Разобрал показатель «{metric}»" if metric else "📈 Разобрал показатель"
     if tool_name == "peer_context":
