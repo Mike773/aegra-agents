@@ -46,7 +46,7 @@ def _call(tools, name, **args):
 def test_default_tool_set():
     tools = build_tools(_ctx())
     assert _names(tools) == {
-        "query_sql", "metric_card", "peer_context",
+        "query_sql", "deviation_map", "metric_card", "peer_context",
     }
 
 

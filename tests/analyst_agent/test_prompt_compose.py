@@ -111,9 +111,11 @@ def test_tools_guide_mentions_budget_and_entry_points():
     assert "первого запроса" in text
 
 
-def test_deviation_map_is_not_offered_to_model():
-    """Готовой карты отклонений модель не видит: ни блока, ни инструмента."""
+def test_deviation_map_is_a_tool_not_a_prompt_block():
+    """Карта отклонений — инструмент, с которого начинается разбор; блоком в
+    промпте её нет."""
     text = prompts.compose_system_prompt(_ctx())
+    assert "начинай с `deviation_map`" in text
     assert "list_deviations" not in text
     assert "КАРТА ОТКЛОНЕНИЙ" not in text
     assert not hasattr(prompts.PromptContext(), "deviations_block")
@@ -152,7 +154,7 @@ def test_tools_guide_keeps_only_cross_cutting_rules():
     guide = prompts.tools_guide_block(18)
     for rule in (
         "ТОЛЬКО через инструменты",
-        "Готовой карты отклонений нет",
+        "Разбор показателей начинай с `deviation_map`",
         "Один вызов инструмента за шаг",
         "Бюджет вызовов на этот ответ — 18",
         "РАЗНЫЕ даты",
