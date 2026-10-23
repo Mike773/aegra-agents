@@ -30,7 +30,7 @@ def test_block_order():
     text = prompts.compose_system_prompt(_ctx())
     positions = [
         text.index("# Роль и Миссия"),
-        text.index("# Структура отчета"),
+        text.index("# Для общих, широких вопросов"),
         text.index("КАК РАБОТАТЬ"),
         text.index("СОСТАВ ДАННЫХ"),
     ]
@@ -44,7 +44,7 @@ def test_business_prompt_is_single_block():
     for marker in (
         "# Принципы аналитического мышления",
         "# Стиль и Язык",
-        "# Диалог и Свободная форма",
+        "# Для конкретных пользовательских инструкций",
     ):
         assert marker in text
 
@@ -53,7 +53,7 @@ def test_override_replaces_business_but_keeps_operational():
     text = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
     assert "ТЫ ПРОСТО БОТ" in text
     assert "# Роль и Миссия" not in text
-    assert "# Структура отчета" not in text
+    assert "# Для общих, широких вопросов" not in text
     # Операционные блоки остаются: без них модель не сможет работать с данными.
     assert "СОСТАВ ДАННЫХ" in text
     assert "КАК РАБОТАТЬ" in text
