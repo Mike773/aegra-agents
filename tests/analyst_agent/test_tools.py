@@ -75,6 +75,22 @@ def test_query_sql_rejects_writes_with_hint():
     assert "SELECT" in out
 
 
+def test_query_sql_star_rule_only_with_stars():
+    """Со звёздами модель предупреждена: у звезды нет fact/plan, результат —
+    признак получения; без звёзд описание прежнее."""
+    from _fixtures import load_sample
+
+    def desc(ctx):
+        return next(t for t in build_tools(ctx) if t.name == "query_sql").description
+
+    with_stars = desc(_ctx(load_sample("sample_star.json")))
+    assert "ЗВЁЗДЫ." in with_stars
+    assert "is_star" in with_stars and "star_received" in with_stars
+    assert "received в v_star" in with_stars
+    assert with_stars.index("ЗВЁЗДЫ.") < with_stars.index("v_fact(")
+    assert "ЗВЁЗДЫ." not in desc(_ctx())
+
+
 def test_query_sql_disabled_by_flag():
     assert "query_sql" not in _names(build_tools(_ctx(text2sql_enabled=False)))
 
