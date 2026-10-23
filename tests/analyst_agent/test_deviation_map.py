@@ -1,8 +1,7 @@
-"""Карта отклонений: deviation_map (числа) и deviation_problems (текст).
+"""Карта отклонений deviation_map: числа и текст проблем одним SQL.
 
-Оба шаблона — один SQL: deviation_problems подставляет deviation_map через
-``-- uses``, поэтому то, что агент читает текстом, воспроизводится таблицей
-на дампе.
+Колонка problems — то, что читает агент; остальные колонки — те же числа для
+отладки на дампе.
 """
 from __future__ import annotations
 
@@ -94,7 +93,7 @@ def test_rr_is_forecast_divided_by_plan():
 
 
 def test_problems_text_reads_against_group(db):
-    rows = _rows(db, "deviation_problems")
+    rows = _rows(db)
     assert list(rows) == ["Продажи", "Качество", "Скорость"]
     sales = rows["Продажи"]["problems"]
     assert sales.startswith("Продажи — отклонение. План: факт 80 при плане 100")
@@ -109,7 +108,7 @@ def test_problems_text_reads_against_group(db):
 
 def test_problems_without_groups():
     d = core.build_run_db(make_dataset_obj(_series("Продажи", (90.0, 80.0), 100.0)))
-    text = _rows(d, "deviation_problems")["Продажи"]["problems"]
+    text = _rows(d)["Продажи"]["problems"]
     assert "Данных по группам нет." in text and text == text.strip()
 
 
@@ -127,16 +126,3 @@ def test_stars_limit_map_to_open_star_metrics():
     assert rows["CSAT"]["scope"] == "звезда: Звезда качества"
     received = _rows(core.build_run_db(make_dataset_obj([star(1)])))
     assert received == {}
-
-
-def test_uses_inlines_body_and_merges_params():
-    tpl = sqlrunner.load_sql("deviation_problems")
-    assert "{{deviation_map}}" not in tpl.body
-    assert {"person_key", "soft_hit_rate", "rel_tol"} <= set(tpl.params)
-
-
-def test_uses_without_token_fails(monkeypatch):
-    tpl = sqlrunner.SqlTemplate(name="x", summary="", params={}, returns=[],
-                                render="table", body="SELECT 1", uses=("deviation_map",))
-    with pytest.raises(ValueError, match="deviation_map"):
-        sqlrunner._inline_uses(tpl)
