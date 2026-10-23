@@ -262,6 +262,25 @@ def test_metric_mode_hints():
     assert ctx.chart["data"][0]["y"] == [0.0, 1.0, 2.0, 3.0]
 
 
+def test_star_is_rejected_with_its_influencing_metrics():
+    star = make_metric(
+        "Звезда качества", date="2026-04-13", fact=None, star_received=0,
+        children=[make_metric("CSAT", date="2026-04-13", fact=4.0, plan=4.5,
+                              is_star_metric=True)],
+    )
+    db = core.build_run_db(make_dataset_obj([star]))
+    ctx = RunContext(db=db, person_key=PERSON, direction_key="t", interactive_chart=True)
+    tool = _tool(build_tools(ctx), TOOL_NAME)
+    reply = tool.invoke({"chart_type": "line", "title": "Т", "metric": "Звезда качества"})
+    assert "звезда, у неё нет чисел" in reply and "CSAT" in reply
+    assert ctx.chart is None
+    # Неполученная звезда — её показатели названы в описании инструмента.
+    desc = tool.description
+    assert "неполученные звёзды" in desc and "(CSAT)" in desc
+    assert "неполученные звёзды" not in _tool(build_tools(_ctx(interactive_chart=True)),
+                                               TOOL_NAME).description
+
+
 def test_single_point_line_is_rejected():
     ctx = _ctx(interactive_chart=True)
     tool = _tool(build_tools(ctx), TOOL_NAME)
@@ -348,6 +367,9 @@ def test_prompt_block_names_tool_and_default_chart():
     assert "подсветил в ответе" in CHART_PROMPT_BLOCK
     assert "`metric`" in CHART_PROMPT_BLOCK and "`periods`" in CHART_PROMPT_BLOCK
     assert "карт" not in CHART_PROMPT_BLOCK.lower()     # карты отклонений нет
+    # Нет показателя в фокусе (звёзды, рейтинг, справка) — графика нет.
+    assert "график НЕ строй" in CHART_PROMPT_BLOCK
+    assert "В фокусе звезда" in CHART_PROMPT_BLOCK
 
 
 def test_prompt_block_survives_override():

@@ -199,6 +199,25 @@ def metric_traces(
         if resolved is None:
             return [], f"График не принят: сотрудник «{person}» не найден в данных."
         person_key = resolved
+    # У звезды чисел нет: строить нечего, нужен её влияющий показатель.
+    star = ctx.db.conn.execute(
+        "SELECT m.metric_id FROM metric m WHERE m.name = ? AND m.is_star = 1", (ref.name,)
+    ).fetchone()
+    if star is not None:
+        kids = [
+            r["name"] for r in ctx.db.conn.execute(
+                "SELECT DISTINCT cm.name FROM metric_edge e "
+                "JOIN person p ON p.person_id = e.person_id "
+                "JOIN metric cm ON cm.metric_id = e.child_id AND cm.is_star_metric = 1 "
+                "WHERE p.person_key = ? AND e.parent_id = ? ORDER BY cm.name",
+                (person_key, star["metric_id"]),
+            )
+        ]
+        hint = f": {', '.join(kids)}" if kids else ""
+        return [], (
+            f"График не принят: «{ref.name}» — звезда, у неё нет чисел. Передай в "
+            f"metric её влияющий показатель из твоего ответа{hint}."
+        )
     element = blank_to_none(element)
     res = run_template(
         ctx.db.conn, "tool_chart_series", person_key=person_key, metric=ref.name,
@@ -222,6 +241,22 @@ def metric_traces(
     series = ", ".join(t["name"].lower() for t in traces)
     span = dates[0] if len(dates) == 1 else f"{dates[0]} — {dates[-1]}"
     return traces, f"«{ref.name}», периодов {len(dates)} ({span}): {series}"
+
+
+def open_star_metrics(db: Any, person_key: str) -> list[str]:
+    """Влияющие показатели звёзд, не полученных в последнем периоде."""
+    return [
+        r["name"] for r in db.conn.execute(
+            "SELECT DISTINCT cm.name FROM fact s "
+            "JOIN person p ON p.person_id = s.person_id "
+            "JOIN metric sm ON sm.metric_id = s.metric_id AND sm.is_star = 1 "
+            "JOIN metric_edge e ON e.person_id = s.person_id AND e.parent_id = s.metric_id "
+            "JOIN metric cm ON cm.metric_id = e.child_id AND cm.is_star_metric = 1 "
+            "WHERE p.person_key = ? AND s.is_last_of_series = 1 AND s.star_received = 0 "
+            "ORDER BY cm.name",
+            (person_key,),
+        )
+    ]
 
 
 def make_build_chart(ctx: RunContext) -> StructuredTool:
@@ -262,12 +297,22 @@ def make_build_chart(ctx: RunContext) -> StructuredTool:
         )
         return f"{head} Теперь напиши итоговый ответ, не пересказывая график текстом."
 
+    # При неполученных звёздах фокус ответа — их показатели (см. deviation_map),
+    # а модель строила график ещё до ответа и брала верхний показатель.
+    description = CHART_TOOL_DESCRIPTION
+    stars = open_star_metrics(ctx.db, ctx.person_key)
+    if stars:
+        description += (
+            " У сотрудника есть неполученные звёзды: по умолчанию metric — один из "
+            f"их показателей ({', '.join(stars)}), тот, что ты назвал главным фокусом."
+        )
+
     return StructuredTool.from_function(
         func=build_chart,
         args_schema=ChartArgs,
         name=TOOL_NAME,
-        description=CHART_TOOL_DESCRIPTION,
+        description=description,
     )
 
 
-__all__ = ["TOOL_NAME", "build_figure", "make_build_chart", "metric_traces"]
+__all__ = ["TOOL_NAME", "build_figure", "make_build_chart", "metric_traces", "open_star_metrics"]

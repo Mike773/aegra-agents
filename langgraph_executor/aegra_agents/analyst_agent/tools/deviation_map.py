@@ -13,6 +13,12 @@ from ..agent.guards import blank_to_none
 from ..db.sqlrunner import run_template
 
 DEFAULT_DEPTH = 2
+STARS_FOCUS_NOTE = (
+    "У сотрудника есть звёзды, поэтому в карте только показатели НЕполученных "
+    "звёзд. Главный фокус ответа выбирай среди них; показатели вне звёзд в "
+    "главный фокус не выноси, если руководитель прямо не спросил о них. График "
+    "к ответу, если он нужен, — по тому же показателю."
+)
 MAX_DEPTH = 9
 # Полные тексты — пока укладываются сюда; выдача инструмента режется на
 # DEFAULT_OUTPUT_CAP (20 000), а хвост с остальными именами должен влезть.
@@ -65,10 +71,15 @@ def deviation_map_text(ctx: Any, *, person: str | None = None, depth: Any = None
             "планом либо все звёзды получены."
         )
 
-    lines = [
+    header = (
         f"Карта отклонений: {who}, показатели до {depth} уровня. Сначала "
         "отклонения от плана, затем слабые сигналы, сильные результаты и норма."
-    ]
+    )
+    # Правило фокуса есть и в гиде промпта, но там его перевешивают бизнес-
+    # промпт и сводка верхних показателей; в выдаче инструмента модель его видит.
+    if any(str(r["scope"]).startswith("звезда") for r in rows):
+        header += " " + STARS_FOCUS_NOTE
+    lines = [header]
     used = len(lines[0])
     rest: list[str] = []
     norm: list[str] = []
@@ -90,4 +101,4 @@ def deviation_map_text(ctx: Any, *, person: str | None = None, depth: Any = None
     return "\n".join(lines)
 
 
-__all__ = ["DEFAULT_DEPTH", "deviation_map_text"]
+__all__ = ["DEFAULT_DEPTH", "STARS_FOCUS_NOTE", "deviation_map_text"]

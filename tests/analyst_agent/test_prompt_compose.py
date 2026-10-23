@@ -121,6 +121,14 @@ def test_deviation_map_is_a_tool_not_a_prompt_block():
     assert not hasattr(prompts.PromptContext(), "deviations_block")
 
 
+def test_stars_focus_rule_only_with_stars():
+    """При звёздах карта — показатели неполученных звёзд, и фокус — среди них."""
+    rule = "главный фокус ответа выбирай среди них"
+    assert rule in prompts.compose_system_prompt(_ctx(has_stars=True))
+    assert rule not in prompts.compose_system_prompt(_ctx())
+    assert rule not in prompts.tools_guide_block(18)
+
+
 def test_tools_guide_warns_about_differing_dates():
     text = prompts.compose_system_prompt(_ctx())
     assert "дат" in text.lower()

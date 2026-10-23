@@ -102,7 +102,7 @@ def compose_system_prompt(ctx: PromptContext) -> str:
 
     blocks: list[str] = [
         business,
-        tools_guide_block(ctx.tool_budget, has_sql=ctx.has_sql),
+        tools_guide_block(ctx.tool_budget, has_sql=ctx.has_sql, has_stars=ctx.has_stars),
         SUGGESTIONS_PROMPT_BLOCK if ctx.interactive_suggestions else "",
         CHART_PROMPT_BLOCK if ctx.interactive_chart else "",
         ctx.org_block,

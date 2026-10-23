@@ -121,8 +121,16 @@ def test_stars_limit_map_to_open_star_metrics():
         )
 
     metrics = [star(0), *_series("Продажи", (90.0, 80.0), 100.0)]
-    rows = _rows(core.build_run_db(make_dataset_obj(metrics)))
+    star_db = core.build_run_db(make_dataset_obj(metrics))
+    rows = _rows(star_db)
     assert list(rows) == ["CSAT"]
+    # В выдаче инструмента — правило фокуса; без звёзд его нет.
+    from langgraph_executor.aegra_agents.analyst_agent.tools.deviation_map import (
+        STARS_FOCUS_NOTE,
+    )
+    assert STARS_FOCUS_NOTE in _tool_out(star_db)
+    plain = core.build_run_db(make_dataset_obj(_series("Продажи", (90.0, 80.0), 100.0)))
+    assert STARS_FOCUS_NOTE not in _tool_out(plain)
     assert rows["CSAT"]["scope"] == "звезда: Звезда качества"
     received = _rows(core.build_run_db(make_dataset_obj([star(1)])))
     assert received == {}
