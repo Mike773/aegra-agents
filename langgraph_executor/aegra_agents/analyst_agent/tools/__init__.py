@@ -1,8 +1,9 @@
 """Инструменты агента: мало, но широкие.
 
 Каждый вызов инструмента — отдельный обмен с моделью, поэтому один вызов должен
-закрывать вопрос целиком. Отсюда `metric_card` (всё об одном показателе сразу)
-и свободный `query_sql` вместо десятка узких выборок.
+закрывать вопрос целиком. Отсюда `deviation_map` (все показатели сотрудника
+против плана, своей динамики и групп сразу), `metric_card` (всё об одном
+показателе) и свободный `query_sql` вместо десятка узких выборок.
 
 Выдача всегда человекочитаемая: она идёт прямо в контекст модели.
 """
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 from ..agent.guards import clean_args
 from ..agent.runctx import RunContext
 from .chart import make_build_chart
+from .deviation_map import DEFAULT_DEPTH, deviation_map_text
 from .metric_card import metric_card_text
 from .peer_context import peer_context_text
 from .query_sql import make_query_sql
@@ -55,6 +57,15 @@ class _ToolArgs(BaseModel):
             if data.get(name) is None:
                 data[name] = ""
         return data
+
+
+class DeviationMapArgs(_ToolArgs):
+    person: str | None = Field(
+        None, description="Чью карту (ФИО или табельный); по умолчанию — тот, кого разбираем"
+    )
+    depth: int | None = Field(
+        DEFAULT_DEPTH, description="До какого уровня дерева показателей брать (1 — верхний)"
+    )
 
 
 class MetricCardArgs(_ToolArgs):
@@ -101,6 +112,31 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
     if ctx.text2sql_enabled:
         tools.append(make_query_sql(ctx))
 
+    def deviation_map(person: str | None = None, depth: int | None = DEFAULT_DEPTH) -> str:
+        return deviation_map_text(ctx, person=person, depth=depth)
+
+    tools.append(
+        StructuredTool.from_function(
+            func=deviation_map,
+            args_schema=DeviationMapArgs,
+            name="deviation_map",
+            description=(
+                "Карта отклонений сотрудника: с неё начинается разбор показателей. По "
+                "каждому показателю с планом — выполнение плана (по run rate, иначе по "
+                "ex, иначе факт к плану), динамика к прошлому периоду, положение во "
+                "всех группах сравнения с местом в рейтинге, медианой и долей коллег, "
+                "выполняющих план, и вывод: общая это проблема группы или личная, "
+                "мягкий ли план, в числе ли лучших. Показатели упорядочены: сначала "
+                "отклонения от плана, затем слабые сигналы (план выполнен, но далеко "
+                "позади коллег), сильные результаты, норма. Если у сотрудника есть "
+                "звёзды, в карте только показатели неполученных звёзд. Аргументы: "
+                "person — чью карту (по умолчанию тот, кого разбираем); depth — до "
+                "какого уровня дерева показателей брать (1 — только верхний, по "
+                f"умолчанию {DEFAULT_DEPTH})."
+            ),
+        )
+    )
+
     def metric_card(
         metric: str | None = None,
         person: str | None = None,
@@ -122,7 +158,7 @@ def build_tools(ctx: RunContext, *, extra: list[Any] | None = None) -> list[Any]
                 "Всё об одном показателе за один вызов: описание и единицы, значения "
                 "по периодам с планом и вердиктами, худшие разрезы, состав (влияющие "
                 "показатели с весами), место среди коллег. Это первый инструмент, "
-                "когда нужно разобраться в показателе. Разрезов у показателя бывают "
+                "когда нужно разобраться в одном показателе. Разрезов у показателя бывают "
                 "сотни — карточка сама показывает худшие разрезы, а ряд по одному "
                 "конкретному разрезу даёт аргумент element. Аргументы: metric — "
                 "название показателя, обязательно; person — чей результат (по умолчанию тот, кого "

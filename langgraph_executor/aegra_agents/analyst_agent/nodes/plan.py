@@ -100,9 +100,7 @@ def make_summarize_node(llm: Any):
                 # работа не пропала.
                 text = body
 
-        described = await with_description(
-            text, state, config, llm=llm, question=state.get("briefing") or ""
-        )
+        described = with_description(text, state, config)
         return {
             "messages": [final_message(described, config)],
             "analytics_answer": text,

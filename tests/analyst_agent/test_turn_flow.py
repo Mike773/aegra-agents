@@ -140,11 +140,12 @@ def test_first_turn_prompt_carries_data_blocks(monkeypatch):
     assert "КАТАЛОГ ПОКАЗАТЕЛЕЙ" not in system_prompt
     assert "СОСТАВ ДАННЫХ" in system_prompt
     assert "Продажи" in system_prompt
-    # Готовой карты отклонений модель не видит ни в промпте, ни инструментом,
-    # ни через SQL: список отклонений она составляет сама по первому запросу.
+    # Карта отклонений — только инструментом deviation_map: ни блоком в
+    # промпте, ни через SQL (таблица deviation пустая и в схему не входит).
     assert "КАРТА ОТКЛОНЕНИЙ" not in system_prompt
     names = {t.name for t in llm.tools}
     assert not names & {"list_deviations", "note_deviation"}
+    assert "deviation_map" in names
     assert "v_deviation" not in next(t for t in llm.tools if t.name == "query_sql").description
 
 
@@ -214,7 +215,7 @@ def test_metrics_error_answers_gracefully(monkeypatch):
 
 def test_describe_answer_section_appended(monkeypatch):
     _patch_load(monkeypatch)
-    llm = FakeLLM([("metric_card", {"metric": "Продажи"}), "Итог.", "Посмотрел продажи."])
+    llm = FakeLLM([("metric_card", {"metric": "Продажи"}), "Итог."])
     app = _build(llm)
     out = asyncio.run(
         app.ainvoke(
@@ -223,8 +224,12 @@ def test_describe_answer_section_appended(monkeypatch):
         )
     )
     text = out["messages"][-1].content
-    assert "### Как я пришёл к выводу" in text
-    assert "**Исходные данные:**" in text
+    # Раздел — в конце ответа, нумерованными шагами, без лишнего вызова модели.
+    answer, section = text.split("### Как я пришёл к выводу", 1)
+    assert answer.startswith("Итог.")
+    assert "\n1. Структура:" in section and "\n2. Данные:" in section
+    assert "\n5. Инструмент `metric_card` (metric=Продажи)" in section
+    assert llm.calls == 2
 
 
 def test_insight_written_once_with_source(monkeypatch):
