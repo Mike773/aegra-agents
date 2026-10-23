@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from .business import BUSINESS_PROMPT, RATING_PROSE_BLOCK, STAR_PROSE_BLOCK
 from .chart import CHART_PROMPT_BLOCK
-from .describe import DESCRIBE_ANSWER_PROMPT
 from .misc import LOAD_ERROR_PROMPT, SAVE_INSIGHT_AUTO_FIXED
 from .suggestions import SUGGESTIONS_PROMPT_BLOCK
 from .task_hints import DASHBOARD_TASK_HINT
@@ -122,7 +121,6 @@ __all__ = [
     "BUSINESS_PROMPT",
     "CHART_PROMPT_BLOCK",
     "DASHBOARD_TASK_HINT",
-    "DESCRIBE_ANSWER_PROMPT",
     "LOAD_ERROR_PROMPT",
     "PromptContext",
     "RATING_PROSE_BLOCK",

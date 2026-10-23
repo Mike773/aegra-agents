@@ -215,7 +215,7 @@ def test_metrics_error_answers_gracefully(monkeypatch):
 
 def test_describe_answer_section_appended(monkeypatch):
     _patch_load(monkeypatch)
-    llm = FakeLLM([("metric_card", {"metric": "Продажи"}), "Итог.", "Посмотрел продажи."])
+    llm = FakeLLM([("metric_card", {"metric": "Продажи"}), "Итог."])
     app = _build(llm)
     out = asyncio.run(
         app.ainvoke(
@@ -224,8 +224,12 @@ def test_describe_answer_section_appended(monkeypatch):
         )
     )
     text = out["messages"][-1].content
-    assert "### Как я пришёл к выводу" in text
-    assert "**Исходные данные:**" in text
+    # Раздел — в конце ответа, нумерованными шагами, без лишнего вызова модели.
+    answer, section = text.split("### Как я пришёл к выводу", 1)
+    assert answer.startswith("Итог.")
+    assert "\n1. Структура:" in section and "\n2. Данные:" in section
+    assert "\n5. Инструмент `metric_card` (metric=Продажи)" in section
+    assert llm.calls == 2
 
 
 def test_insight_written_once_with_source(monkeypatch):

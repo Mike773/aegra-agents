@@ -6,8 +6,6 @@ answer_html и раздел «Как я пришёл к выводу», поэт
 """
 from __future__ import annotations
 
-import asyncio
-
 from _fixtures import make_dataset_obj, make_metric  # noqa: F401
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -99,67 +97,87 @@ def _state(**kw):
     return base
 
 
+def _dataset():
+    star = make_metric("Звезда качества", date="2026-04-13", fact=None, star_received=1,
+                       children=[make_metric("CSAT", date="2026-04-13", fact=4.6, plan=4.5,
+                                             is_star_metric=True)])
+    return make_dataset_obj(
+        [
+            make_metric("Продажи", date="2026-04-06", fact=10.0, plan=9.0),
+            make_metric("Продажи", date="2026-04-13", fact=8.0, plan=9.0,
+                        children=[make_metric("Звонки", date="2026-04-13", fact=30.0)]),
+            make_metric("Продажи", date="2026-04-13", fact=3.0, element="Канал А"),
+            star,
+        ],
+        me={"tabnum": 1, "fio": "Руководитель Р.Р.", "metrics": []},
+    )
+
+
+_AGGREGATES = [{"aggregate_id": None, "dataset": {
+    "level": lv, "level_name": name, "metrics": [{"metric_name": "Продажи", "aggregates": {
+        "dt": "2026-04-13", "median": 8.5, "history": [{"dt": "2026-04-06", "median": 8.0}]}}]}}
+    for lv, name in (("gosb", "по ГОСБ"), ("tb", "по ТБ"))]
+
+_TRACE = [
+    {"stage": "load", "kind": "decision", "summary": "Собрал базу", "detail": {}},
+    {"stage": "agent", "kind": "tool_call", "summary": "…", "detail": {
+        "tool": "metric_card", "args": {"metric": "Продажи", "person": None, "depth": 2},
+        "result_summary": "ПОКАЗАТЕЛЬ: Продажи\nОписание: …"}},
+    {"stage": "agent", "kind": "tool_call", "summary": "…", "detail": {
+        "tool": "query_sql",
+        "args": {"sql": "SELECT metric, fact\nFROM v_fact_latest\nLIMIT 5",
+                 "purpose": "последние значения"},
+        "result_summary": "| metric | fact |\n| --- | --- |\n| Продажи | 8 |"}},
+    {"stage": "agent", "kind": "error", "summary": "Модель не ответила", "detail": {}},
+]
+
+
 def test_describe_disabled_returns_text_unchanged():
-    out = asyncio.run(describe.with_description("ответ", _state(), _cfg()))
-    assert out == "ответ"
+    assert describe.with_description("ответ", _state(), _cfg()) == "ответ"
 
 
-def test_describe_appends_section_with_sources():
-    state = _state(
-        metrics=make_dataset_obj([make_metric("Продажи", fact=10.0, plan=9.0)]),
-        reasoning_trace=[{"stage": "agent", "kind": "tool_call",
-                          "summary": "query_sql(…) → 3 строки", "detail": {}}],
-    )
-    out = asyncio.run(describe.with_description("ответ", state, _cfg(describe_answer=True)))
-    assert "### Как я пришёл к выводу" in out
-    assert "**Исходные данные:**" in out
-    assert "Метрики:" in out
-    assert "query_sql" in out
-
-
-def test_describe_uses_llm_narrative_when_available():
-    class FakeLLM:
-        def invoke(self, _messages):
-            return AIMessage(content="Посмотрел продажи и сверил с планом.")
-
-    state = _state(reasoning_trace=[{"stage": "agent", "kind": "tool_call",
-                                     "summary": "query_sql(…)", "detail": {}}])
-    out = asyncio.run(
-        describe.with_description("ответ", state, _cfg(describe_answer=True), llm=FakeLLM())
-    )
-    assert "Посмотрел продажи и сверил с планом." in out
-
-
-def test_describe_falls_back_when_llm_fails():
-    class BrokenLLM:
-        def invoke(self, _messages):
-            raise RuntimeError("нет сети")
-
-    state = _state(reasoning_trace=[{"stage": "agent", "kind": "tool_call",
-                                     "summary": "query_sql(…) → 3 строки", "detail": {}}])
-    out = asyncio.run(
-        describe.with_description("ответ", state, _cfg(describe_answer=True), llm=BrokenLLM())
-    )
-    assert "query_sql" in out  # детерминированный список шагов
-
-
-def test_sources_block_reports_missing_metrics():
-    text = describe.describe_sources_block(_state(metrics_error="сервис недоступен"))
-    assert "не загружены" in text
-
-
-def test_sources_block_lists_wiki_hits():
-    state = _state(easyrag_snippets=[
-        {"page_title": "Методика", "section_title": "AHT", "similarity": 0.9}
-    ])
-    assert "«Методика / AHT»" in describe.describe_sources_block(state)
-
-
-def test_render_trace_deterministic():
-    trace = [
-        {"stage": "agent", "kind": "tool_call", "summary": "первый шаг", "detail": {}},
-        {"stage": "agent", "kind": "decision", "summary": "вывод", "detail": {}},
+def test_describe_numbered_steps_at_the_end():
+    state = _state(metrics=_dataset(), aggregates=_AGGREGATES, reasoning_trace=_TRACE)
+    out = describe.with_description("ответ", state, _cfg(describe_answer=True))
+    head, section = out.split("\n\n---\n", 1)
+    assert head == "ответ"
+    lines = section.splitlines()
+    assert lines[0] == "### Как я пришёл к выводу"
+    steps = [ln for ln in lines if ln[:1].isdigit()]
+    assert steps == [
+        "1. Структура: руководитель — Руководитель Р.Р.; сотрудников — 1: "
+        "Иванов Иван Иванович; позиция — Аналитик.",
+        "2. Данные: показателей — 3; верхнего уровня — 1: Продажи; разрезов — 1; "
+        "значений — 6; периоды: неделя — 2 (2026-04-06 … 2026-04-13); "
+        "звёзд — 1: Звезда качества (хотя бы раз получены — 1).",
+        "3. Агрегаты групп сравнения: уровней — 2: по ГОСБ, по ТБ; показателей — 1; "
+        "срезов — 4 (текущих — 2, история — 2).",
+        "4. Долгосрочная память: сохранённого контекста прошлых диалогов нет.",
+        "5. Инструмент `metric_card` (metric=Продажи, depth=2) → ПОКАЗАТЕЛЬ: Продажи",
+        "6. Инструмент `query_sql` (цель — последние значения; SQL: "
+        "`SELECT metric, fact FROM v_fact_latest LIMIT 5`) → | metric | fact |",
+        "7. Сбой: Модель не ответила",
     ]
-    text = describe.render_trace(trace)
-    assert "1. **Метрики.** первый шаг" in text
-    assert "2. **Вывод.** вывод" in text
+
+
+def test_describe_without_data_and_aggregates():
+    steps = describe.describe_steps(
+        _state(metrics_error="сервис недоступен", aggregates_error="таймаут",
+               memory_context="Прошлый раз обсуждали AHT.")
+    )
+    assert steps == [
+        "Структура: данные не загружены (сервис недоступен).",
+        "Данные: показатели не загружены.",
+        "Агрегаты групп сравнения: не загружены (таймаут).",
+        "Долгосрочная память: Прошлый раз обсуждали AHT.",
+    ]
+    assert describe.describe_steps(_state())[2] == "Агрегаты групп сравнения: не пришли."
+
+
+def test_describe_accepts_json_strings_and_caps_names():
+    import json
+
+    many = make_dataset_obj([make_metric(f"М{i}", fact=1.0) for i in range(15)])
+    steps = describe.describe_steps(_state(metrics=json.dumps(many, ensure_ascii=False)))
+    assert "верхнего уровня — 15: М0, М1" in steps[1]
+    assert steps[1].count(", М") == 9 and "и ещё 5" in steps[1]

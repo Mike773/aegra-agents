@@ -1,242 +1,224 @@
-"""Раздел «Как я пришёл к выводу» (describe_answer) — перенос из v4.
+"""Раздел «Как я пришёл к выводу» (describe_answer).
 
-Раздел открывается детерминированной описью источников (оргструктура, метрики,
-wiki, память — из персистентного стейта, а не из трассы: трасса живёт один ход).
-Дальше — рассказ о ходе анализа: основной путь LLM по трассе, фоллбэк —
-детерминированный список шагов, поэтому режим не может сломать ответ.
+Нумерованные шаги в конце ответа, без LLM — только то, что реально было:
+
+1. Структура — кто в данных: руководитель, сотрудники, позиция.
+2. Данные — сколько показателей, разрезов, значений и периодов пришло,
+   звёзды и рейтинг, если пришли.
+3. Агрегаты групп сравнения — уровни, показатели, срезы.
+4. Долгосрочная память.
+5… Каждый вызов инструмента за ход: имя, аргументы, начало результата.
+
+Структура, данные и агрегаты считаются из персистентного стейта (сырой
+датасет и агрегаты), инструменты — из трассы хода. Прежняя проза от LLM
+убрана: она пересказывала ответ и могла досочинить шаги, а вызов модели
+удлинял ход.
 """
 from __future__ import annotations
 
-import asyncio
-import logging
+import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 
 from ..db import loader
-from ..prompts.describe import DESCRIBE_ANSWER_PROMPT
 from .messages import TRACE_SECTION_TITLE, config_flag
 
-logger = logging.getLogger(__name__)
-
-KIND_LABELS = {
-    "intent": "Классификация запроса",
-    "kb_hit": "База знаний (wiki)",
-    "tool_call": "Метрики",
-    "derived_metric": "Производный показатель",
-    "hypothesis": "Гипотеза",
-    "decision": "Вывод",
-    "error": "Сбой",
-}
-
-# Превью памяти и запроса к wiki в описи источников: там нужна опись, не текст.
-_SOURCES_MEMORY_PREVIEW = 200
-_SOURCES_QUERY_PREVIEW = 120
+# Сколько имён перечислять в строке, дальше — «и ещё N».
+_NAMES_CAP = 10
+_MEMORY_PREVIEW = 200
+_ARG_CAP = 120
+_SQL_CAP = 300
+_RESULT_CAP = 200
 
 
-def render_trace(trace: list[dict[str, Any]], preamble: str = "") -> str:
-    """Детерминированный markdown-раздел из трассы — без LLM, без галлюцинаций."""
-    steps = [s for s in (trace or []) if (s.get("summary") or "").strip()]
-    if not steps and not preamble:
-        return ""
-    lines = ["---", TRACE_SECTION_TITLE, ""]
-    if preamble:
-        lines.append(preamble)
-        lines.append("")
-    for i, step in enumerate(steps, 1):
-        label = KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "Шаг")
-        lines.append(f"{i}. **{label}.** {step['summary'].strip()}")
-    return "\n".join(lines).rstrip()
-
-
-def _trace_for_description(trace: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for i, step in enumerate(trace or [], 1):
-        summary = (step.get("summary") or "").strip()
-        if not summary:
-            continue
-        label = KIND_LABELS.get(step.get("kind", ""), step.get("stage") or "шаг")
-        lines.append(f"{i}. [{label}] {summary}")
-        if step.get("kind") == "tool_call":
-            reasoning = ((step.get("detail") or {}).get("reasoning") or "").strip()
-            if reasoning:
-                lines.append(f"   Мотивация вызова: {reasoning}")
-    return "\n".join(lines)
-
-
-async def describe_trace_llm(
-    llm: Any, question: str, answer: str, trace: list[dict[str, Any]]
-) -> str:
-    """Рассказ о ходе анализа по трассе. Любая ошибка → "" (будет фоллбэк)."""
-    steps_text = _trace_for_description(trace)
-    if not steps_text:
-        return ""
-    parts = []
-    if (question or "").strip():
-        parts.append(f"Вопрос руководителя:\n{question.strip()}")
-    parts.append(f"Итоговый ответ:\n{answer}")
-    parts.append(f"Трасса (шаги анализа по порядку):\n{steps_text}")
-    try:
-        ai = await asyncio.to_thread(
-            llm.invoke,
-            [
-                SystemMessage(content=DESCRIBE_ANSWER_PROMPT),
-                HumanMessage(content="\n\n".join(parts)),
-            ],
-        )
-        content = ai.content if isinstance(ai.content, str) else str(ai.content)
-        return content.strip()
-    except Exception:  # noqa: BLE001 — LLM-вызов, сужать нечем
-        logger.warning(
-            "describe_answer: LLM-описание трассы упало, фоллбэк на список", exc_info=True
-        )
-        return ""
-
-
-def _metrics_obj(raw: Any) -> dict[str, Any] | None:
-    if isinstance(raw, dict):
-        return raw
+def _obj(raw: Any) -> Any:
+    """Датасет и агрегаты в стейте бывают JSON-строкой."""
     if isinstance(raw, str) and raw.strip():
-        import json
-
         try:
-            parsed = json.loads(raw)
+            return json.loads(raw)
         except json.JSONDecodeError:
             return None
-        return parsed if isinstance(parsed, dict) else None
-    return None
+    return raw
 
 
-def _metrics_source_line(metrics: Any) -> str:
-    """«- Метрики: …»: уникальные показатели, верхнеуровневые имена, периоды."""
+def _names(names: list[str]) -> str:
+    shown = names[:_NAMES_CAP]
+    tail = f" и ещё {len(names) - len(shown)}" if len(names) > len(shown) else ""
+    return ", ".join(shown) + tail
+
+
+def _clip(text: Any, cap: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= cap else text[: cap - 1] + "…"
+
+
+def _structure_step(metrics: Any, state: Any) -> str:
+    if not isinstance(metrics, dict):
+        err = state.get("metrics_error")
+        return "Структура: данные не загружены" + (f" ({err})." if err else ".")
+    parts: list[str] = []
+    me = metrics.get("me")
+    boss = str((me or {}).get("fio") or "").strip() if isinstance(me, dict) else ""
+    if boss:
+        parts.append(f"руководитель — {boss}")
+    staff = [
+        str(e.get("fio") or e.get("tabnum") or "").strip()
+        for e in (metrics.get("employees") or [])
+        if isinstance(e, dict)
+    ]
+    staff = [s for s in staff if s]
+    if staff:
+        parts.append(f"сотрудников — {len(staff)}: {_names(staff)}")
+    position = str(state.get("position") or "").strip()
+    if position:
+        parts.append(f"позиция — {position}")
+    if not parts:
+        return "Структура: в датасете нет ни руководителя, ни сотрудников."
+    return "Структура: " + "; ".join(parts) + "."
+
+
+def _data_step(metrics: Any) -> str:
+    if not isinstance(metrics, dict):
+        return "Данные: показатели не загружены."
     try:
         parsed = loader.parse_dataset(metrics)
     except Exception:  # noqa: BLE001 — датасет от внешнего клиента
-        return "- Метрики: датасет не разобран."
+        return "Данные: датасет не разобран."
     if not parsed.facts:
-        return "- Метрики: датасет пуст."
+        return "Данные: датасет пуст."
+    stars = [m.name for m in parsed.metrics.values() if m.is_star]
+    regular = {norm for norm, m in parsed.metrics.items() if not m.is_star}
     children = {child for _, _, child in parsed.edges}
-    top_names = [rec.name for norm, rec in parsed.metrics.items() if norm not in children]
+    top = [
+        m.name for norm, m in parsed.metrics.items()
+        if norm not in children and not m.is_star
+    ]
+    elements = {(f.metric_norm, f.element) for f in parsed.facts if f.element}
+    parts = [f"показателей — {len(regular)}"]
+    if top:
+        parts.append(f"верхнего уровня — {len(top)}: {_names(top)}")
+    if elements:
+        parts.append(f"разрезов — {len(elements)}")
+    parts.append(f"значений — {len(parsed.facts)}")
     periods: dict[str, set[str]] = {}
     for f in parsed.facts:
         if f.date:
             periods.setdefault(f.calc_period or "период", set()).add(f.date)
-    parts = [f"всего уникальных метрик — {len(parsed.metrics)}"]
-    if top_names:
-        parts.append("верхнеуровневые: " + ", ".join(top_names))
     if periods:
-        per_strs = []
+        spans = []
         for period, dates in sorted(periods.items()):
             ds = sorted(dates)
             span = ds[0] if len(ds) == 1 else f"{ds[0]} … {ds[-1]}"
-            per_strs.append(f"{period} — {len(ds)} ({span})")
-        parts.append("периоды: " + "; ".join(per_strs))
-    return "- Метрики: " + "; ".join(parts) + "."
-
-
-def _wiki_source_line(state: Any) -> str:
-    snippets = state.get("easyrag_snippets") or []
-    if snippets:
-        refs = []
-        for s in snippets[:5]:
-            page = s.get("page_title") or s.get("slug") or "-"
-            title = s.get("section_title") or s.get("anchor") or "-"
-            refs.append(f"«{page} / {title}»")
-        return f"- Wiki: найдено фрагментов — {len(snippets)}: " + ", ".join(refs) + "."
-    if state.get("easyrag_error"):
-        return "- Wiki: не удалось получить данные из базы знаний."
-    query = (state.get("easyrag_query") or "").strip()
-    if not query:
-        return "- Wiki: не запрашивалась на этом ходе."
-    if len(query) > _SOURCES_QUERY_PREVIEW:
-        query = query[:_SOURCES_QUERY_PREVIEW] + "…"
-    stubs = state.get("easyrag_stub_pages") or []
-    if stubs:
-        names = ", ".join(s.get("title") or s.get("slug") or "-" for s in stubs)
-        return (
-            f"- Wiki: по запросу «{query}» найдены только пустые "
-            f"страницы-заглушки: {names}."
+            spans.append(f"{period} — {len(ds)} ({span})")
+        parts.append("периоды: " + "; ".join(spans))
+    if stars:
+        received = {
+            f.metric_norm for f in parsed.facts if f.star_received == 1
+        }
+        parts.append(
+            f"звёзд — {len(stars)}: {_names(stars)} "
+            f"(хотя бы раз получены — {len(received)})"
         )
-    return f"- Wiki: по запросу «{query}» ничего не найдено."
+    if parsed.ratings:
+        parts.append(f"мест в рейтинге по звёздам — {len(parsed.ratings)}")
+    return "Данные: " + "; ".join(parts) + "."
 
 
-def _memory_source_line(state: Any) -> str:
+def _aggregates_step(state: Any) -> str:
+    raw = _obj(state.get("aggregates"))
+    rows = loader.parse_aggregates(raw) if raw else []
+    if not rows:
+        err = state.get("aggregates_error")
+        if err:
+            return f"Агрегаты групп сравнения: не загружены ({err})."
+        return "Агрегаты групп сравнения: не пришли."
+    levels: list[str] = []
+    for r in rows:
+        name = str(r.get("level_name") or r.get("level") or "").strip()
+        if name and name not in levels:
+            levels.append(name)
+    metrics = {r.get("metric_name") for r in rows if r.get("metric_name")}
+    current = sum(1 for r in rows if r.get("is_current"))
+    parts = [
+        f"уровней — {len(levels)}: {_names(levels)}",
+        f"показателей — {len(metrics)}",
+        f"срезов — {len(rows)} (текущих — {current}, история — {len(rows) - current})",
+    ]
+    return "Агрегаты групп сравнения: " + "; ".join(parts) + "."
+
+
+def _memory_step(state: Any) -> str:
     if state.get("memory_error"):
-        return "- Долгосрочная память: не удалось загрузить."
+        return "Долгосрочная память: не удалось загрузить."
     ctx = (state.get("memory_context") or "").strip()
     if ctx and "отсутствует" not in ctx.lower():
-        preview = ctx.replace("\n", " ")
-        if len(preview) > _SOURCES_MEMORY_PREVIEW:
-            preview = preview[:_SOURCES_MEMORY_PREVIEW] + "…"
-        return f"- Долгосрочная память: {preview}"
-    return (
-        "- Долгосрочная память: отсутствует "
-        "(сохранённого контекста прошлых диалогов нет)."
+        return f"Долгосрочная память: {_clip(ctx, _MEMORY_PREVIEW)}"
+    return "Долгосрочная память: сохранённого контекста прошлых диалогов нет."
+
+
+def _args_text(tool: str, args: dict[str, Any]) -> str:
+    if tool == "query_sql":
+        bits = []
+        if args.get("purpose"):
+            bits.append(f"цель — {_clip(args['purpose'], _ARG_CAP)}")
+        if args.get("sql"):
+            bits.append(f"SQL: `{_clip(args['sql'], _SQL_CAP)}`")
+        return "; ".join(bits)
+    return ", ".join(
+        f"{k}={_clip(v, _ARG_CAP)}" for k, v in args.items()
+        if v is not None and str(v).strip() and v != {}
     )
 
 
-def describe_sources_block(state: Any) -> str:
-    """Детерминированная опись источников — точные имена и числа, без LLM."""
-    lines: list[str] = []
-    metrics = _metrics_obj(state.get("metrics"))
-    if metrics is not None:
-        org_parts: list[str] = []
-        me = metrics.get("me") or {}
-        boss_fio = str((me.get("fio") if isinstance(me, dict) else "") or "").strip()
-        if boss_fio:
-            org_parts.append(f"руководитель — {boss_fio}")
-        names = [
-            str(e.get("fio") or "").strip()
-            for e in (metrics.get("employees") or [])
-            if isinstance(e, dict) and str(e.get("fio") or "").strip()
-        ]
-        if names:
-            position = str(state.get("position") or "").strip()
-            pos = f" (позиция: {position})" if position else ""
-            org_parts.append("в фокусе анализа — " + ", ".join(names) + pos)
-        lines.append(
-            "- Оргструктура: " + "; ".join(org_parts) + "."
-            if org_parts
-            else "- Оргструктура: в датасете нет ФИО."
-        )
-        lines.append(_metrics_source_line(metrics))
-    else:
-        err = state.get("metrics_error")
-        suffix = f" ({err})" if err else ""
-        lines.append(f"- Оргструктура: данные не загружены{suffix}.")
-        lines.append("- Метрики: не загружены.")
-    lines.append(_wiki_source_line(state))
-    lines.append(_memory_source_line(state))
-    return "**Исходные данные:**\n" + "\n".join(lines)
+def _first_line(text: Any) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return _clip(line, _RESULT_CAP)
+    return ""
 
 
-async def with_description(
-    text: str,
-    state: Any,
-    config: RunnableConfig | None,
-    llm: Any = None,
-    question: str = "",
-) -> str:
-    """Дописывает раздел «Как я пришёл к выводу», если describe_answer=true."""
+def _tool_step(step: dict[str, Any]) -> str:
+    detail = step.get("detail") or {}
+    tool = detail.get("tool")
+    if not tool:
+        # Шаг без деталей (старый формат трассы) — как есть.
+        return _clip(step.get("summary"), _SQL_CAP)
+    args = _args_text(tool, detail.get("args") or {})
+    head = f"Инструмент `{tool}`" + (f" ({args})" if args else "")
+    result = _first_line(detail.get("result_summary"))
+    return f"{head} → {result}" if result else head
+
+
+def describe_steps(state: Any) -> list[str]:
+    """Шаги раздела по порядку: структура, данные, агрегаты, память, инструменты."""
+    metrics = _obj(state.get("metrics"))
+    steps = [
+        _structure_step(metrics, state),
+        _data_step(metrics),
+        _aggregates_step(state),
+        _memory_step(state),
+    ]
+    for step in state.get("reasoning_trace") or []:
+        if step.get("kind") == "tool_call":
+            steps.append(_tool_step(step))
+        elif step.get("kind") == "error" and (step.get("summary") or "").strip():
+            steps.append(f"Сбой: {_clip(step['summary'], _RESULT_CAP)}")
+    return steps
+
+
+def render_description(state: Any) -> str:
+    lines = ["---", TRACE_SECTION_TITLE, ""]
+    lines += [f"{i}. {text}" for i, text in enumerate(describe_steps(state), 1)]
+    return "\n".join(lines)
+
+
+def with_description(text: str, state: Any, config: RunnableConfig | None) -> str:
+    """Дописывает в конец ответа раздел «Как я пришёл к выводу», если
+    describe_answer=true."""
     if not config_flag(config, "describe_answer", default=False):
         return text
-    sources = describe_sources_block(state)
-    trace = state.get("reasoning_trace") or []
-    substantive = any(s.get("kind") in ("tool_call", "kb_hit") for s in trace)
-    if llm is not None and substantive:
-        narrative = await describe_trace_llm(llm, question, text, trace)
-        if narrative:
-            body = f"{sources}\n\n{narrative}" if sources else narrative
-            return f"{text}\n\n---\n{TRACE_SECTION_TITLE}\n\n{body}"
-    section = render_trace(trace, preamble=sources)
-    return f"{text}\n\n{section}" if section else text
+    return f"{text}\n\n{render_description(state)}"
 
 
-__all__ = [
-    "KIND_LABELS",
-    "describe_sources_block",
-    "describe_trace_llm",
-    "render_trace",
-    "with_description",
-]
+__all__ = ["describe_steps", "render_description", "with_description"]
