@@ -30,7 +30,7 @@ def test_block_order():
     text = prompts.compose_system_prompt(_ctx())
     positions = [
         text.index("# Роль и Миссия"),
-        text.index("# Структура отчета"),
+        text.index("# Для общих, широких вопросов"),
         text.index("КАК РАБОТАТЬ"),
         text.index("СОСТАВ ДАННЫХ"),
     ]
@@ -44,16 +44,26 @@ def test_business_prompt_is_single_block():
     for marker in (
         "# Принципы аналитического мышления",
         "# Стиль и Язык",
-        "# Диалог и Свободная форма",
+        "# Для конкретных пользовательских инструкций",
     ):
         assert marker in text
+
+
+def test_business_prompt_closing_phrases():
+    """Последняя строка ответа: своя фраза для первого и для следующих ответов."""
+    for phrase in (
+        "Ниже другие важные отклонения (проблемы и достижения), которые я нашел. "
+        "Выбери, что хочешь рассмотреть подробнее",
+        "Ниже темы, которые предлагаю рассмотреть подробнее. Выбери какую хочешь посмотреть?",
+    ):
+        assert phrase in prompts.BUSINESS_PROMPT
 
 
 def test_override_replaces_business_but_keeps_operational():
     text = prompts.compose_system_prompt(_ctx(system_prompt_override="ТЫ ПРОСТО БОТ"))
     assert "ТЫ ПРОСТО БОТ" in text
     assert "# Роль и Миссия" not in text
-    assert "# Структура отчета" not in text
+    assert "# Для общих, широких вопросов" not in text
     # Операционные блоки остаются: без них модель не сможет работать с данными.
     assert "СОСТАВ ДАННЫХ" in text
     assert "КАК РАБОТАТЬ" in text
@@ -111,12 +121,22 @@ def test_tools_guide_mentions_budget_and_entry_points():
     assert "первого запроса" in text
 
 
-def test_deviation_map_is_not_offered_to_model():
-    """Готовой карты отклонений модель не видит: ни блока, ни инструмента."""
+def test_deviation_map_is_a_tool_not_a_prompt_block():
+    """Карта отклонений — инструмент, с которого начинается разбор; блоком в
+    промпте её нет."""
     text = prompts.compose_system_prompt(_ctx())
+    assert "начинай с `deviation_map`" in text
     assert "list_deviations" not in text
     assert "КАРТА ОТКЛОНЕНИЙ" not in text
     assert not hasattr(prompts.PromptContext(), "deviations_block")
+
+
+def test_stars_focus_rule_only_with_stars():
+    """При звёздах карта — показатели неполученных звёзд, и фокус — среди них."""
+    rule = "главный фокус ответа выбирай среди них"
+    assert rule in prompts.compose_system_prompt(_ctx(has_stars=True))
+    assert rule not in prompts.compose_system_prompt(_ctx())
+    assert rule not in prompts.tools_guide_block(18)
 
 
 def test_tools_guide_warns_about_differing_dates():
@@ -152,7 +172,7 @@ def test_tools_guide_keeps_only_cross_cutting_rules():
     guide = prompts.tools_guide_block(18)
     for rule in (
         "ТОЛЬКО через инструменты",
-        "Готовой карты отклонений нет",
+        "Разбор показателей начинай с `deviation_map`",
         "Один вызов инструмента за шаг",
         "Бюджет вызовов на этот ответ — 18",
         "РАЗНЫЕ даты",

@@ -176,9 +176,7 @@ def make_agent_node(llm: Any, easyrag_graph: Any = None):
                 update["messages"] = steps
             return update
 
-        text = await with_description(
-            result.final_text, {**state, **update}, config, llm=llm, question=question
-        )
+        text = with_description(result.final_text, {**state, **update}, config)
         messages = step_updates(config, result.step_texts) + [
             final_message(text, config, suggestions=ctx.suggestions, chart=ctx.chart)
         ]

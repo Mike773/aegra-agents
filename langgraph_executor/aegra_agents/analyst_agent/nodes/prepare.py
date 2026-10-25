@@ -101,10 +101,10 @@ def make_prepare_node():
         )
 
         n_metrics = db.conn.execute("SELECT COUNT(*) FROM metric").fetchone()[0]
-        n_periods = db.conn.execute("SELECT COUNT(*) FROM period").fetchone()[0]
+        periods = enrich.period_counts_text(db)
         step = step_update(
             config,
-            f"📊 Загрузил показатели: {n_metrics} шт., периодов {n_periods}.",
+            f"📊 Загрузил показатели: {n_metrics} шт., {periods}.",
         )
         return {
             **step,
@@ -119,7 +119,7 @@ def make_prepare_node():
                 {
                     "stage": "prepare",
                     "kind": "decision",
-                    "summary": f"Собрал базу: показателей {n_metrics}, периодов {n_periods}.",
+                    "summary": f"Собрал базу: показателей {n_metrics}, {periods}.",
                     "detail": {"person_key": person_key},
                 }
             ],

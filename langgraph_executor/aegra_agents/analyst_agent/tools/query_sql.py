@@ -31,11 +31,26 @@ _DESCRIPTION = (
     "обязательная короткая цель запроса по-русски, её увидит руководитель."
 )
 
+# Только для датасетов со звёздами: без звёзд описание инструмента прежнее.
+# Модель выбирала у звёзд fact/plan, получала пустоту и досочиняла результат.
+_STARS_RULE = (
+    "ЗВЁЗДЫ. Звезда — награда без чисел: у её строк (is_star = 1) fact и plan "
+    "пустые, это не ноль и не пропуск данных. Результат звезды — только признак "
+    "получения: star_received в v_fact, received в v_star (1 — получена, 0 — "
+    "нет). Когда выбираешь звёзды, ОБЯЗАТЕЛЬНО бери признак звезды is_star и "
+    "признак получения star_received / received. Факт и план есть только у "
+    "влияющих показателей звезды — их бери из v_star_metric. Результат звезды "
+    "числом не придумывай."
+)
+
 
 def make_query_sql(ctx: Any) -> StructuredTool:
     # Справка по схеме читает PRAGMA, которые авторизатор потом запретит, —
     # собираем её до установки защиты.
-    description = _DESCRIPTION + "\n\n" + core.schema_doc(ctx.db, examples=False)
+    description = _DESCRIPTION
+    if ctx.db.has_stars:
+        description += "\n\n" + _STARS_RULE
+    description += "\n\n" + core.schema_doc(ctx.db, examples=False)
     examples = core.sql_examples(ctx.db)
     runner = SafeQueryRunner(ctx.db.conn, max_rows=_ROW_CAP)
     runner.install()

@@ -123,6 +123,47 @@ def test_profile_periods_ellipsis_hides_middle_dates():
     assert "Периоды: 2026-05-04, 2026-04-27, …, 2026-04-06 — всего 5." in lines[0]
 
 
+def _mixed_grids_db():
+    """Дневной, недельный и месячный показатели: у каждого своя сетка дат."""
+    import datetime as dt
+
+    day0 = dt.date(2026, 4, 1)
+    metrics = [
+        make_metric("Звонки", date=str(day0 + dt.timedelta(i)), fact=10.0, plan=12.0,
+                    calc_period="день")
+        for i in range(30)
+    ] + [
+        make_metric("AHT", date=str(dt.date(2026, 4, 6) + dt.timedelta(7 * i)),
+                    fact=300.0, plan=320.0)
+        for i in range(6)
+    ] + [
+        make_metric("Продажи", date=d, fact=90.0, plan=100.0, calc_period="месяц")
+        for d in ("2026-02-01", "2026-03-01", "2026-04-01")
+    ]
+    return _db(make_dataset_obj(metrics))
+
+
+def test_profile_periods_counted_per_calc_period():
+    """Даты разных сеток не складываются: 30 дней + 6 недель + 3 месяца — это не
+    «всего 34 периода»."""
+    (line,) = _profile_lines(_mixed_grids_db())
+    assert "всего 34" not in line
+    assert (
+        "Периоды: день — 2026-04-30, 2026-04-29, …, 2026-04-01, всего 30; "
+        "неделя — 2026-05-11, 2026-05-04, …, 2026-04-06, всего 6; "
+        "месяц — 2026-04-01, 2026-03-01, 2026-02-01, всего 3." in line
+    )
+
+
+def test_period_counts_text_for_step_message():
+    assert enrich.period_counts_text(_mixed_grids_db()) == (
+        "периоды: день — 30, неделя — 6, месяц — 3"
+    )
+    metrics = [make_metric("Продажи", date=d, fact=1.0, plan=2.0)
+               for d in ("2026-04-06", "2026-04-13")]
+    assert enrich.period_counts_text(_db(make_dataset_obj(metrics))) == "периодов 2"
+
+
 def test_profile_groups_listed_per_person(monkeypatch):
     monkeypatch.delenv("PEER_LEVELS", raising=False)
     from langgraph_executor.aegra_agents.shared import peer_levels

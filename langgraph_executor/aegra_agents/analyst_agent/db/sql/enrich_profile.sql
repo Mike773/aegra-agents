@@ -1,8 +1,12 @@
 -- name: enrich_profile
 -- summary: Состав данных: строка на человека — роль, должность, показатели первого уровня с числом потомков, даты периодов, группы сравнения
 -- params:
--- returns: person_key, fio, post, is_me, roots, dates, n_periods, groups
+-- returns: person_key, fio, post, is_me, roots, periods, groups
 -- render: table
+--
+-- periods — даты ОТДЕЛЬНО по типу периода (calc_period): у дневных, недельных
+-- и месячных показателей своя сетка дат, и общий счёт дат раздувал «всего N».
+-- Формат: «тип|число|даты по убыванию» через ';;', типы — по убыванию числа.
 WITH RECURSIVE
 roots AS (
     -- Корни дерева ЭТОГО человека: показатель с фактами, который ни у кого
@@ -36,12 +40,17 @@ SELECT p.person_key, p.fio, p.post, p.is_me,
        (SELECT group_concat(name || '|' || n_l2 || '|' || n_total, ';;')
           FROM (SELECT name, n_l2, n_total FROM root_lines rl
                  WHERE rl.person_id = p.person_id ORDER BY name)) AS roots,
-       (SELECT group_concat(date, ',')
-          FROM (SELECT DISTINCT pe.date FROM fact f
-                  JOIN period pe ON pe.period_id = f.period_id
-                 WHERE f.person_id = p.person_id ORDER BY pe.date DESC)) AS dates,
-       (SELECT COUNT(DISTINCT f.period_id) FROM fact f
-         WHERE f.person_id = p.person_id) AS n_periods,
+       (SELECT group_concat(cp || '|' || n || '|' || ds, ';;')
+          FROM (SELECT cp, COUNT(*) AS n, group_concat(date, ',') AS ds
+                  FROM (SELECT DISTINCT COALESCE(f.calc_period, m.calc_period, '') AS cp,
+                               pe.date
+                          FROM fact f
+                          JOIN period pe ON pe.period_id = f.period_id
+                          JOIN metric m ON m.metric_id = f.metric_id
+                         WHERE f.person_id = p.person_id
+                         ORDER BY pe.date DESC)
+                 GROUP BY cp
+                 ORDER BY n DESC, cp)) AS periods,
        (SELECT group_concat(level_name, ', ')
           FROM (SELECT DISTINCT pa.level_name, pa.level_order
                   FROM person_peer pp

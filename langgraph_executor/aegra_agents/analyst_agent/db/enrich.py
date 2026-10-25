@@ -58,14 +58,44 @@ def _plural_metrics(n: int) -> str:
     return "метрик"
 
 
-def _periods_text(dates: str | None, n_periods: int | None) -> str:
-    """«Последняя, предпоследняя, …, первая — всего N»; без многоточия, когда
-    дат две или меньше."""
+def _dates_text(dates: str) -> list[str]:
+    """Последняя, предпоследняя, …, первая; без многоточия, когда дат три или меньше."""
     items = [d for d in (dates or "").split(",") if d]
-    if not items:
+    return items if len(items) <= 3 else [items[0], items[1], "…", items[-1]]
+
+
+def _periods_text(periods: str | None) -> str:
+    """Даты по типу периода: у дневных, недельных и месячных показателей своя
+    сетка, и общий счёт дат завышал число периодов. Один тип — «Периоды:
+    последняя, …, первая — всего N»; несколько — то же по каждому типу."""
+    groups = []
+    for chunk in (periods or "").split(";;"):
+        if chunk:
+            cp, n, dates = chunk.split("|", 2)
+            groups.append((cp, int(n), _dates_text(dates)))
+    if not groups:
         return ""
-    shown = items if len(items) <= 3 else [items[0], items[1], "…", items[-1]]
-    return f"Периоды: {', '.join(shown)} — всего {n_periods or len(items)}."
+    if len(groups) == 1:
+        _, n, shown = groups[0]
+        return f"Периоды: {', '.join(shown)} — всего {n}."
+    parts = [f"{cp or 'период'} — {', '.join(shown)}, всего {n}" for cp, n, shown in groups]
+    return "Периоды: " + "; ".join(parts) + "."
+
+
+def period_counts_text(db: Any) -> str:
+    """Число периодов по всем данным для шагового сообщения: «периодов 6» или,
+    если типов несколько, «периоды: неделя — 6, день — 30, месяц — 3»."""
+    rows = db.conn.execute(
+        "SELECT COALESCE(f.calc_period, m.calc_period, '') AS cp, "
+        "COUNT(DISTINCT f.period_id) AS n FROM fact f "
+        "JOIN metric m ON m.metric_id = f.metric_id "
+        "GROUP BY cp ORDER BY n DESC, cp"
+    ).fetchall()
+    if not rows:
+        return "периодов 0"
+    if len(rows) == 1:
+        return f"периодов {rows[0]['n']}"
+    return "периоды: " + ", ".join(f"{r['cp'] or 'период'} — {r['n']}" for r in rows)
 
 
 def _roots_text(roots: str | None) -> str:
@@ -98,7 +128,7 @@ def dataset_profile_block(db: Any) -> str:
         if post:
             head += f", {post}"
         bits = [head + "."]
-        for piece in (_roots_text(r["roots"]), _periods_text(r["dates"], r["n_periods"])):
+        for piece in (_roots_text(r["roots"]), _periods_text(r["periods"])):
             if piece:
                 bits.append(piece)
         if r["groups"]:
