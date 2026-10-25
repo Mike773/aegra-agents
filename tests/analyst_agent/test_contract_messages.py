@@ -147,15 +147,12 @@ def test_describe_numbered_steps_at_the_end():
     assert steps == [
         "1. Структура: руководитель — Руководитель Р.Р.; сотрудников — 1: "
         "Иванов Иван Иванович; позиция — Аналитик.",
-        "2. Данные: показателей — 3; верхнего уровня — 1: Продажи; разрезов — 1; "
-        "значений — 6; периоды: неделя — 2 (2026-04-06 … 2026-04-13); "
-        "звёзд — 1: Звезда качества (хотя бы раз получены — 1).",
-        "3. Агрегаты групп сравнения: уровней — 2: по ГОСБ, по ТБ; показателей — 1; "
-        "срезов — 4 (текущих — 2, история — 2).",
+        "2. Данные: загружено показателей — 4.",
+        "3. Агрегаты групп сравнения: уровни — по ГОСБ, по ТБ.",
         "4. Долгосрочная память: сохранённого контекста прошлых диалогов нет.",
-        "5. Инструмент `metric_card` (metric=Продажи, depth=2) → ПОКАЗАТЕЛЬ: Продажи",
-        "6. Инструмент `query_sql` (цель — последние значения; SQL: "
-        "`SELECT metric, fact FROM v_fact_latest LIMIT 5`) → | metric | fact |",
+        # Только инструмент и причина вызова — без аргументов и результата.
+        "5. Инструмент `metric_card`: разобрал показатель «Продажи».",
+        "6. Инструмент `query_sql`: последние значения.",
         "7. Сбой: Модель не ответила",
     ]
 
@@ -177,7 +174,17 @@ def test_describe_without_data_and_aggregates():
 def test_describe_accepts_json_strings_and_caps_names():
     import json
 
-    many = make_dataset_obj([make_metric(f"М{i}", fact=1.0) for i in range(15)])
+    many = make_dataset_obj(
+        [make_metric(f"М{i}", fact=1.0) for i in range(15)],
+        employees_extra=[{"fio": f"Сотрудник {i}", "metrics": []} for i in range(14)],
+    )
     steps = describe.describe_steps(_state(metrics=json.dumps(many, ensure_ascii=False)))
-    assert "верхнего уровня — 15: М0, М1" in steps[1]
-    assert steps[1].count(", М") == 9 and "и ещё 5" in steps[1]
+    assert steps[1] == "Данные: загружено показателей — 15."
+    assert "сотрудников — 15:" in steps[0] and "и ещё 5" in steps[0]
+
+
+def test_tool_without_step_text_shows_name_only():
+    step = {"kind": "tool_call", "detail": {"tool": "new_tool", "args": {"x": 1}}}
+    assert describe.describe_steps(_state(reasoning_trace=[step]))[-1] == (
+        "Инструмент `new_tool`."
+    )

@@ -3,11 +3,11 @@
 Нумерованные шаги в конце ответа, без LLM — только то, что реально было:
 
 1. Структура — кто в данных: руководитель, сотрудники, позиция.
-2. Данные — сколько показателей, разрезов, значений и периодов пришло,
-   звёзды и рейтинг, если пришли.
-3. Агрегаты групп сравнения — уровни, показатели, срезы.
+2. Данные — сколько показателей загружено.
+3. Агрегаты групп сравнения — какие уровни пришли.
 4. Долгосрочная память.
-5… Каждый вызов инструмента за ход: имя, аргументы, начало результата.
+5… Каждый вызов инструмента за ход: имя и причина вызова (та же фраза, что
+   в шаговом сообщении; у query_sql — цель запроса). Результаты не выводятся.
 
 Структура, данные и агрегаты считаются из персистентного стейта (сырой
 датасет и агрегаты), инструменты — из трассы хода. Прежняя проза от LLM
@@ -21,14 +21,13 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from ..agent.trace import default_step_text
 from ..db import loader
 from .messages import TRACE_SECTION_TITLE, config_flag
 
 # Сколько имён перечислять в строке, дальше — «и ещё N».
 _NAMES_CAP = 10
 _MEMORY_PREVIEW = 200
-_ARG_CAP = 120
-_SQL_CAP = 300
 _RESULT_CAP = 200
 
 
@@ -87,42 +86,7 @@ def _data_step(metrics: Any) -> str:
         return "Данные: датасет не разобран."
     if not parsed.facts:
         return "Данные: датасет пуст."
-    stars = [m.name for m in parsed.metrics.values() if m.is_star]
-    regular = {norm for norm, m in parsed.metrics.items() if not m.is_star}
-    children = {child for _, _, child in parsed.edges}
-    top = [
-        m.name for norm, m in parsed.metrics.items()
-        if norm not in children and not m.is_star
-    ]
-    elements = {(f.metric_norm, f.element) for f in parsed.facts if f.element}
-    parts = [f"показателей — {len(regular)}"]
-    if top:
-        parts.append(f"верхнего уровня — {len(top)}: {_names(top)}")
-    if elements:
-        parts.append(f"разрезов — {len(elements)}")
-    parts.append(f"значений — {len(parsed.facts)}")
-    periods: dict[str, set[str]] = {}
-    for f in parsed.facts:
-        if f.date:
-            periods.setdefault(f.calc_period or "период", set()).add(f.date)
-    if periods:
-        spans = []
-        for period, dates in sorted(periods.items()):
-            ds = sorted(dates)
-            span = ds[0] if len(ds) == 1 else f"{ds[0]} … {ds[-1]}"
-            spans.append(f"{period} — {len(ds)} ({span})")
-        parts.append("периоды: " + "; ".join(spans))
-    if stars:
-        received = {
-            f.metric_norm for f in parsed.facts if f.star_received == 1
-        }
-        parts.append(
-            f"звёзд — {len(stars)}: {_names(stars)} "
-            f"(хотя бы раз получены — {len(received)})"
-        )
-    if parsed.ratings:
-        parts.append(f"мест в рейтинге по звёздам — {len(parsed.ratings)}")
-    return "Данные: " + "; ".join(parts) + "."
+    return f"Данные: загружено показателей — {len(parsed.metrics)}."
 
 
 def _aggregates_step(state: Any) -> str:
@@ -138,14 +102,7 @@ def _aggregates_step(state: Any) -> str:
         name = str(r.get("level_name") or r.get("level") or "").strip()
         if name and name not in levels:
             levels.append(name)
-    metrics = {r.get("metric_name") for r in rows if r.get("metric_name")}
-    current = sum(1 for r in rows if r.get("is_current"))
-    parts = [
-        f"уровней — {len(levels)}: {_names(levels)}",
-        f"показателей — {len(metrics)}",
-        f"срезов — {len(rows)} (текущих — {current}, история — {len(rows) - current})",
-    ]
-    return "Агрегаты групп сравнения: " + "; ".join(parts) + "."
+    return "Агрегаты групп сравнения: уровни — " + ", ".join(levels) + "."
 
 
 def _memory_step(state: Any) -> str:
@@ -157,37 +114,20 @@ def _memory_step(state: Any) -> str:
     return "Долгосрочная память: сохранённого контекста прошлых диалогов нет."
 
 
-def _args_text(tool: str, args: dict[str, Any]) -> str:
-    if tool == "query_sql":
-        bits = []
-        if args.get("purpose"):
-            bits.append(f"цель — {_clip(args['purpose'], _ARG_CAP)}")
-        if args.get("sql"):
-            bits.append(f"SQL: `{_clip(args['sql'], _SQL_CAP)}`")
-        return "; ".join(bits)
-    return ", ".join(
-        f"{k}={_clip(v, _ARG_CAP)}" for k, v in args.items()
-        if v is not None and str(v).strip() and v != {}
-    )
-
-
-def _first_line(text: Any) -> str:
-    for line in str(text or "").splitlines():
-        if line.strip():
-            return _clip(line, _RESULT_CAP)
-    return ""
-
-
 def _tool_step(step: dict[str, Any]) -> str:
+    """Инструмент и причина вызова — та же фраза, что в шаговом сообщении."""
     detail = step.get("detail") or {}
     tool = detail.get("tool")
     if not tool:
         # Шаг без деталей (старый формат трассы) — как есть.
-        return _clip(step.get("summary"), _SQL_CAP)
-    args = _args_text(tool, detail.get("args") or {})
-    head = f"Инструмент `{tool}`" + (f" ({args})" if args else "")
-    result = _first_line(detail.get("result_summary"))
-    return f"{head} → {result}" if result else head
+        return _clip(step.get("summary"), _RESULT_CAP)
+    reason = default_step_text(tool, detail.get("args") or {})
+    # Эмодзи в начале фразы — для ленты шагов, в описи он лишний.
+    head, _, rest = reason.partition(" ")
+    reason = rest if rest and not head[:1].isalnum() else reason
+    if reason == tool:
+        return f"Инструмент `{tool}`."
+    return f"Инструмент `{tool}`: {reason[:1].lower()}{reason[1:]}."
 
 
 def describe_steps(state: Any) -> list[str]:

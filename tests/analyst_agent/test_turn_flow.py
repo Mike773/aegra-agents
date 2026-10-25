@@ -228,7 +228,7 @@ def test_describe_answer_section_appended(monkeypatch):
     answer, section = text.split("### Как я пришёл к выводу", 1)
     assert answer.startswith("Итог.")
     assert "\n1. Структура:" in section and "\n2. Данные:" in section
-    assert "\n5. Инструмент `metric_card` (metric=Продажи)" in section
+    assert "\n5. Инструмент `metric_card`: разобрал показатель «Продажи»." in section
     assert llm.calls == 2
 
 
