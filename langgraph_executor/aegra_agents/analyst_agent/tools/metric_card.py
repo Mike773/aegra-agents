@@ -244,9 +244,24 @@ def _children(ctx: Any, person: str, name: str, depth: int) -> list[str]:
     )
     if not rows:
         return []
-    lines = ["СОСТАВ (влияющие показатели; у них своя дата последнего значения)"]
+    lines = [
+        "СОСТАВ (влияющие показатели деревом: каждый — под своим родителем; у них "
+        "своя дата последнего значения)"
+    ]
     for r in rows:
         indent = "  " * (int(r["child_depth"] or 1) - 1)
+        if r["is_repeat"]:
+            # Общий для нескольких родителей показатель раскрыт один раз — здесь
+            # только его вес в этом месте дерева.
+            weight = (
+                f", вес среди влияющих {_num(r['share_pct'], 0)} %"
+                if r["share_pct"] is not None else ""
+            )
+            lines.append(
+                f"{indent}- {r['child']}: влияет и на «{r['parent']}»{weight}; "
+                "значения и состав — в другом месте этого списка"
+            )
+            continue
         bits = []
         # Доля среди сиблингов и исходный вес влияния — разные числа: у
         # единственного ребёнка доля 100 %, а вес из данных может быть иным.
@@ -272,6 +287,12 @@ def _children(ctx: Any, person: str, name: str, depth: int) -> list[str]:
         if r["date"]:
             bits.append(f"на {r['date']}")
         lines.append(f"{indent}- {r['child']}: " + (", ".join(bits) or "данных нет"))
+    total = int(rows[0]["n_total"] or len(rows))
+    if total > len(rows):
+        lines.append(
+            f"Показаны {len(rows)} из {total} строк состава. Остальное — metric_card "
+            "по нужному влияющему показателю."
+        )
     return lines
 
 
