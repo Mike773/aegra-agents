@@ -187,3 +187,118 @@ def test_metric_card_without_metric_answers_with_hint():
     out = _call(build_tools(_ctx()), "metric_card")
     assert "Не указано название показателя" in out
     assert "Продажи" in out
+
+
+def _ex_rr_ctx():
+    return _ctx(make_dataset_obj([
+        make_metric("Продажи", date="2026-04-13", fact=70.0, plan=100.0, ex=70.0, rr=84.5,
+                    children=[
+                        make_metric("Звонки", date="2026-04-13", fact=30.0, plan=50.0,
+                                    ex=60.0, rr=36.2, influent_percent=60),
+                        make_metric("Визиты", date="2026-04-13", fact=5.0, plan=8.0,
+                                    influent_percent=40),
+                    ]),
+        make_metric("Продажи", date="2026-04-13", fact=40.0, plan=50.0, ex=80.0, rr=48.0,
+                    element="Кредиты"),
+    ]))
+
+
+def test_metric_card_shows_ex_and_rr_everywhere_they_exist():
+    """Выполнение плана и run rate — в ряду, в разрезах и в составе, если пришли."""
+    tools = build_tools(_ex_rr_ctx())
+    card = _call(tools, "metric_card", metric="Продажи")
+    periods = card.split("ЗНАЧЕНИЯ ПО ПЕРИОДАМ")[1].split("\n\n")[0]
+    assert "выполнение плана 70 %" in periods and "run rate 84.5" in periods
+    elements = card.split("РАЗРЕЗЫ")[1].split("\n\n")[0]
+    assert "выполнение плана 80 %" in elements and "run rate 48" in elements
+    children = card.split("СОСТАВ")[1]
+    calls = next(line for line in children.splitlines() if "Звонки" in line)
+    assert "выполнение плана 60 %" in calls and "run rate 36.2" in calls
+    # Нет ex/rr у показателя — нет и упоминания.
+    visits = next(line for line in children.splitlines() if "Визиты" in line)
+    assert "выполнение плана" not in visits and "run rate" not in visits
+
+
+def test_metric_card_element_series_shows_ex_and_rr():
+    out = _call(build_tools(_ex_rr_ctx()), "metric_card", metric="Продажи", element="Кредиты")
+    assert "РАЗРЕЗ «Кредиты»" in out
+    assert "выполнение плана 80 %" in out and "run rate 48" in out
+
+
+# --- состав показателя деревом ---------------------------------------------
+
+def _shared_tree(date):
+    themes = lambda: make_metric("Тематики", date=date, fact=1.0)  # noqa: E731
+    return make_metric("Производительность", date=date, fact=10.0, plan=12.0, children=[
+        make_metric("AHT", date=date, fact=300.0, plan=320.0, influent_percent=90, children=[
+            make_metric("ACD", date=date, fact=200.0, influent_percent=60, children=[themes()]),
+            make_metric("HOLD", date=date, fact=30.0, influent_percent=30, children=[themes()]),
+        ]),
+        make_metric("Доля переводов", date=date, fact=8.0, plan=10.0, influent_percent=10,
+                    children=[make_metric("HOLD", date=date, fact=30.0, influent_percent=50)]),
+    ])
+
+
+def _composition(out):
+    part = out[out.index("СОСТАВ"):].splitlines()[1:]
+    return [ln for ln in part if ln.lstrip().startswith("- ")]
+
+
+def test_metric_card_children_tree_without_duplicates():
+    """Общий для нескольких родителей показатель раскрывается один раз; каждый
+    ребёнок — сразу под своим родителем."""
+    dataset = make_dataset_obj([_shared_tree("2026-04-06"), _shared_tree("2026-04-13")])
+    out = _call(build_tools(_ctx(dataset)), "metric_card", metric="Производительность", depth=3)
+    lines = _composition(out)
+    assert [ln.split(":")[0] for ln in lines] == [
+        "- AHT", "  - ACD", "    - Тематики", "  - HOLD",
+        "- Доля переводов", "  - HOLD", "    - Тематики",
+    ]
+    full = [ln for ln in lines if "в другом месте" not in ln]
+    assert [ln.split(":")[0].strip() for ln in full].count("- HOLD") == 1
+    assert [ln.split(":")[0].strip() for ln in full].count("- Тематики") == 1
+    # HOLD раскрыт там, где его доля больше (100 % у «Доли переводов»), под AHT —
+    # строка-повтор со своим весом и без потомков.
+    assert lines[3] == (
+        "  - HOLD: влияет и на «AHT», вес среди влияющих 33 %; "
+        "значения и состав — в другом месте этого списка"
+    )
+    assert lines[5].startswith("  - HOLD: вес среди влияющих 100 %")
+
+
+def test_metric_card_children_truncation_is_reported():
+    date = "2026-04-13"
+    root = make_metric("Корень", date=date, fact=1.0, plan=2.0, children=[
+        make_metric(f"Ребёнок {i}", date=date, fact=1.0, influent_percent=10, children=[
+            make_metric(f"Внук {i}.{j}", date=date, fact=1.0, influent_percent=10)
+            for j in range(10)])
+        for i in range(10)])
+    out = _call(build_tools(_ctx(make_dataset_obj([root]))), "metric_card",
+                metric="Корень", depth=3)
+    assert len(_composition(out)) == 60
+    assert "Показаны 60 из 110 строк состава" in out
+
+
+def test_metric_card_children_shared_subtrees_stay_linear():
+    """Все поддеревья общие: путей W⁴, а строк — линейно по рёбрам."""
+    date, w = "2026-04-13", 12
+    l3 = lambda: [make_metric(f"П{k}", date=date, fact=1.0, influent_percent=1)  # noqa: E731
+                  for k in range(w)]
+    l2 = lambda: [make_metric(f"В{j}", date=date, fact=1.0, influent_percent=1,  # noqa: E731
+                              children=l3()) for j in range(w)]
+    root = make_metric("Корень", date=date, fact=1.0, plan=2.0, children=[
+        make_metric(f"Р{i}", date=date, fact=1.0, influent_percent=1, children=l2())
+        for i in range(w)])
+    out = _call(build_tools(_ctx(make_dataset_obj([root]))), "metric_card",
+                metric="Корень", depth=4)
+    # 12 детей; внуки раскрыты один раз (12) + повторы под остальными 11 детьми
+    # (132); правнуки — один раз (12) + повторы под остальными 11 внуками (132).
+    assert "из 300 строк состава" in out
+
+
+def test_metric_card_children_cycle_does_not_loop():
+    date = "2026-04-13"
+    loop = make_metric("А", date=date, fact=1.0, plan=2.0, children=[
+        make_metric("Б", date=date, fact=1.0, children=[make_metric("А", date=date, fact=1.0)])])
+    out = _call(build_tools(_ctx(make_dataset_obj([loop]))), "metric_card", metric="А", depth=4)
+    assert [ln.split(":")[0] for ln in _composition(out)] == ["- Б"]

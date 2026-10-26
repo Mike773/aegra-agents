@@ -34,6 +34,16 @@ def _verdict(value: Any) -> str:
     return "" if not value else str(value).replace("_", " ")
 
 
+def _ex_rr(r: dict[str, Any]) -> list[str]:
+    """Выполнение плана и run rate — только если они пришли у показателя."""
+    bits = []
+    if r.get("ex") is not None:
+        bits.append(f"выполнение плана {_num(r['ex'], 1)} %")
+    if r.get("rr") is not None:
+        bits.append(f"run rate {_num(r['rr'])}")
+    return bits
+
+
 def _catalog_names(ctx: Any) -> list[str]:
     return [
         r["name"]
@@ -153,10 +163,7 @@ def _periods(
         bits = [f"факт {_num(r['fact'])}"]
         if r["plan"] is not None:
             bits.append(f"план {_num(r['plan'])}")
-        if r["ex"] is not None:
-            bits.append(f"выполнение плана {_num(r['ex'], 1)} %")
-        if r["rr"] is not None:
-            bits.append(f"run rate {_num(r['rr'])}")
+        bits.extend(_ex_rr(r))
         if r["plan_status"]:
             piece = _verdict(r["plan_status"])
             if r["plan_dev_pct"] is not None:
@@ -181,6 +188,7 @@ def _element_line(r: dict[str, Any]) -> str:
     bits = [f"факт {_num(r['fact'])}"]
     if r["plan"] is not None:
         bits.append(f"план {_num(r['plan'])}")
+    bits.extend(_ex_rr(r))
     if r["plan_status"]:
         piece = _verdict(r["plan_status"])
         if r["plan_dev_pct"] is not None:
@@ -236,9 +244,24 @@ def _children(ctx: Any, person: str, name: str, depth: int) -> list[str]:
     )
     if not rows:
         return []
-    lines = ["СОСТАВ (влияющие показатели; у них своя дата последнего значения)"]
+    lines = [
+        "СОСТАВ (влияющие показатели деревом: каждый — под своим родителем; у них "
+        "своя дата последнего значения)"
+    ]
     for r in rows:
         indent = "  " * (int(r["child_depth"] or 1) - 1)
+        if r["is_repeat"]:
+            # Общий для нескольких родителей показатель раскрыт один раз — здесь
+            # только его вес в этом месте дерева.
+            weight = (
+                f", вес среди влияющих {_num(r['share_pct'], 0)} %"
+                if r["share_pct"] is not None else ""
+            )
+            lines.append(
+                f"{indent}- {r['child']}: влияет и на «{r['parent']}»{weight}; "
+                "значения и состав — в другом месте этого списка"
+            )
+            continue
         bits = []
         # Доля среди сиблингов и исходный вес влияния — разные числа: у
         # единственного ребёнка доля 100 %, а вес из данных может быть иным.
@@ -253,6 +276,7 @@ def _children(ctx: Any, person: str, name: str, depth: int) -> list[str]:
             if r["plan"] is not None:
                 piece += f" при плане {_num(r['plan'])}"
             bits.append(piece)
+            bits.extend(_ex_rr(r))
         if r["plan_status"]:
             piece = _verdict(r["plan_status"])
             if r["plan_dev_pct"] is not None:
@@ -263,6 +287,12 @@ def _children(ctx: Any, person: str, name: str, depth: int) -> list[str]:
         if r["date"]:
             bits.append(f"на {r['date']}")
         lines.append(f"{indent}- {r['child']}: " + (", ".join(bits) or "данных нет"))
+    total = int(rows[0]["n_total"] or len(rows))
+    if total > len(rows):
+        lines.append(
+            f"Показаны {len(rows)} из {total} строк состава. Остальное — metric_card "
+            "по нужному влияющему показателю."
+        )
     return lines
 
 
@@ -315,6 +345,7 @@ def _single_element(ctx: Any, person: str, name: str, element: str) -> str:
         bits = [f"факт {_num(r['fact'])}"]
         if r["plan"] is not None:
             bits.append(f"план {_num(r['plan'])}")
+        bits.extend(_ex_rr(r))
         if r["plan_status"]:
             piece = _verdict(r["plan_status"])
             bits.append(piece)
