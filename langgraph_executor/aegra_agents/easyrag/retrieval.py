@@ -209,8 +209,9 @@ async def _sections_of_pages(
         _row_to_retrieved(sec, 1.0 - pages.get(sec.page_id, 0.0), "alias")
         for sec in rows
     ]
-    # Сильнее совпал алиас — выше секции его страницы.
-    out.sort(key=lambda r: (-r.similarity, r.slug, r.anchor))
+    # Сильнее совпал алиас — выше секции его страницы. Сортировка устойчивая:
+    # внутри страницы секции остаются в порядке ord из запроса, как на странице.
+    out.sort(key=lambda r: -r.similarity)
     return out
 
 

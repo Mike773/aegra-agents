@@ -187,3 +187,99 @@ def test_metric_card_without_metric_answers_with_hint():
     out = _call(build_tools(_ctx()), "metric_card")
     assert "Не указано название показателя" in out
     assert "Продажи" in out
+
+
+def _ex_rr_ctx():
+    return _ctx(make_dataset_obj([
+        make_metric("Продажи", date="2026-04-13", fact=70.0, plan=100.0, ex=70.0, rr=84.5,
+                    children=[
+                        make_metric("Звонки", date="2026-04-13", fact=30.0, plan=50.0,
+                                    ex=60.0, rr=36.2, influent_percent=60),
+                        make_metric("Визиты", date="2026-04-13", fact=5.0, plan=8.0,
+                                    influent_percent=40),
+                    ]),
+        make_metric("Продажи", date="2026-04-13", fact=40.0, plan=50.0, ex=80.0, rr=48.0,
+                    element="Кредиты"),
+    ]))
+
+
+def test_metric_card_shows_ex_and_rr_everywhere_they_exist():
+    """Выполнение плана и run rate — в ряду, в разрезах и в составе, если пришли."""
+    tools = build_tools(_ex_rr_ctx())
+    card = _call(tools, "metric_card", metric="Продажи")
+    periods = card.split("ЗНАЧЕНИЯ ПО ПЕРИОДАМ")[1].split("\n\n")[0]
+    assert "выполнение плана 70 %" in periods and "run rate 84.5" in periods
+    elements = card.split("РАЗРЕЗЫ")[1].split("\n\n")[0]
+    assert "выполнение плана 80 %" in elements and "run rate 48" in elements
+    children = card.split("СОСТАВ")[1]
+    calls = next(line for line in children.splitlines() if "Звонки" in line)
+    assert "выполнение плана 60 %" in calls and "run rate 36.2" in calls
+    # Нет ex/rr у показателя — нет и упоминания.
+    visits = next(line for line in children.splitlines() if "Визиты" in line)
+    assert "выполнение плана" not in visits and "run rate" not in visits
+
+
+def test_metric_card_element_series_shows_ex_and_rr():
+    out = _call(build_tools(_ex_rr_ctx()), "metric_card", metric="Продажи", element="Кредиты")
+    assert "РАЗРЕЗ «Кредиты»" in out
+    assert "выполнение плана 80 %" in out and "run rate 48" in out
+
+
+class _FakeEasyRag:
+    def __init__(self, snippets):
+        self.snippets = snippets
+
+    async def ainvoke(self, state):
+        return {"snippets": self.snippets}
+
+
+def _search(ctx, query):
+    tool = next(t for t in build_tools(ctx) if t.name == "search_wiki")
+    return asyncio.run(tool.ainvoke({"query": query}))
+
+
+def _snippet(page, section, body, *, source="vector", page_id=None, sid=None):
+    return {
+        "section_id": sid or f"{page}-{section}",
+        "page_id": page_id or page,
+        "slug": page.lower(),
+        "anchor": section.lower(),
+        "page_title": page,
+        "section_title": section,
+        "body_md": body,
+        "similarity": 0.9,
+        "source": source,
+    }
+
+
+def test_search_wiki_returns_full_section_text_grouped_by_page():
+    long_body = "AHT — среднее время обработки обращения. " * 30  # ~1200 символов
+    snippets = [
+        _snippet("AHT", "Определение", long_body, source="alias"),
+        _snippet("AHT", "Норматив", "Норматив — не более 300 секунд.\n- для чатов 240", source="alias"),
+        _snippet("Колл-центр", "Обзор", "См. [[AHT|время обработки]] и [[SL]].", source="graph"),
+    ]
+    ctx = _ctx(easyrag_graph=_FakeEasyRag(snippets), easyrag_enabled=True)
+    out = _search(ctx, "что такое AHT")
+    assert long_body.strip() in out  # текст не обрезан до превью
+    assert "Норматив — не более 300 секунд.\n- для чатов 240" in out
+    assert out.count("### AHT") == 1
+    assert "### Колл-центр (связанная страница)" in out
+    assert "См. время обработки и SL." in out  # разметка [[…]] снята
+    assert len(ctx.wiki_snippets) == 3
+
+
+def test_search_wiki_lists_sections_beyond_budget():
+    big = "x" * 2500
+    snippets = [_snippet(f"Стр{i}", "Обзор", big) for i in range(5)]
+    ctx = _ctx(easyrag_graph=_FakeEasyRag(snippets), easyrag_enabled=True)
+    out = _search(ctx, "q")
+    assert "Не поместились в ответ" in out and "Стр4 / Обзор" in out
+    assert len(out) < 9000
+
+
+def test_search_wiki_empty_pages_are_not_reported_as_content():
+    ctx = _ctx(easyrag_graph=_FakeEasyRag([_snippet("Пусто", "Обзор", "  ")]),
+               easyrag_enabled=True)
+    out = _search(ctx, "q")
+    assert "пустые страницы" in out
